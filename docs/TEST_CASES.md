@@ -1,4 +1,4 @@
-# Test Cases (`antigravity-native-addon-host` v0.1.0)
+# Test Cases (`antigravity-native-addon-host` v1.0.0)
 
 | Case ID | Module / Boundary | Scenario & Expected Result | Test File |
 | --- | --- | --- | --- |

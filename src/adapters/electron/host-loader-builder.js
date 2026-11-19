@@ -65,7 +65,7 @@ function collectExecutableAddons(paths, { checkFilesExist = true } = {}) {
   });
 }
 
-function buildRendererHostApiBootstrapSource({ hostVersion = '0.1.0', hostProfileId = 'default' } = {}) {
+function buildRendererHostApiBootstrapSource({ hostVersion = '1.0.0', hostProfileId = 'default' } = {}) {
   return `(function(){
   if (window.__ADDON_HOST_API__) return;
   const NO_TRANSLATE_SELECTOR = '[data-addon-host-owner], [translate="no"], [data-agy-no-translate="true"]';
@@ -182,7 +182,7 @@ function buildRendererHostApiBootstrapSource({ hostVersion = '0.1.0', hostProfil
 })();`;
 }
 
-function buildHostLoaderScriptSource(paths, profile, { hostVersion = '0.1.0' } = {}) {
+function buildHostLoaderScriptSource(paths, profile, { hostVersion = '1.0.0' } = {}) {
   assertValidHostProfile(profile);
   const bootstrapApiSrc = buildRendererHostApiBootstrapSource({
     hostVersion,
