@@ -846,8 +846,16 @@ function attachWebContents(contents, electronApp) {
     // R7-F4: Separate pending navigation (abort in-flight passes) from committed navigation (reset credentials).
     // If a navigation is aborted (did-fail-load / download), the existing live document keeps its valid
     // credentials and avoids re-bootstrapping over non-configurable properties.
-    contents.on('did-start-navigation', (_evt, _url, isInPlace, isMainFrame) => {
-      if (isInPlace === true || isMainFrame === false) return;
+    contents.on('did-start-navigation', (evt, _url, isInPlace, isMainFrame) => {
+      const inPlace =
+        evt && typeof evt === 'object' && typeof evt.isSameDocument === 'boolean'
+          ? evt.isSameDocument
+          : isInPlace;
+      const mainFrame =
+        evt && typeof evt === 'object' && typeof evt.isMainFrame === 'boolean'
+          ? evt.isMainFrame
+          : isMainFrame;
+      if (inPlace === true || mainFrame === false) return;
       pendingNav = true;
       navGeneration++;
     });

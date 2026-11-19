@@ -107,7 +107,8 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
   }
 
   function unregisterAddonManifestFromCtx(ctx, pluginId) {
-    if (!pluginId || String(pluginId).startsWith('-') || !/^[a-z0-9][a-z0-9._-]{1,63}$/.test(pluginId)) {
+    // R9-F1: CLI checks only flag-like arg syntax; pluginId domain invariant belongs to AddonStorePort
+    if (!pluginId || String(pluginId).startsWith('-')) {
       return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
     }
     return store.unregisterManifest(ctx, pluginId, { hostVersion });

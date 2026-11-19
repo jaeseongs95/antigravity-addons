@@ -504,6 +504,32 @@ test('TC-014 (R5-F1, R6-F1, NB1-NB3): SOLID ISP/DIP segregated ports, non-Electr
     assert.equal(res.ok, true);
     assert.equal(res.removed, true);
     assert.equal(fs.existsSync(nonCanon), false);
+
+    // R9-F1: Direct port unregisterManifest must block path traversal, forbidden IDs, and empty IDs
+    // without touching files outside ADDONS_DIR (e.g. ../../config/config.json)
+    const nestedAddonsDir = path.join(dir, 'host', 'addons.d');
+    const externalConfigDir = path.join(dir, 'config');
+    const externalConfigFile = path.join(externalConfigDir, 'config.json');
+    const externalOutsideFile = path.join(dir, 'host', 'outside.json');
+    fs.mkdirSync(nestedAddonsDir, { recursive: true });
+    fs.mkdirSync(externalConfigDir, { recursive: true });
+    fs.writeFileSync(externalConfigFile, '{"protected":true}', 'utf8');
+    fs.writeFileSync(externalOutsideFile, '{"protected":true}', 'utf8');
+    const portCtx = {
+      activeProfile: ANTIGRAVITY_HOST_PROFILE,
+      paths: {
+        ADDONS_DIR: nestedAddonsDir,
+        ADDONS_LOCK_PATH: path.join(dir, 'host', 'addons.lock'),
+        LOADER_SCRIPT_PATH: path.join(dir, 'host', 'loader.js'),
+      },
+    };
+    for (const badId of ['../../config/config', '../outside', 'constructor', '']) {
+      const badRes = store.unregisterManifest(portCtx, badId);
+      assert.equal(badRes.ok, false, `R9-F1: unregisterManifest must reject "${badId}"`);
+      assert.equal(badRes.reason, 'ERR_INVALID_PLUGIN_ID');
+    }
+    assert.equal(fs.existsSync(externalConfigFile), true, 'R9-F1: external config.json must remain untouched');
+    assert.equal(fs.existsSync(externalOutsideFile), true, 'R9-F1: external outside.json must remain untouched');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

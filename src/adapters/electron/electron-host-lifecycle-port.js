@@ -8,6 +8,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const pkg = require('../../../package.json');
 const {
   assertValidElectronHostProfile,
   assertValidResolvedElectronPaths,
@@ -81,7 +82,7 @@ function createElectronHostLifecyclePort() {
       };
     },
 
-    installHost(ctx, { replaceLegacy = false, hostVersion = '1.0.1' } = {}) {
+    installHost(ctx, { replaceLegacy = false, hostVersion = pkg.version } = {}) {
       const { activeProfile, paths } = ctx;
       const asar = installAsarAddonHost(
         { ...paths, ALLOW_REPLACE_LEGACY: Boolean(replaceLegacy) },

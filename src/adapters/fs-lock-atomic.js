@@ -18,12 +18,16 @@ function acquireExclusiveLockDetailed(lockPath, staleMs = 60000) {
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     if (fs.existsSync(lockPath)) {
-      const st = fs.lstatSync(lockPath);
-      if (st.isFile()) {
-        if (Date.now() - st.mtimeMs <= effectiveStaleMs) {
-          return { ok: false, code: 'LOCK_BUSY', error: 'Active legacy file lock present' };
+      try {
+        const st = fs.lstatSync(lockPath);
+        if (st.isFile()) {
+          if (Date.now() - st.mtimeMs <= effectiveStaleMs) {
+            return { ok: false, code: 'LOCK_BUSY', error: 'Active legacy file lock present' };
+          }
+          fs.unlinkSync(lockPath);
         }
-        fs.unlinkSync(lockPath);
+      } catch (staleErr) {
+        if (!staleErr || staleErr.code !== 'ENOENT') throw staleErr;
       }
     }
     const sentinelPath = `${lockPath}.target`;

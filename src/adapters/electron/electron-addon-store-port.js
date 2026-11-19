@@ -8,7 +8,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { validateAddonManifest } = require('../../core/manifest-validator');
+const pkg = require('../../../package.json');
+const { validateAddonManifest, validatePluginId } = require('../../core/manifest-validator');
 const { detectSlotConflicts } = require('../../core/slot-registry');
 const {
   acquireExclusiveLockDetailed,
@@ -21,9 +22,16 @@ const {
   buildHostLoaderScriptSource,
 } = require('./host-loader-builder');
 
+function isDirectChildOfDir(dirPath, candidatePath) {
+  const resolvedDir = path.resolve(dirPath);
+  const resolvedCandidate = path.resolve(candidatePath);
+  const rel = path.relative(resolvedDir, resolvedCandidate);
+  return Boolean(rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(path.sep));
+}
+
 function createElectronAddonStorePort() {
   return Object.freeze({
-    planAddons(ctx, { checkFilesExist = true, hostVersion = '1.0.1' } = {}) {
+    planAddons(ctx, { checkFilesExist = true, hostVersion = pkg.version } = {}) {
       const { activeProfile, paths } = ctx;
       return collectExecutableAddons(paths, {
         checkFilesExist,
@@ -32,7 +40,7 @@ function createElectronAddonStorePort() {
       });
     },
 
-    validateManifest(ctx, manifest, { checkFilesExist = false, hostVersion = '1.0.1' } = {}) {
+    validateManifest(ctx, manifest, { checkFilesExist = false, hostVersion = pkg.version } = {}) {
       const { activeProfile, paths } = ctx;
       return validateAddonManifest(manifest, {
         pluginsRootDir: paths.PLUGINS_ROOT_DIR,
@@ -42,7 +50,7 @@ function createElectronAddonStorePort() {
       });
     },
 
-    registerManifest(ctx, manifest, { hostVersion = '1.0.1' } = {}) {
+    registerManifest(ctx, manifest, { hostVersion = pkg.version } = {}) {
       const { activeProfile, paths } = ctx;
       const lockRes = acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000);
       if (!lockRes.ok) {
@@ -92,21 +100,35 @@ function createElectronAddonStorePort() {
       }
     },
 
-    unregisterManifest(ctx, pluginId, { hostVersion = '1.0.1' } = {}) {
+    unregisterManifest(ctx, pluginId, { hostVersion = pkg.version } = {}) {
       const { activeProfile, paths } = ctx;
+      // R9-F1: Enforce domain pluginId invariant & ADDONS_DIR path confinement inside the port itself
+      const idCheck = validatePluginId(pluginId);
+      if (!idCheck.ok) {
+        return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID', detail: idCheck.reason };
+      }
+      const targetPath = path.join(paths.ADDONS_DIR, `${pluginId}.json`);
+      if (!isDirectChildOfDir(paths.ADDONS_DIR, targetPath)) {
+        return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
+      }
+
       const lockRes = acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000);
       if (!lockRes.ok) {
         return { ok: false, reason: lockRes.code, error: lockRes.error };
       }
       try {
-        const targetPath = path.join(paths.ADDONS_DIR, `${pluginId}.json`);
         const toDelete = new Set();
         if (fs.existsSync(targetPath)) {
           toDelete.add(path.resolve(targetPath));
         }
-        // NB1: Also remove any non-canonical JSON files in addons.d/ that declare the same pluginId
+        // NB1: Also remove any non-canonical JSON files strictly inside addons.d/ that declare the same pluginId
         for (const entry of loadRawManifestsFromDir(paths.ADDONS_DIR)) {
-          if (entry.manifest && entry.manifest.pluginId === pluginId && fs.existsSync(entry.source)) {
+          if (
+            entry.manifest &&
+            entry.manifest.pluginId === pluginId &&
+            isDirectChildOfDir(paths.ADDONS_DIR, entry.source) &&
+            fs.existsSync(entry.source)
+          ) {
             toDelete.add(path.resolve(entry.source));
           }
         }

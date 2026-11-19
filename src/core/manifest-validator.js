@@ -17,6 +17,17 @@ const ajv = new Ajv({ allErrors: true, strict: false });
 const validateSchema = ajv.compile(MANIFEST_SCHEMA);
 
 const FORBIDDEN_IDS = new Set(['__proto__', 'constructor', 'prototype']);
+const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
+
+function validatePluginId(pluginId) {
+  if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+    return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
+  }
+  if (FORBIDDEN_IDS.has(pluginId)) {
+    return { ok: false, reason: 'ERR_FORBIDDEN_PLUGIN_ID' };
+  }
+  return { ok: true, pluginId };
+}
 
 const SEMVER_RE =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
@@ -268,6 +279,8 @@ module.exports = {
   SCHEMA_PATH,
   MANIFEST_SCHEMA,
   FORBIDDEN_IDS,
+  PLUGIN_ID_RE,
+  validatePluginId,
   compareSemver,
   resolveConfinedScriptPath,
   validateAddonManifest,

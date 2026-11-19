@@ -37,6 +37,15 @@ function validateElectronHostProfile(profile) {
   if (/[\r\n\u2028\u2029]/.test(profile.patchMarker)) {
     return { ok: false, reason: 'INVALID_PATCH_MARKER_NEWLINE' };
   }
+  if (!profile.mainAnchorReplacement.includes(profile.patchMarker)) {
+    return { ok: false, reason: 'INVALID_MAIN_ANCHOR_REPLACEMENT_MISSING_MARKER' };
+  }
+  if (
+    profile.isolatedWorldId !== undefined &&
+    (!Number.isInteger(profile.isolatedWorldId) || profile.isolatedWorldId <= 0 || profile.isolatedWorldId >= 100000)
+  ) {
+    return { ok: false, reason: 'INVALID_ISOLATED_WORLD_ID' };
+  }
   if (profile.legacyPatchMarkers !== undefined && !Array.isArray(profile.legacyPatchMarkers)) {
     return { ok: false, reason: 'INVALID_LEGACY_PATCH_MARKERS' };
   }
