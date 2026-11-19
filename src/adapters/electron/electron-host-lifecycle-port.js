@@ -17,6 +17,8 @@ const {
   acquireExclusiveLockDetailed,
   releaseExclusiveLock,
   writeAtomicSync,
+} = require('../fs-lock-atomic');
+const {
   isAsarHostInstalled,
   installAsarAddonHost,
   rollbackAsarAddonHost,

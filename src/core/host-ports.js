@@ -18,6 +18,7 @@ const HOST_LIFECYCLE_PORT_METHODS = Object.freeze([
 
 const ADDON_STORE_PORT_METHODS = Object.freeze([
   'planAddons',
+  'validateManifest',
   'registerManifest',
   'unregisterManifest',
 ]);

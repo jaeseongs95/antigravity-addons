@@ -106,6 +106,28 @@ test('TC-003 (F4 & NB3): invalid schema, duplicate slotId in manifest, compatibi
     ).reason,
     'ERR_INCOMPATIBLE_HOST_VERSION'
   );
+  // R7-NB4: explicit hostVersion: null fails closed; prerelease minHostVersion is accepted by schema & compared
+  assert.equal(
+    validateAddonManifest(
+      { ...KO_TRANSLATOR_MANIFEST, compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '1.0.0' } },
+      { hostProfileId: 'antigravity-desktop', hostVersion: null }
+    ).reason,
+    'ERR_INCOMPATIBLE_HOST_VERSION'
+  );
+  assert.equal(
+    validateAddonManifest(
+      { ...KO_TRANSLATOR_MANIFEST, compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '1.0.1-alpha.1' } },
+      { hostProfileId: 'antigravity-desktop', hostVersion: '1.0.1-beta.1' }
+    ).ok,
+    true
+  );
+  assert.equal(
+    validateAddonManifest(
+      { ...KO_TRANSLATOR_MANIFEST, compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '1.0.1-01' } },
+      { hostProfileId: 'antigravity-desktop', hostVersion: '1.0.1' }
+    ).reason,
+    'ERR_MANIFEST_SCHEMA_INVALID'
+  );
   // F4: document-transform MUST explicitly specify scope: "native-host-only"
   assert.equal(
     validateAddonManifest({

@@ -206,6 +206,23 @@ test(
               })()\`)
             );
 
+            // Real BrowserWindow reload after disabling e2e-second (R7-NB1):
+            // Fresh document must bootstrap cleanly and mount ONLY e2e-first
+            await new Promise((resolve) => {
+              win.webContents.once('did-finish-load', resolve);
+              win.webContents.reload();
+            });
+            const afterReload = await waitFor(() =>
+              win.webContents.executeJavaScript(\`(() => {
+                const s1 = document.querySelector('[data-addon-host-owner="e2e-first"][data-addon-host-slot="e2e-first.bar"]');
+                if (!s1) return null;
+                return {
+                  firstRemainingEls: document.querySelectorAll('[data-addon-host-owner="e2e-first"]').length,
+                  secondRemainingEls: document.querySelectorAll('[data-addon-host-owner="e2e-second"]').length,
+                };
+              })()\`)
+            );
+
             // Navigate to disallowed origin (about:blank) -> must inject 0 addon elements
             await win.loadURL('about:blank');
             await new Promise((r) => setTimeout(r, 150));
@@ -217,6 +234,7 @@ test(
               electronVersion: process.versions.electron,
               initial,
               afterDisable,
+              afterReload,
               mainHookDisposed: app.__e2eHookState ? app.__e2eHookState.disposed : -1,
               blankCount,
             };
@@ -259,6 +277,8 @@ test(
       assert.equal(res.afterDisable.disposedAttr, 'yes');
       assert.equal(res.afterDisable.secondRemainingEls, 0);
       assert.equal(res.afterDisable.firstRemainingEls, 2);
+      assert.equal(res.afterReload.firstRemainingEls, 2);
+      assert.equal(res.afterReload.secondRemainingEls, 0);
       assert.equal(res.mainHookDisposed, 1);
       assert.equal(res.blankCount, 0);
     } finally {

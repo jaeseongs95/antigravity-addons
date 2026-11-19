@@ -14,7 +14,7 @@ const {
   acquireExclusiveLockDetailed,
   releaseExclusiveLock,
   writeAtomicSync,
-} = require('./asar-patcher');
+} = require('../fs-lock-atomic');
 const {
   loadRawManifestsFromDir,
   collectExecutableAddons,
@@ -32,23 +32,33 @@ function createElectronAddonStorePort() {
       });
     },
 
-    registerManifest(ctx, manifest, { hostVersion = '1.0.1' } = {}) {
+    validateManifest(ctx, manifest, { checkFilesExist = false, hostVersion = '1.0.1' } = {}) {
       const { activeProfile, paths } = ctx;
-      const check = validateAddonManifest(manifest, {
+      return validateAddonManifest(manifest, {
         pluginsRootDir: paths.PLUGINS_ROOT_DIR,
-        checkFilesExist: true,
+        checkFilesExist,
         hostProfileId: activeProfile.id,
         hostVersion,
       });
-      if (!check.ok) {
-        return { ok: false, reason: check.reason, errors: check.errors };
-      }
+    },
 
+    registerManifest(ctx, manifest, { hostVersion = '1.0.1' } = {}) {
+      const { activeProfile, paths } = ctx;
       const lockRes = acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000);
       if (!lockRes.ok) {
         return { ok: false, reason: lockRes.code, error: lockRes.error };
       }
       try {
+        // NB5: Validate manifest + check slot conflicts + write atomically under the single exclusive lock
+        const check = validateAddonManifest(manifest, {
+          pluginsRootDir: paths.PLUGINS_ROOT_DIR,
+          checkFilesExist: true,
+          hostProfileId: activeProfile.id,
+          hostVersion,
+        });
+        if (!check.ok) {
+          return { ok: false, reason: check.reason, errors: check.errors };
+        }
         const existingEntries = loadRawManifestsFromDir(paths.ADDONS_DIR);
         const existingOther = existingEntries
           .map((e) => e.manifest)

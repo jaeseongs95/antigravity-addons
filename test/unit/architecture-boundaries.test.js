@@ -55,6 +55,9 @@ test('TC-001c (R6-F1): src/cli/ has zero Electron, ASAR, Antigravity, lockfile, 
     /asarExists/i,
     /origBackup/i,
     /LOADER_SCRIPT_PATH/,
+    /PLUGINS_ROOT_DIR/,
+    /ctx\.paths/,
+    /manifest-validator/,
     /proper-lockfile/,
     /\.\.\/adapters\//,
     /\.\.\/profiles\//,
@@ -65,5 +68,13 @@ test('TC-001c (R6-F1): src/cli/ has zero Electron, ASAR, Antigravity, lockfile, 
     for (const re of forbidden) {
       assert.equal(re.test(src), false, `Concrete/runtime literal ${re} leaked into CLI module ${rel}`);
     }
+  }
+});
+
+test('TC-001d (R7-F2): electron-addon-store-port has zero coupling to asar-patcher, @electron/asar, or acorn', () => {
+  const storePath = path.join(REPO_ROOT, 'src', 'adapters', 'electron', 'electron-addon-store-port.js');
+  const src = fs.readFileSync(storePath, 'utf8');
+  for (const re of [/asar-patcher/, /@electron\/asar/, /require\(['"]acorn['"]\)/]) {
+    assert.equal(re.test(src), false, `AddonStorePort must not couple to ${re}`);
   }
 });

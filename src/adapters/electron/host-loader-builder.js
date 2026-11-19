@@ -112,8 +112,13 @@ function buildRendererHostApiBootstrapSource({
     : Function.prototype.call.bind(Object.prototype.hasOwnProperty);
   const _ArrayIsArray = Array.isArray;
   const _String = String;
+  const _StrToLower = String.prototype.toLowerCase;
   const _Error = Error;
   const _ReflectApply = Reflect.apply;
+
+  function toLowerSafe(v) {
+    return _ReflectApply(_StrToLower, _String(v || ''), []);
+  }
 
   // R5-F3: Null-prototype property descriptors prevent Object.prototype.get/set pollution
   // from causing TypeError: Invalid property descriptor during defineProperty calls.
@@ -126,19 +131,32 @@ function buildRendererHostApiBootstrapSource({
     return d;
   }
 
-  function assertHostOriginAndAuth(hostSecret, nonce, expectedOrigin, errCode) {
+  // R7-F3: Strictly compare protocol + host (+ non-'null' origin) so custom schemes
+  // (e.g. app://internal.local/main, vscode-file://...) work accurately while 'null' origin frames fail closed.
+  function assertHostOriginAndAuth(hostSecret, nonce, expectedLoc, errCode) {
     if (hostSecret !== __HOST_SECRET__ || typeof nonce !== 'string' || nonce !== __INSTANCE_NONCE__) {
       throw new _Error(errCode);
     }
-    if (
-      expectedOrigin &&
-      typeof window === 'object' &&
-      window &&
-      window.location &&
-      typeof window.location.origin === 'string' &&
-      window.location.origin !== expectedOrigin
-    ) {
-      throw new _Error('ERR_FORBIDDEN_ORIGIN_MISMATCH');
+    if (expectedLoc && typeof expectedLoc === 'object') {
+      if (typeof window !== 'object' || !window || !window.location) {
+        throw new _Error('ERR_FORBIDDEN_ORIGIN_MISMATCH');
+      }
+      const liveProto = toLowerSafe(window.location.protocol);
+      const liveHost = toLowerSafe(window.location.host);
+      const liveOrigin = typeof window.location.origin === 'string' ? toLowerSafe(window.location.origin) : '';
+      if (liveProto !== expectedLoc.protocol || liveHost !== expectedLoc.host) {
+        throw new _Error('ERR_FORBIDDEN_ORIGIN_MISMATCH');
+      }
+      if (expectedLoc.origin) {
+        if (!liveOrigin || liveOrigin === 'null' || liveOrigin !== expectedLoc.origin) {
+          throw new _Error('ERR_FORBIDDEN_ORIGIN_MISMATCH');
+        }
+      } else if (liveOrigin && liveOrigin !== 'null') {
+        const expectedAuthOrigin = expectedLoc.host ? expectedLoc.protocol + '//' + expectedLoc.host : '';
+        if (!expectedAuthOrigin || liveOrigin !== expectedAuthOrigin) {
+          throw new _Error('ERR_FORBIDDEN_ORIGIN_MISMATCH');
+        }
+      }
     }
   }
 
@@ -603,6 +621,7 @@ function attachWebContents(contents, electronApp) {
   let hostSecret = '';
   let instanceNonce = '';
   let navGeneration = 0;
+  let pendingNav = false;
   const injectedIds = new Set();
   const failedIds = new Set();
   let injectQueue = Promise.resolve();
@@ -621,11 +640,15 @@ function attachWebContents(contents, electronApp) {
     instanceNonce = '';
   };
 
-  const getAllowedOrigin = () => {
+  const getAllowedLocation = () => {
     const liveUrl = typeof contents.getURL === 'function' ? contents.getURL() : '';
     if (!isAllowedRendererUrl(liveUrl)) return null;
     try {
-      return new URL(liveUrl).origin;
+      const u = new URL(liveUrl);
+      const protocol = String(u.protocol || '').toLowerCase();
+      const host = String(u.host || '').toLowerCase();
+      const origin = u.origin && u.origin !== 'null' ? u.origin.toLowerCase() : null;
+      return { protocol, host, origin };
     } catch (_e) {
       return null;
     }
@@ -637,9 +660,10 @@ function attachWebContents(contents, electronApp) {
         // F4: Re-sync mainHooks on every reload/navigation so disabled hooks dispose even in a single-window session
         syncMainHooks(electronApp);
 
+        if (pendingNav) return;
         const passGen = navGeneration;
-        const initialOrigin = getAllowedOrigin();
-        if (!initialOrigin) return;
+        const initialLoc = getAllowedLocation();
+        if (!initialLoc) return;
 
         const verifyLiveNonce = async (nonceToCheck) => {
           if (!nonceToCheck) return false;
@@ -656,18 +680,19 @@ function attachWebContents(contents, electronApp) {
         };
 
         const verifyDocumentStillTrusted = async () => {
-          if (navGeneration !== passGen) return null;
-          const liveOrigin = getAllowedOrigin();
-          if (!liveOrigin) return null;
+          if (pendingNav || navGeneration !== passGen) return null;
+          const liveLoc = getAllowedLocation();
+          if (!liveLoc) return null;
           const liveOk = await verifyLiveNonce(instanceNonce);
-          if (!liveOk || navGeneration !== passGen) return null;
-          return liveOrigin;
+          if (!liveOk || pendingNav || navGeneration !== passGen) return null;
+          return liveLoc;
         };
 
         // F3: Non-spoofable nonce challenge verifies that THIS host bootstrapped the current document
-        const verifiedLive = navGeneration === passGen && (await verifyLiveNonce(instanceNonce));
+        const verifiedLive = !pendingNav && navGeneration === passGen && (await verifyLiveNonce(instanceNonce));
 
         if (!verifiedLive) {
+          if (pendingNav || navGeneration !== passGen) return;
           resetCredentials();
           const nextSecret = crypto.randomBytes(24).toString('hex');
           const nextNonce = crypto.randomBytes(24).toString('hex');
@@ -676,10 +701,11 @@ function attachWebContents(contents, electronApp) {
             '; const __INSTANCE_NONCE__ = ' + JSON.stringify(nextNonce) + ';\\n' +
             RENDERER_API_BOOTSTRAP_TEMPLATE + '\\n})();';
           await execInRenderer(bootstrapWithSecrets);
-          const postOrigin = getAllowedOrigin();
+          const postLoc = getAllowedLocation();
           const postVerify =
+            !pendingNav &&
             navGeneration === passGen &&
-            Boolean(postOrigin) &&
+            Boolean(postLoc) &&
             (await verifyLiveNonce(nextNonce));
           if (!postVerify) {
             recordDiag('error', 'ERR_HOST_BOOTSTRAP_SPOOFED', 'Renderer API verification failed after bootstrap');
@@ -697,10 +723,10 @@ function attachWebContents(contents, electronApp) {
         if (verifiedLive && injectedIds.size > 0) {
           for (const prevId of Array.from(injectedIds)) {
             if (!activeRendererIds.has(prevId)) {
-              const trustedOrigin = await verifyDocumentStillTrusted();
-              if (!trustedOrigin) {
+              const trustedLoc = await verifyDocumentStillTrusted();
+              if (!trustedLoc) {
                 recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', 'Document origin/nonce changed before dispose');
-                resetCredentials();
+                if (!pendingNav && navGeneration === passGen) resetCredentials();
                 return;
               }
               try {
@@ -708,12 +734,13 @@ function attachWebContents(contents, electronApp) {
                   'typeof window.__ADDON_HOST_DISPOSE__ === "function" && window.__ADDON_HOST_DISPOSE__(' +
                     JSON.stringify(hostSecret) + ',' +
                     JSON.stringify(instanceNonce) + ',' +
-                    JSON.stringify(trustedOrigin) + ',' +
+                    JSON.stringify(trustedLoc) + ',' +
                     JSON.stringify(prevId) + ');'
                 );
               } catch (err) {
                 recordDiag('error', 'ERR_RENDERER_DISPOSE', prevId + ': ' + (err && err.message));
               }
+              if (pendingNav || navGeneration !== passGen) return;
               injectedIds.delete(prevId);
             }
           }
@@ -724,15 +751,16 @@ function attachWebContents(contents, electronApp) {
         );
         // Deterministic sequential execution preserves loadOrder while isolating each plugin's faults
         for (const addon of addons) {
+          if (pendingNav || navGeneration !== passGen) break;
           let capToken = '';
           try {
             // NB2: Read renderer script BEFORE registering capability token so missing/unreadable files leak no token
             const rawCode = fs.readFileSync(addon.rendererPath, 'utf8');
-            // R5-F2 & R6-F4: Re-verify navigation generation, URL origin, and instanceNonce before REGISTER_CAP
-            const trustedOriginBeforeReg = await verifyDocumentStillTrusted();
-            if (!trustedOriginBeforeReg) {
+            // R5-F2 & R6-F4: Re-verify navigation generation, URL authority, and instanceNonce before REGISTER_CAP
+            const trustedLocBeforeReg = await verifyDocumentStillTrusted();
+            if (!trustedLocBeforeReg) {
               recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': origin/nonce/nav changed before cap registration');
-              resetCredentials();
+              if (!pendingNav && navGeneration === passGen) resetCredentials();
               break;
             }
             capToken = crypto.randomBytes(24).toString('hex');
@@ -746,23 +774,25 @@ function attachWebContents(contents, electronApp) {
               'window.__ADDON_HOST_REGISTER_CAP__(' +
                 JSON.stringify(hostSecret) + ',' +
                 JSON.stringify(instanceNonce) + ',' +
-                JSON.stringify(trustedOriginBeforeReg) + ',' +
+                JSON.stringify(trustedLocBeforeReg) + ',' +
                 JSON.stringify(capToken) + ',' +
                 JSON.stringify(spec) + ');'
             );
             // R5-F2 & R6-F4: Re-verify before executing plugin wrapper
-            const trustedOriginBeforeExec = await verifyDocumentStillTrusted();
-            if (!trustedOriginBeforeExec) {
-              try {
-                await execInRenderer(
-                  'typeof window.__ADDON_HOST_REVOKE_CAP__ === "function" && window.__ADDON_HOST_REVOKE_CAP__(' +
-                    JSON.stringify(hostSecret) + ',' +
-                    JSON.stringify(instanceNonce) + ',' +
-                    JSON.stringify(capToken) + ');'
-                );
-              } catch (_revErr) {}
+            const trustedLocBeforeExec = await verifyDocumentStillTrusted();
+            if (!trustedLocBeforeExec) {
+              if (hostSecret && instanceNonce) {
+                try {
+                  await execInRenderer(
+                    'typeof window.__ADDON_HOST_REVOKE_CAP__ === "function" && window.__ADDON_HOST_REVOKE_CAP__(' +
+                      JSON.stringify(hostSecret) + ',' +
+                      JSON.stringify(instanceNonce) + ',' +
+                      JSON.stringify(capToken) + ');'
+                  );
+                } catch (_revErr) {}
+              }
               recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': origin/nonce/nav changed before execution');
-              resetCredentials();
+              if (!pendingNav && navGeneration === passGen) resetCredentials();
               break;
             }
             // R6-F4: On partial execution throw, immediately dispose partial slots/styles before rethrowing
@@ -779,11 +809,18 @@ function attachWebContents(contents, electronApp) {
               '  }\\n' +
               '})();';
             await execInRenderer(wrapped);
+            // R7-F4: Guard against navigation firing while execInRenderer(wrapped) was in flight
+            if (pendingNav || navGeneration !== passGen) {
+              recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': navigation occurred during execution');
+              break;
+            }
             injectedIds.add(addon.pluginId);
           } catch (err) {
-            // R6-F4: Isolate failing plugin (prevent duplicate re-execution) and purge any unconsumed capToken
-            failedIds.add(addon.pluginId);
-            if (capToken && hostSecret && instanceNonce) {
+            // R6-F4 & R7-F4: Isolate failing plugin only for the current navigation generation, and purge unconsumed capToken
+            if (!pendingNav && navGeneration === passGen) {
+              failedIds.add(addon.pluginId);
+            }
+            if (capToken && hostSecret && instanceNonce && !pendingNav && navGeneration === passGen) {
               try {
                 await execInRenderer(
                   'typeof window.__ADDON_HOST_REVOKE_CAP__ === "function" && window.__ADDON_HOST_REVOKE_CAP__(' +
@@ -804,18 +841,34 @@ function attachWebContents(contents, electronApp) {
   };
 
   if (typeof contents.on === 'function') {
-    // R6-F4: Immediately invalidate host credentials on any main-frame navigation
+    // R7-F4: Separate pending navigation (abort in-flight passes) from committed navigation (reset credentials).
+    // If a navigation is aborted (did-fail-load / download), the existing live document keeps its valid
+    // credentials and avoids re-bootstrapping over non-configurable properties.
     contents.on('did-start-navigation', (_evt, _url, isInPlace, isMainFrame) => {
       if (isInPlace === true || isMainFrame === false) return;
+      pendingNav = true;
       navGeneration++;
-      resetCredentials();
     });
     contents.on('did-navigate', () => {
+      pendingNav = false;
       navGeneration++;
       resetCredentials();
     });
-    contents.on('dom-ready', () => { void enqueueInject(); });
-    contents.on('did-finish-load', () => { void enqueueInject(); });
+    contents.on('did-fail-load', (_evt, _errorCode, _errorDescription, _validatedURL, isMainFrame) => {
+      if (isMainFrame === false) return;
+      pendingNav = false;
+    });
+    contents.on('did-stop-loading', () => {
+      pendingNav = false;
+    });
+    contents.on('dom-ready', () => {
+      pendingNav = false;
+      void enqueueInject();
+    });
+    contents.on('did-finish-load', () => {
+      pendingNav = false;
+      void enqueueInject();
+    });
   }
 }
 

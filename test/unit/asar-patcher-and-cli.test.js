@@ -354,13 +354,19 @@ test('TC-014 (R5-F1, R6-F1, NB1-NB3): SOLID ISP/DIP segregated ports, non-Electr
     path.join(path.dirname(customAddonsDir), 'addon-host-addons.lock')
   );
 
-  // 3) CLI factory works with segregated non-Electron ports returning ZERO fake ASAR fields (R6-F1)
+  // 3) CLI factory & runCli work with segregated non-Electron ports returning an opaque ctx
+  //    (zero ctx.paths, zero activeProfile, zero fake ASAR fields, resolveContext called strictly ONCE per runCli)
+  let resolveContextCalls = 0;
+  let validateManifestCalls = 0;
   const fakeNonElectronLifecycle = {
     validateProfile: (p) => {
       if (!p || !p.id) throw new Error('BAD_PROFILE');
       return p;
     },
-    resolveContext: (p) => ({ activeProfile: p, paths: { PLUGINS_ROOT_DIR: '/virtual/plugins' } }),
+    resolveContext: (p) => {
+      resolveContextCalls++;
+      return { hostProfileId: p.id, opaqueToken: `ctx-${resolveContextCalls}` };
+    },
     getHostStatus: () => ({ installed: true, engine: 'virtual-host' }),
     diagnoseHost: () => ({ healthy: false, reason: 'VIRTUAL_UNHEALTHY' }),
     installHost: () => ({ ok: true, status: 'INSTALLED' }),
@@ -368,8 +374,20 @@ test('TC-014 (R5-F1, R6-F1, NB1-NB3): SOLID ISP/DIP segregated ports, non-Electr
   };
   const fakeNonElectronStore = {
     planAddons: () => ({ active: [], disabled: [], rejected: [], slots: {} }),
-    registerManifest: () => ({ ok: true, pluginId: 'mock-plugin' }),
-    unregisterManifest: () => ({ ok: true, removed: true, pluginId: 'mock-plugin' }),
+    validateManifest: (ctx, manifest) => {
+      validateManifestCalls++;
+      assert.equal(ctx.hostProfileId, 'minimal-non-electron');
+      assert.equal(ctx.paths, undefined, 'R7-F1: non-Electron opaque ctx must not require ctx.paths');
+      return { ok: Boolean(manifest && manifest.pluginId), pluginId: manifest && manifest.pluginId };
+    },
+    registerManifest: (ctx, manifest) => {
+      assert.equal(ctx.paths, undefined);
+      return { ok: true, pluginId: manifest.pluginId };
+    },
+    unregisterManifest: (ctx, pluginId) => {
+      assert.equal(ctx.paths, undefined);
+      return { ok: true, removed: true, pluginId };
+    },
   };
   const cli = createCliApp({
     hostLifecycle: fakeNonElectronLifecycle,
@@ -385,6 +403,55 @@ test('TC-014 (R5-F1, R6-F1, NB1-NB3): SOLID ISP/DIP segregated ports, non-Electr
   const doctor = cli.buildDoctorReport();
   assert.equal(doctor.healthy, false);
   assert.equal(doctor.host.reason, 'VIRTUAL_UNHEALTHY');
+
+  // R7-F1: Exercise runCli end-to-end against non-Electron ports and assert single resolveContext per command
+  const tmpCliDir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-runcli-non-electron-'));
+  const origWrite = process.stdout.write;
+  process.stdout.write = () => true;
+  try {
+    const sampleManifestFile = path.join(tmpCliDir, 'sample.json');
+    fs.writeFileSync(sampleManifestFile, JSON.stringify({ pluginId: 'mock-plugin' }), 'utf8');
+
+    resolveContextCalls = 0;
+    const rStatus = await cli.runCli(['--status']);
+    assert.equal(resolveContextCalls, 1, 'R7-F1: runCli --status must resolveContext strictly once');
+    assert.equal(rStatus.hostProfileId, 'minimal-non-electron');
+
+    resolveContextCalls = 0;
+    const rDoctor = await cli.runCli(['--doctor']);
+    assert.equal(resolveContextCalls, 1, 'R7-F1: runCli --doctor must resolveContext strictly once');
+    assert.equal(rDoctor.healthy, false);
+
+    resolveContextCalls = 0;
+    validateManifestCalls = 0;
+    const rValidate = await cli.runCli(['--validate', sampleManifestFile]);
+    assert.equal(resolveContextCalls, 1, 'R7-F1: runCli --validate must resolveContext strictly once');
+    assert.equal(validateManifestCalls, 1, 'R7-F1: runCli --validate must delegate to AddonStorePort.validateManifest');
+    assert.equal(rValidate.ok, true);
+
+    resolveContextCalls = 0;
+    const rRegister = await cli.runCli(['--register', sampleManifestFile]);
+    assert.equal(resolveContextCalls, 1, 'R7-F1: runCli --register must resolveContext strictly once');
+    assert.equal(rRegister.ok, true);
+
+    resolveContextCalls = 0;
+    const rUnregister = await cli.runCli(['--unregister', 'mock-plugin']);
+    assert.equal(resolveContextCalls, 1, 'R7-F1: runCli --unregister must resolveContext strictly once');
+    assert.equal(rUnregister.ok, true);
+
+    resolveContextCalls = 0;
+    const rInstall = await cli.runCli(['--install']);
+    assert.equal(resolveContextCalls, 1, 'R7-F1: runCli --install must resolveContext strictly once');
+    assert.equal(rInstall.status, 'INSTALLED');
+
+    resolveContextCalls = 0;
+    const rRollback = await cli.runCli(['--rollback']);
+    assert.equal(resolveContextCalls, 1, 'R7-F1: runCli --rollback must resolveContext strictly once');
+    assert.equal(rRollback.status, 'ROLLED_BACK');
+  } finally {
+    process.stdout.write = origWrite;
+    fs.rmSync(tmpCliDir, { recursive: true, force: true });
+  }
 
   // NB3: --register/-flag and --unregister/-flag fail closed
   assert.equal(cli.registerAddonManifestFile('--bad-flag').reason, 'ERR_MANIFEST_FILE_NOT_FOUND');

@@ -336,7 +336,10 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
         return el;
       },
     };
-    const rendererWindow = { document: fakeDocument };
+    const rendererWindow = {
+      document: fakeDocument,
+      location: { protocol: 'http:', host: '127.0.0.1:4173', origin: 'http://127.0.0.1:4173' },
+    };
     const rendererCtx = vm.createContext({
       window: rendererWindow,
       document: fakeDocument,
@@ -344,10 +347,16 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
 
     let currentUrl = 'http://127.0.0.1:4173/home';
     const listeners = {};
+    let isolatedWorldCalls = 0;
     const fakeContents = {
       getType: () => 'window',
       getURL: () => currentUrl,
       on(evt, fn) { listeners[evt] = fn; },
+      async executeJavaScriptInIsolatedWorld(worldId, sources) {
+        assert.equal(worldId, 999);
+        isolatedWorldCalls++;
+        return vm.runInContext(sources[0].code, rendererCtx);
+      },
       async executeJavaScript(code) {
         return vm.runInContext(code, rendererCtx);
       },
@@ -360,6 +369,7 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
     listeners['dom-ready']();
     listeners['did-finish-load']();
     await new Promise((r) => setTimeout(r, 40));
+    assert.ok(isolatedWorldCalls > 0, 'R7-NB1: must prefer executeJavaScriptInIsolatedWorld when available');
 
     assert.equal(rendererWindow.__EVIL_RAN__, undefined, 'F1: traversal pluginId must never execute');
     assert.deepEqual(Array.from(rendererWindow.__ORDER__), ['first', 'second'], 'F3: must execute once in strict loadOrder');
@@ -518,10 +528,13 @@ test('TC-015 (R5-F2): mid-loop async executeJavaScript redirect to disallowed or
     const mod = { exports: {} };
     vm.runInNewContext(loaderSrc, { require, module: mod, exports: mod.exports, URL, console });
 
-    const rendererWindow = {};
+    const rendererWindow = {
+      location: { protocol: 'http:', host: '127.0.0.1:4173', origin: 'http://127.0.0.1:4173' },
+    };
     const rendererCtx = vm.createContext({ window: rendererWindow, document: {} });
     let currentUrl = 'http://127.0.0.1:4173/app';
     let registerCapCount = 0;
+    let isolatedCalls = 0;
     const listeners = {};
 
     mod.exports.attachWebContents(
@@ -529,7 +542,10 @@ test('TC-015 (R5-F2): mid-loop async executeJavaScript redirect to disallowed or
         getType: () => 'window',
         getURL: () => currentUrl,
         on(evt, fn) { listeners[evt] = fn; },
-        async executeJavaScript(code) {
+        async executeJavaScriptInIsolatedWorld(worldId, sources) {
+          assert.equal(worldId, 999);
+          isolatedCalls++;
+          const code = sources[0].code;
           if (code.startsWith('window.__ADDON_HOST_REGISTER_CAP__(')) {
             registerCapCount++;
           }
@@ -550,6 +566,7 @@ test('TC-015 (R5-F2): mid-loop async executeJavaScript redirect to disallowed or
     listeners['dom-ready']();
     await new Promise((r) => setTimeout(r, 40));
 
+    assert.ok(isolatedCalls > 0);
     assert.equal(rendererWindow.__P1_RAN__, true, 'p-one executes while origin is allowed');
     assert.equal(rendererWindow.__P2_RAN__, undefined, 'R5-F2: p-two must NOT execute after redirect');
     assert.equal(registerCapCount, 1, 'R5-F2: REGISTER_CAP must NOT be called for p-two after redirect');
@@ -557,6 +574,142 @@ test('TC-015 (R5-F2): mid-loop async executeJavaScript redirect to disallowed or
       mod.exports.getDiagnostics().some((d) => d.code === 'ERR_RENDERER_TOCTOU_ABORT'),
       'R5-F2: diagnostics must record ERR_RENDERER_TOCTOU_ABORT'
     );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TC-017 (R7-F3 & R7-F4): custom protocol origin comparison, null-origin frame rejection, mid-exec navGeneration guard, and aborted-navigation non-deadlock', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-r7-f3-f4-'));
+  try {
+    const pluginsRoot = path.join(dir, 'plugins');
+    const addonsDir = path.join(dir, 'addons.d');
+    const configPath = path.join(dir, 'config.json');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'custom-p1'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'custom-p1', 'entry.js'),
+      'window.__CUSTOM_RUNS__ = (window.__CUSTOM_RUNS__ || 0) + 1;\naddonHost.onDispose(() => { window.__CUSTOM_DISPOSED__ = true; });\n',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, 'custom-p1.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'custom-p1',
+        displayName: 'Custom P1',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'custom-p1' },
+        loadOrder: 10,
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+
+    const customProfile = {
+      ...ANTIGRAVITY_HOST_PROFILE,
+      id: 'custom-scheme-host',
+      allowedUrlProtocols: ['app:'],
+      allowedUrlHosts: ['internal.local'],
+    };
+    const loaderSrc = buildHostLoaderScriptSource(
+      { ADDONS_DIR: addonsDir, PLUGINS_ROOT_DIR: pluginsRoot, CONFIG_JSON_PATH: configPath },
+      customProfile
+    );
+    const mod = { exports: {} };
+    vm.runInNewContext(loaderSrc, { require, module: mod, exports: mod.exports, URL, console });
+
+    // 1) R7-F3: Custom scheme app://internal.local/main works with privileged origin AND unprivileged 'null' origin
+    for (const rendererOrigin of ['app://internal.local', 'null']) {
+      const win = {
+        location: { protocol: 'app:', host: 'internal.local', origin: rendererOrigin },
+      };
+      const ctx = vm.createContext({ window: win, document: {} });
+      const listeners = {};
+      mod.exports.attachWebContents(
+        {
+          getType: () => 'window',
+          getURL: () => 'app://internal.local/main',
+          on(evt, fn) { listeners[evt] = fn; },
+          async executeJavaScriptInIsolatedWorld(_id, sources) {
+            return vm.runInContext(sources[0].code, ctx);
+          },
+        },
+        {}
+      );
+      listeners['dom-ready']();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(win.__CUSTOM_RUNS__, 1, `R7-F3: custom scheme must succeed with renderer origin="${rendererOrigin}"`);
+
+      // 2) R7-F4: Aborted navigation (did-start-navigation -> did-fail-load on SAME live document)
+      //    must NOT wipe credentials or deadlock with TypeError: Cannot redefine property
+      listeners['did-start-navigation']({}, 'app://internal.local/other', false, true);
+      listeners['did-fail-load']({}, -3, 'ERR_ABORTED', 'app://internal.local/other', true);
+      fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'custom-p1': { enabled: false } } }), 'utf8');
+      listeners['did-finish-load']();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(win.__CUSTOM_DISPOSED__, true, 'R7-F4: aborted navigation must keep live document credentials intact for dispose');
+      fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+    }
+
+    // 3) R7-F3: 'null'-origin frame (about:blank) or wrong custom host (app://evil.local) must fail closed
+    for (const badLoc of [
+      { protocol: 'about:', host: '', origin: 'null' },
+      { protocol: 'app:', host: 'evil.local', origin: 'app://evil.local' },
+    ]) {
+      const win = { location: badLoc };
+      const ctx = vm.createContext({ window: win, document: {} });
+      const listeners = {};
+      mod.exports.attachWebContents(
+        {
+          getType: () => 'window',
+          getURL: () => 'app://internal.local/main',
+          on(evt, fn) { listeners[evt] = fn; },
+          async executeJavaScriptInIsolatedWorld(_id, sources) {
+            return vm.runInContext(sources[0].code, ctx);
+          },
+        },
+        {}
+      );
+      listeners['dom-ready']();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(win.__CUSTOM_RUNS__, undefined, `R7-F3: mismatched location ${JSON.stringify(badLoc)} must NOT execute`);
+    }
+
+    // 4) R7-F4: did-start-navigation firing DURING execInRenderer(wrapped) must NOT pollute injectedIds
+    let docWin = { location: { protocol: 'app:', host: 'internal.local', origin: 'app://internal.local' } };
+    let docCtx = vm.createContext({ window: docWin, document: {} });
+    const navListeners = {};
+    let firstExec = true;
+    mod.exports.attachWebContents(
+      {
+        getType: () => 'window',
+        getURL: () => 'app://internal.local/main',
+        on(evt, fn) { navListeners[evt] = fn; },
+        async executeJavaScriptInIsolatedWorld(_id, sources) {
+          const code = sources[0].code;
+          const res = vm.runInContext(code, docCtx);
+          if (firstExec && code.includes('__CUSTOM_RUNS__')) {
+            firstExec = false;
+            // Fire did-start-navigation BEFORE execInRenderer resolves!
+            navListeners['did-start-navigation']({}, 'app://internal.local/next', false, true);
+          }
+          return res;
+        },
+      },
+      {}
+    );
+    navListeners['dom-ready']();
+    await new Promise((r) => setTimeout(r, 30));
+    // Now commit navigation to a brand-new document (did-navigate) and verify custom-p1 runs cleanly (not polluted in injectedIds)
+    docWin = { location: { protocol: 'app:', host: 'internal.local', origin: 'app://internal.local' } };
+    docCtx = vm.createContext({ window: docWin, document: {} });
+    navListeners['did-navigate']();
+    navListeners['dom-ready']();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(docWin.__CUSTOM_RUNS__, 1, 'R7-F4: new committed document must inject custom-p1 cleanly');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

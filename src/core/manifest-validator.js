@@ -125,7 +125,7 @@ function resolveConfinedScriptPath(relScript, pluginDir, { pluginsRootDir = null
 
 function validateAddonManifest(
   manifest,
-  { pluginsRootDir = null, checkFilesExist = false, hostProfileId = null, hostVersion = null } = {}
+  { pluginsRootDir = null, checkFilesExist = false, hostProfileId = null, hostVersion = undefined } = {}
 ) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
     return { ok: false, reason: 'INVALID_MANIFEST_OBJECT', errors: ['Manifest must be a JSON object'] };
@@ -149,14 +149,23 @@ function validateAddonManifest(
         errors: [`Requires hostProfile "${manifest.compatibility.hostProfile}", current is "${hostProfileId}"`],
       };
     }
-    if (hostVersion && manifest.compatibility.minHostVersion) {
-      const cmp = compareSemver(hostVersion, manifest.compatibility.minHostVersion);
-      if (cmp === null || cmp < 0) {
+    if (manifest.compatibility.minHostVersion) {
+      if (!parseSemver(manifest.compatibility.minHostVersion)) {
         return {
           ok: false,
-          reason: 'ERR_INCOMPATIBLE_HOST_VERSION',
-          errors: [`Requires hostVersion >= ${manifest.compatibility.minHostVersion}, current is ${hostVersion}`],
+          reason: 'ERR_MANIFEST_SCHEMA_INVALID',
+          errors: [`Invalid SemVer 2.0.0 minHostVersion: ${manifest.compatibility.minHostVersion}`],
         };
+      }
+      if (hostVersion !== undefined) {
+        const cmp = compareSemver(hostVersion, manifest.compatibility.minHostVersion);
+        if (cmp === null || cmp < 0) {
+          return {
+            ok: false,
+            reason: 'ERR_INCOMPATIBLE_HOST_VERSION',
+            errors: [`Requires hostVersion >= ${manifest.compatibility.minHostVersion}, current is ${hostVersion}`],
+          };
+        }
       }
     }
   }
