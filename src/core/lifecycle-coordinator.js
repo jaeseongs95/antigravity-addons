@@ -2,9 +2,10 @@
 
 /**
  * Vendor-neutral Addon Lifecycle Coordinator.
+ * - Validates every manifest against Ajv schema, confinement, and host compatibility.
  * - Deterministic sorting by (loadOrder ASC, pluginId ASC).
  * - Filters out disabled plugins via injected `isEnabled(pluginId)` read-only gate.
- * - Isolates invalid manifests and slot conflicts without blocking healthy peers.
+ * - Isolates invalid manifests and slot/namespace/IPC conflicts without blocking healthy peers.
  */
 
 const { validateAddonManifest } = require('./manifest-validator');
@@ -12,7 +13,13 @@ const { createSlotRegistry } = require('./slot-registry');
 
 function planAddonExecution(
   rawManifestEntries,
-  { pluginsRootDir = null, checkFilesExist = false, isEnabled = () => true } = {}
+  {
+    pluginsRootDir = null,
+    checkFilesExist = false,
+    hostProfileId = null,
+    hostVersion = null,
+    isEnabled = () => true,
+  } = {}
 ) {
   const validItems = [];
   const rejected = [];
@@ -20,7 +27,12 @@ function planAddonExecution(
   for (const item of rawManifestEntries || []) {
     const source = item && item.source ? item.source : 'unknown';
     const raw = item && item.manifest !== undefined ? item.manifest : item;
-    const check = validateAddonManifest(raw, { pluginsRootDir, checkFilesExist });
+    const check = validateAddonManifest(raw, {
+      pluginsRootDir,
+      checkFilesExist,
+      hostProfileId,
+      hostVersion,
+    });
     if (!check.ok) {
       rejected.push({
         source,

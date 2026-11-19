@@ -34,6 +34,20 @@ node ./bin/addon-host.js --install
 node ./bin/addon-host.js --rollback
 ```
 
+## Custom `HostProfile` & Plugin Usage
+
+```js
+// Renderer plugin entry (receives its own immutable scoped `addonHost` handle):
+const container = addonHost.mountSlot('my-plugin.root');
+addonHost.injectStyle('base', '.my-widget { font-size: 12px; }');
+addonHost.onDispose(() => { /* cleanup */ });
+```
+
+```bash
+# Use a custom non-Antigravity HostProfile via CLI:
+node ./bin/addon-host.js --profile ./path/to/custom-profile.js --status
+```
+
 ## Documentation
 
 - [AddonManifest.v1 Common Contract Specification](./docs/SPEC_ADDON_MANIFEST_V1.md)

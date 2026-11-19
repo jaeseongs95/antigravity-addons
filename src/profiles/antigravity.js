@@ -2,8 +2,8 @@
 
 /**
  * Antigravity Desktop Default HostProfile.
- * All Antigravity-specific paths, Electron ASAR anchors, and legacy direct-patch markers
- * live exclusively in this file.
+ * All Antigravity-specific paths, Electron ASAR anchors, URL allowlists,
+ * legacy no-translate attributes, and legacy direct-patch markers live exclusively here.
  */
 
 const os = require('node:os');
@@ -22,6 +22,7 @@ function resolveAntigravityPaths(env = process.env) {
   const pluginsRoot = path.join(home, '.gemini', 'config', 'plugins');
   const configJsonPath = path.join(home, '.gemini', 'config', 'config.json');
   const addonsDir = path.join(agyDir, 'addons.d');
+  const addonsLockPath = path.join(agyDir, 'addon-host-addons.lock');
   const loaderScriptPath = path.join(agyDir, 'addon-host-loader.js');
   const asarLockPath = path.join(agyDir, 'addon-host-asar.lock');
 
@@ -42,6 +43,7 @@ function resolveAntigravityPaths(env = process.env) {
     PLUGINS_ROOT_DIR: pluginsRoot,
     CONFIG_JSON_PATH: configJsonPath,
     ADDONS_DIR: addonsDir,
+    ADDONS_LOCK_PATH: addonsLockPath,
     LOADER_SCRIPT_PATH: loaderScriptPath,
     ASAR_PATH: asarPath,
     ASAR_LOCK_PATH: asarLockPath,
@@ -55,6 +57,9 @@ const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
   mainEntry: 'dist/main.js',
   mainAnchorTarget: MAIN_ANCHOR_TARGET,
   mainAnchorReplacement: MAIN_ANCHOR_REPLACEMENT,
+  extraNoTranslateAttributes: Object.freeze(['data-agy-no-translate']),
+  allowedUrlProtocols: Object.freeze(['http:', 'https:']),
+  allowedUrlHosts: Object.freeze(['127.0.0.1', 'localhost', '::1', '[::1]']),
   legacyPatchMarkers: Object.freeze([
     'AGY_STATUSBAR',
     'AGY_MCP',

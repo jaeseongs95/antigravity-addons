@@ -3,7 +3,7 @@
 /**
  * Electron ASAR Single-Owner Patcher, Integrity Verifier, Rollback, and Legacy Conflict Doctor.
  *
- * Uses official `@electron/asar` and `proper-lockfile` (zero hand-rolled ASAR header parsing or lockfiles).
+ * Uses official `@electron/asar` and `proper-lockfile`.
  * Strictly vendor-independent: all paths, anchors, and markers come from the injected `HostProfile`.
  */
 
@@ -22,8 +22,17 @@ function sha256Hex(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
-function acquireExclusiveLock(lockPath, staleMs = 60000) {
-  if (!lockPath) return null;
+function sanitizeVersionForFilename(rawVersion) {
+  const cleaned = String(rawVersion || '')
+    .replace(/\.\./g, '')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/^[._-]+/, '')
+    .slice(0, 64);
+  return cleaned || 'unknown';
+}
+
+function acquireExclusiveLockDetailed(lockPath, staleMs = 60000) {
+  if (!lockPath) return { ok: false, code: 'ERR_LOCK_PATH_MISSING', error: 'Missing lockPath' };
   const effectiveStaleMs = Math.max(Number(staleMs) || 60000, 2000);
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
@@ -31,7 +40,7 @@ function acquireExclusiveLock(lockPath, staleMs = 60000) {
       const st = fs.lstatSync(lockPath);
       if (st.isFile()) {
         if (Date.now() - st.mtimeMs <= effectiveStaleMs) {
-          return null;
+          return { ok: false, code: 'LOCK_BUSY', error: 'Active legacy file lock present' };
         }
         fs.unlinkSync(lockPath);
       }
@@ -47,10 +56,23 @@ function acquireExclusiveLock(lockPath, staleMs = 60000) {
     });
     const token = crypto.randomBytes(12).toString('hex');
     activeLockReleases.set(token, { lockPath, release });
-    return token;
-  } catch (_err) {
-    return null;
+    return { ok: true, token };
+  } catch (err) {
+    if (err && err.code === 'ELOCKED') {
+      return { ok: false, code: 'LOCK_BUSY', error: err.message };
+    }
+    return {
+      ok: false,
+      code: 'ERR_LOCK_FS_ERROR',
+      fsCode: err && err.code ? err.code : 'UNKNOWN',
+      error: err && err.message ? err.message : String(err),
+    };
   }
+}
+
+function acquireExclusiveLock(lockPath, staleMs = 60000) {
+  const res = acquireExclusiveLockDetailed(lockPath, staleMs);
+  return res.ok ? res.token : null;
 }
 
 function releaseExclusiveLock(lockPath, token) {
@@ -128,7 +150,7 @@ function readAsarArchive(asarPath) {
   if (pkgBuf) {
     try {
       const pkg = JSON.parse(pkgBuf.toString('utf8'));
-      if (pkg && typeof pkg.version === 'string') appVersion = pkg.version;
+      if (pkg && typeof pkg.version === 'string') appVersion = sanitizeVersionForFilename(pkg.version);
     } catch (_err) {}
   }
 
@@ -178,6 +200,65 @@ function isAsarHostInstalled(asarPath, profile) {
   }
 }
 
+/**
+ * Finds line indices whose entire content is a top-level standalone `//` comment line
+ * outside any string literal, template literal, or block comment (CRLF & LF safe).
+ */
+function findSafeStandaloneCommentLines(sourceText) {
+  const safeLineIndices = new Set();
+  let state = 'code'; // code | single | double | template | blockComment
+  let lineIdx = 0;
+  let lineStart = 0;
+  const len = sourceText.length;
+
+  for (let i = 0; i < len; i++) {
+    const ch = sourceText[i];
+    const next = i + 1 < len ? sourceText[i + 1] : '';
+
+    if (ch === '\n') {
+      lineIdx++;
+      lineStart = i + 1;
+      continue;
+    }
+
+    if (state === 'code') {
+      if (ch === "'") {
+        state = 'single';
+      } else if (ch === '"') {
+        state = 'double';
+      } else if (ch === '`') {
+        state = 'template';
+      } else if (ch === '/' && next === '*') {
+        state = 'blockComment';
+        i++;
+      } else if (ch === '/' && next === '/') {
+        const prefix = sourceText.slice(lineStart, i);
+        if (/^[ \t]*$/.test(prefix)) {
+          safeLineIndices.add(lineIdx);
+        }
+        // Skip to end of line
+        while (i + 1 < len && sourceText[i + 1] !== '\n') i++;
+      }
+    } else if (state === 'single') {
+      if (ch === '\\') i++;
+      else if (ch === "'") state = 'code';
+    } else if (state === 'double') {
+      if (ch === '\\') i++;
+      else if (ch === '"') state = 'code';
+    } else if (state === 'template') {
+      if (ch === '\\') i++;
+      else if (ch === '`') state = 'code';
+    } else if (state === 'blockComment') {
+      if (ch === '*' && next === '/') {
+        state = 'code';
+        i++;
+      }
+    }
+  }
+
+  return safeLineIndices;
+}
+
 function transformExactSize(origBuf, targetStr, replacementStr, marker) {
   const origText = origBuf.toString('utf8');
   const firstIdx = origText.indexOf(targetStr);
@@ -188,15 +269,19 @@ function transformExactSize(origBuf, targetStr, replacementStr, marker) {
   let delta = Buffer.byteLength(nextText, 'utf8') - origBuf.length;
 
   if (delta > 0) {
-    const lines = nextText.split('\n');
+    const safeLines = findSafeStandaloneCommentLines(nextText);
+    const rawLines = nextText.split('\n');
     const kept = [];
-    for (const line of lines) {
+    for (let idx = 0; idx < rawLines.length; idx++) {
+      const line = rawLines[idx];
+      const trimmedCr = line.endsWith('\r') ? line.slice(0, -1) : line;
       if (
         delta > 0 &&
-        (!marker || !line.includes(marker)) &&
-        /^\s*\/\/\s*[A-Za-z0-9#*\-_=.,:;()[\]{}@/'" ]*$/.test(line)
+        safeLines.has(idx) &&
+        (!marker || !trimmedCr.includes(marker)) &&
+        /^\s*\/\/\s*[A-Za-z0-9#*\-_=.,:;()[\]{}@/'" ]*$/.test(trimmedCr)
       ) {
-        delta -= Buffer.byteLength(line, 'utf8') + 1;
+        delta -= Buffer.byteLength(line, 'utf8') + (idx < rawLines.length - 1 ? 1 : 0);
         continue;
       }
       kept.push(line);
@@ -273,8 +358,8 @@ function installAsarAddonHost(paths, profile) {
   if (!fs.existsSync(paths.ASAR_PATH)) {
     return { status: 'SKIPPED_NO_ASAR' };
   }
-  const lockTok = acquireExclusiveLock(paths.ASAR_LOCK_PATH, 60000);
-  if (!lockTok) return { status: 'LOCK_BUSY' };
+  const lockRes = acquireExclusiveLockDetailed(paths.ASAR_LOCK_PATH, 60000);
+  if (!lockRes.ok) return { status: lockRes.code, error: lockRes.error, fsCode: lockRes.fsCode };
 
   try {
     let archive = readAsarArchive(paths.ASAR_PATH);
@@ -290,7 +375,8 @@ function installAsarAddonHost(paths, profile) {
       };
     }
 
-    const backupPath = `${paths.ASAR_PATH}.v${archive.appVersion}.orig`;
+    const safeVer = sanitizeVersionForFilename(archive.appVersion);
+    const backupPath = `${paths.ASAR_PATH}.v${safeVer}.orig`;
     const metaPath = `${backupPath}.json`;
 
     if (fs.existsSync(backupPath)) {
@@ -326,12 +412,21 @@ function installAsarAddonHost(paths, profile) {
     const mainBuf = archive.fileMap.get(profile.mainEntry);
     if (!mainBuf) return { status: 'ERR_MAIN_MISSING', appVersion: archive.appVersion };
 
-    const patchedMainBuf = transformExactSize(
-      mainBuf,
-      profile.mainAnchorTarget,
-      profile.mainAnchorReplacement,
-      profile.patchMarker
-    );
+    let patchedMainBuf;
+    try {
+      patchedMainBuf = transformExactSize(
+        mainBuf,
+        profile.mainAnchorTarget,
+        profile.mainAnchorReplacement,
+        profile.patchMarker
+      );
+    } catch (err) {
+      return {
+        status: 'ERR_EXACT_SIZE_TRANSFORM_FAILED',
+        error: err && err.message ? err.message : String(err),
+        appVersion: archive.appVersion,
+      };
+    }
     archive.fileMap.set(profile.mainEntry, patchedMainBuf);
 
     const chunks = [];
@@ -345,7 +440,10 @@ function installAsarAddonHost(paths, profile) {
         const data = archive.fileMap.get(relPath);
         node.size = data.length;
         node.offset = currentOffset.toString();
-        node.integrity = computeIntegrity(data);
+        // Preserve header layout: recompute integrity ONLY when the original archive carried integrity metadata.
+        if (node.integrity) {
+          node.integrity = computeIntegrity(data);
+        }
         chunks.push(data);
         currentOffset += BigInt(data.length);
       }
@@ -378,7 +476,7 @@ function installAsarAddonHost(paths, profile) {
       sha256: sha256Hex(outBuf),
     };
   } finally {
-    releaseExclusiveLock(paths.ASAR_LOCK_PATH, lockTok);
+    releaseExclusiveLock(paths.ASAR_LOCK_PATH, lockRes.token);
   }
 }
 
@@ -388,24 +486,25 @@ function rollbackAsarAddonHost(paths, profile, { force = false } = {}) {
     return { status: 'SKIPPED_NO_ASAR' };
   }
 
-  const remainingManifests = fs.existsSync(paths.ADDONS_DIR)
-    ? fs.readdirSync(paths.ADDONS_DIR).filter((f) => f.endsWith('.json'))
-    : [];
-  if (remainingManifests.length > 0 && !force) {
-    return {
-      status: 'BLOCKED_REGISTERED_ADDONS_REMAIN',
-      remainingManifests,
-    };
-  }
-
-  const lockTok = acquireExclusiveLock(paths.ASAR_LOCK_PATH, 60000);
-  if (!lockTok) return { status: 'LOCK_BUSY' };
+  const lockRes = acquireExclusiveLockDetailed(paths.ASAR_LOCK_PATH, 60000);
+  if (!lockRes.ok) return { status: lockRes.code, error: lockRes.error, fsCode: lockRes.fsCode };
   try {
+    const remainingManifests = fs.existsSync(paths.ADDONS_DIR)
+      ? fs.readdirSync(paths.ADDONS_DIR).filter((f) => f.endsWith('.json'))
+      : [];
+    if (remainingManifests.length > 0 && !force) {
+      return {
+        status: 'BLOCKED_REGISTERED_ADDONS_REMAIN',
+        remainingManifests,
+      };
+    }
+
     const cur = readAsarArchive(paths.ASAR_PATH);
     if (isPureUnpatchedArchive(cur, profile)) {
       return { status: 'ALREADY_UNPATCHED', appVersion: cur.appVersion };
     }
-    const backupPath = `${paths.ASAR_PATH}.v${cur.appVersion}.orig`;
+    const safeVer = sanitizeVersionForFilename(cur.appVersion);
+    const backupPath = `${paths.ASAR_PATH}.v${safeVer}.orig`;
     const metaPath = `${backupPath}.json`;
     const check = verifyOrigBackupStrict(backupPath, metaPath, cur.appVersion, profile, {
       backfillMeta: false,
@@ -421,7 +520,7 @@ function rollbackAsarAddonHost(paths, profile, { force = false } = {}) {
       sha256: check.sha256,
     };
   } finally {
-    releaseExclusiveLock(paths.ASAR_LOCK_PATH, lockTok);
+    releaseExclusiveLock(paths.ASAR_LOCK_PATH, lockRes.token);
   }
 }
 
@@ -432,7 +531,8 @@ function diagnoseAsarState(paths, profile) {
   }
   const archive = readAsarArchive(paths.ASAR_PATH);
   const markers = detectArchiveMarkers(archive, profile);
-  const backupPath = `${paths.ASAR_PATH}.v${archive.appVersion}.orig`;
+  const safeVer = sanitizeVersionForFilename(archive.appVersion);
+  const backupPath = `${paths.ASAR_PATH}.v${safeVer}.orig`;
   const metaPath = `${backupPath}.json`;
   const origCheck = fs.existsSync(backupPath)
     ? verifyOrigBackupStrict(backupPath, metaPath, archive.appVersion, profile, { backfillMeta: false })
@@ -453,6 +553,8 @@ function diagnoseAsarState(paths, profile) {
 
 module.exports = {
   sha256Hex,
+  sanitizeVersionForFilename,
+  acquireExclusiveLockDetailed,
   acquireExclusiveLock,
   releaseExclusiveLock,
   writeAtomicSync,
@@ -461,6 +563,7 @@ module.exports = {
   detectArchiveMarkers,
   isPureUnpatchedArchive,
   isAsarHostInstalled,
+  findSafeStandaloneCommentLines,
   transformExactSize,
   verifyOrigBackupStrict,
   installAsarAddonHost,

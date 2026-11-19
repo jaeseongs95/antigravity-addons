@@ -21,7 +21,7 @@ function walkJsFiles(dir) {
 test('TC-001: src/core/ has zero Antigravity, Electron, or app.asar vendor literals', () => {
   const coreFiles = walkJsFiles(path.join(REPO_ROOT, 'src', 'core'));
   assert.ok(coreFiles.length >= 4);
-  const forbidden = [/antigravity/i, /electron/i, /app\.asar/i, /AGY_/];
+  const forbidden = [/antigravity/i, /electron/i, /app\.asar/i, /AGY_/, /data-agy-/i];
   for (const file of coreFiles) {
     const src = fs.readFileSync(file, 'utf8');
     const rel = path.relative(REPO_ROOT, file);
@@ -31,10 +31,10 @@ test('TC-001: src/core/ has zero Antigravity, Electron, or app.asar vendor liter
   }
 });
 
-test('TC-001b: src/adapters/electron/ has zero hardcoded Antigravity profile literals', () => {
+test('TC-001b (F5): src/adapters/electron/ has zero hardcoded Antigravity profile or data-agy-* literals', () => {
   const adapterFiles = walkJsFiles(path.join(REPO_ROOT, 'src', 'adapters', 'electron'));
   assert.ok(adapterFiles.length >= 3);
-  const forbidden = [/AGY_STATUSBAR/, /AGY_MCP/, /AGY_KO_THOUGHT/, /antigravity-desktop/];
+  const forbidden = [/AGY_STATUSBAR/, /AGY_MCP/, /AGY_KO_THOUGHT/, /antigravity-desktop/, /data-agy-no-translate/];
   for (const file of adapterFiles) {
     const src = fs.readFileSync(file, 'utf8');
     const rel = path.relative(REPO_ROOT, file);

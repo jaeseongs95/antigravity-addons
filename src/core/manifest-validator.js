@@ -1,8 +1,9 @@
 'use strict';
 
 /**
- * Vendor-neutral AddonManifest.v1 validator backed by Ajv JSON Schema
- * and strict `<pluginsRoot>/<pluginId>/` filesystem confinement.
+ * Vendor-neutral AddonManifest.v1 validator backed by Ajv JSON Schema,
+ * strict `<pluginsRoot>/<pluginId>/` realpath confinement (blocks pluginId dir symlink escape),
+ * compatibility checks (hostProfile, minHostVersion), and document-transform scope enforcement.
  */
 
 const fs = require('node:fs');
@@ -17,7 +18,23 @@ const validateSchema = ajv.compile(MANIFEST_SCHEMA);
 
 const FORBIDDEN_IDS = new Set(['__proto__', 'constructor', 'prototype']);
 
-function resolveConfinedScriptPath(relScript, pluginDir, { checkExists = true } = {}) {
+function parseSemverCore(ver) {
+  const m = String(ver || '').match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function compareSemver(a, b) {
+  const pa = parseSemverCore(a);
+  const pb = parseSemverCore(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  }
+  return 0;
+}
+
+function resolveConfinedScriptPath(relScript, pluginDir, { pluginsRootDir = null, checkExists = true } = {}) {
   if (typeof relScript !== 'string' || !relScript.trim()) {
     return { ok: false, reason: 'EMPTY_ENTRY_SCRIPT' };
   }
@@ -35,6 +52,14 @@ function resolveConfinedScriptPath(relScript, pluginDir, { checkExists = true } 
     return { ok: false, reason: 'ERR_ENTRY_ESCAPES_PLUGIN_DIR' };
   }
 
+  if (pluginsRootDir) {
+    const resolvedRoot = path.resolve(pluginsRootDir);
+    const rootRel = path.relative(resolvedRoot, resolvedBase);
+    if (!rootRel || rootRel.startsWith('..') || path.isAbsolute(rootRel)) {
+      return { ok: false, reason: 'ERR_PLUGIN_DIR_ESCAPES_ROOT' };
+    }
+  }
+
   if (!checkExists) {
     return { ok: true, resolvedPath: resolvedTarget };
   }
@@ -45,6 +70,13 @@ function resolveConfinedScriptPath(relScript, pluginDir, { checkExists = true } 
 
   try {
     const realBase = fs.realpathSync(resolvedBase);
+    if (pluginsRootDir && fs.existsSync(pluginsRootDir)) {
+      const realRoot = fs.realpathSync(path.resolve(pluginsRootDir));
+      const realRootRel = path.relative(realRoot, realBase);
+      if (!realRootRel || realRootRel.startsWith('..') || path.isAbsolute(realRootRel)) {
+        return { ok: false, reason: 'ERR_PLUGIN_DIR_SYMLINK_ESCAPE' };
+      }
+    }
     const realTarget = fs.realpathSync(resolvedTarget);
     const realRel = path.relative(realBase, realTarget);
     if (!realRel || realRel.startsWith('..') || path.isAbsolute(realRel)) {
@@ -56,7 +88,10 @@ function resolveConfinedScriptPath(relScript, pluginDir, { checkExists = true } 
   }
 }
 
-function validateAddonManifest(manifest, { pluginsRootDir = null, checkFilesExist = false } = {}) {
+function validateAddonManifest(
+  manifest,
+  { pluginsRootDir = null, checkFilesExist = false, hostProfileId = null, hostVersion = null } = {}
+) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
     return { ok: false, reason: 'INVALID_MANIFEST_OBJECT', errors: ['Manifest must be a JSON object'] };
   }
@@ -69,6 +104,27 @@ function validateAddonManifest(manifest, { pluginsRootDir = null, checkFilesExis
 
   if (FORBIDDEN_IDS.has(manifest.pluginId)) {
     return { ok: false, reason: 'ERR_FORBIDDEN_PLUGIN_ID', errors: [`Forbidden pluginId: ${manifest.pluginId}`] };
+  }
+
+  if (manifest.compatibility) {
+    if (hostProfileId && manifest.compatibility.hostProfile && manifest.compatibility.hostProfile !== hostProfileId) {
+      return {
+        ok: false,
+        reason: 'ERR_INCOMPATIBLE_HOST_PROFILE',
+        errors: [`Requires hostProfile "${manifest.compatibility.hostProfile}", current is "${hostProfileId}"`],
+      };
+    }
+    if (
+      hostVersion &&
+      manifest.compatibility.minHostVersion &&
+      compareSemver(hostVersion, manifest.compatibility.minHostVersion) < 0
+    ) {
+      return {
+        ok: false,
+        reason: 'ERR_INCOMPATIBLE_HOST_VERSION',
+        errors: [`Requires hostVersion >= ${manifest.compatibility.minHostVersion}, current is ${hostVersion}`],
+      };
+    }
   }
 
   const caps = new Set(manifest.capabilities || []);
@@ -103,13 +159,31 @@ function validateAddonManifest(manifest, { pluginsRootDir = null, checkFilesExis
   }
 
   const uiSlots = Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [];
+  const seenSlotIds = new Set();
   for (const s of uiSlots) {
-    if (s.slot === 'document-transform' && manifest.isolation && manifest.isolation.respectsNoTranslate === false) {
+    if (seenSlotIds.has(s.slotId)) {
       return {
         ok: false,
-        reason: 'ERR_DOCUMENT_TRANSFORM_MUST_RESPECT_NO_TRANSLATE',
-        errors: ['document-transform addons must keep isolation.respectsNoTranslate !== false'],
+        reason: 'ERR_DUPLICATE_SLOT_ID_IN_MANIFEST',
+        errors: [`Duplicate slotId "${s.slotId}" within the same manifest`],
       };
+    }
+    seenSlotIds.add(s.slotId);
+    if (s.slot === 'document-transform') {
+      if (s.scope !== 'native-host-only') {
+        return {
+          ok: false,
+          reason: 'ERR_DOCUMENT_TRANSFORM_SCOPE_REQUIRED',
+          errors: ['document-transform slot MUST explicitly set scope: "native-host-only"'],
+        };
+      }
+      if (manifest.isolation && manifest.isolation.respectsNoTranslate === false) {
+        return {
+          ok: false,
+          reason: 'ERR_DOCUMENT_TRANSFORM_MUST_RESPECT_NO_TRANSLATE',
+          errors: ['document-transform addons must keep isolation.respectsNoTranslate !== false'],
+        };
+      }
     }
   }
 
@@ -118,6 +192,7 @@ function validateAddonManifest(manifest, { pluginsRootDir = null, checkFilesExis
 
   if (entry.rendererScript) {
     const res = resolveConfinedScriptPath(entry.rendererScript, pluginDir, {
+      pluginsRootDir,
       checkExists: Boolean(checkFilesExist && pluginsRootDir),
     });
     if (!res.ok) {
@@ -128,6 +203,7 @@ function validateAddonManifest(manifest, { pluginsRootDir = null, checkFilesExis
 
   if (entry.mainHookScript) {
     const res = resolveConfinedScriptPath(entry.mainHookScript, pluginDir, {
+      pluginsRootDir,
       checkExists: Boolean(checkFilesExist && pluginsRootDir),
     });
     if (!res.ok) {
@@ -148,6 +224,8 @@ function validateAddonManifest(manifest, { pluginsRootDir = null, checkFilesExis
 module.exports = {
   SCHEMA_PATH,
   MANIFEST_SCHEMA,
+  FORBIDDEN_IDS,
+  compareSemver,
   resolveConfinedScriptPath,
   validateAddonManifest,
 };

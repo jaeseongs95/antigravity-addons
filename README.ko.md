@@ -32,6 +32,20 @@ node ./bin/addon-host.js --install
 node ./bin/addon-host.js --rollback
 ```
 
+## 커스텀 `HostProfile` 및 플러그인 API 예제
+
+```js
+// 렌더러 플러그인 진입점 (플러그인 전용 불변 `addonHost` 핸들 자동 주입):
+const container = addonHost.mountSlot('my-plugin.root');
+addonHost.injectStyle('base', '.my-widget { font-size: 12px; }');
+addonHost.onDispose(() => { /* 정리 로직 */ });
+```
+
+```bash
+# 커스텀 비-Antigravity HostProfile 지정 실행:
+node ./bin/addon-host.js --profile ./path/to/custom-profile.js --status
+```
+
 ## 문서
 
 - [플러그인 공통 규약 명세서 (`AddonManifest.v1`)](./docs/SPEC_ADDON_MANIFEST_V1.md)
