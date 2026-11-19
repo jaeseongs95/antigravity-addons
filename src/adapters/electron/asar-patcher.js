@@ -334,6 +334,7 @@ function installAsarAddonHost(paths, profile) {
     const backupPath = `${paths.ASAR_PATH}.v${safeVer}.orig`;
     const metaPath = `${backupPath}.json`;
     let activeMeta = null;
+    let pendingOrigCommit = null;
 
     if (fs.existsSync(backupPath)) {
       const check = verifyOrigBackupStrict(backupPath, metaPath, archive.appVersion, profile, {
@@ -358,10 +359,6 @@ function installAsarAddonHost(paths, profile) {
         }
         const archivedPrevPath = `${paths.ASAR_PATH}.v${safeVer}.${check.sha256.slice(0, 8)}.orig`;
         const archivedPrevMetaPath = `${archivedPrevPath}.json`;
-        if (!fs.existsSync(archivedPrevPath)) {
-          writeAtomicSync(archivedPrevPath, check.archive.buf, { isBinary: true });
-          writeAtomicSync(archivedPrevMetaPath, JSON.stringify(check.meta, null, 2) + '\n');
-        }
         activeMeta = {
           appVersion: archive.appVersion,
           bytes: archive.buf.length,
@@ -369,8 +366,14 @@ function installAsarAddonHost(paths, profile) {
           createdAt: new Date().toISOString(),
           previousOrigSha256: check.sha256,
         };
-        writeAtomicSync(backupPath, archive.buf, { isBinary: true });
-        writeAtomicSync(metaPath, JSON.stringify(activeMeta, null, 2) + '\n');
+        // NB3: Defer .orig archive/overwrite until transformExactSize & exact-size rebuild succeed
+        pendingOrigCommit = {
+          archivedPrevPath,
+          archivedPrevMetaPath,
+          prevBuf: check.archive.buf,
+          prevMeta: check.meta,
+          nextBuf: archive.buf,
+        };
       } else {
         archive = check.archive;
         activeMeta = check.meta ? { ...check.meta } : {
@@ -390,8 +393,13 @@ function installAsarAddonHost(paths, profile) {
         sha256: currentSha256,
         createdAt: new Date().toISOString(),
       };
-      writeAtomicSync(backupPath, archive.buf, { isBinary: true });
-      writeAtomicSync(metaPath, JSON.stringify(activeMeta, null, 2) + '\n');
+      pendingOrigCommit = {
+        archivedPrevPath: null,
+        archivedPrevMetaPath: null,
+        prevBuf: null,
+        prevMeta: null,
+        nextBuf: archive.buf,
+      };
     } else {
       return { status: 'ERR_ORIG_MISSING_FOR_PATCHED_ASAR', appVersion: archive.appVersion };
     }
@@ -451,6 +459,19 @@ function installAsarAddonHost(paths, profile) {
     const outBuf = Buffer.concat([headerBuf, ...chunks]);
     if (outBuf.length !== archive.buf.length) {
       return { status: 'ERR_ARCHIVE_SIZE_DRIFT', appVersion: archive.appVersion };
+    }
+
+    // NB3: Commit archived previous .orig and new .orig ONLY after exact-size rebuild is verified.
+    if (pendingOrigCommit) {
+      if (pendingOrigCommit.archivedPrevPath && !fs.existsSync(pendingOrigCommit.archivedPrevPath)) {
+        writeAtomicSync(pendingOrigCommit.archivedPrevPath, pendingOrigCommit.prevBuf, { isBinary: true });
+        writeAtomicSync(
+          pendingOrigCommit.archivedPrevMetaPath,
+          JSON.stringify(pendingOrigCommit.prevMeta, null, 2) + '\n'
+        );
+      }
+      writeAtomicSync(backupPath, pendingOrigCommit.nextBuf, { isBinary: true });
+      writeAtomicSync(metaPath, JSON.stringify(activeMeta, null, 2) + '\n');
     }
 
     const patchedSha256 = sha256Hex(outBuf);

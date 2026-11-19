@@ -43,7 +43,7 @@ test(
       fs.mkdirSync(path.join(pluginsRoot, 'e2e-first'), { recursive: true });
       fs.mkdirSync(path.join(pluginsRoot, 'e2e-second'), { recursive: true });
 
-      // Plugin 1: pollutes Object.prototype.get & Function.prototype.call inside isolated world, mounts slot
+      // Plugin 1: pollutes Object.prototype.get inside isolated world, mounts slot, tests R1-F1 CSS bypass defenses & host modal
       fs.writeFileSync(
         path.join(pluginsRoot, 'e2e-first', 'renderer.js'),
         `
@@ -55,6 +55,20 @@ test(
         const el = addonHost.mountSlot('e2e-first.bar');
         el.textContent = 'E2E_FIRST_READY';
         addonHost.injectStyle('s1', '.e2e-first{color:green}');
+        // R1-F1 real Chromium Blink verification: :not()/:is() must NEVER escape to body or sibling e2e-second
+        addonHost.injectStyle('bypass-not', ':not([data-addon-host-owner="e2e-first"]) { background-color: rgb(255, 0, 0) !important; }');
+        addonHost.injectStyle('bypass-is', ':is([data-addon-host-owner="e2e-first"], body) { color: rgb(255, 0, 0) !important; }');
+        const blockedErrors = [];
+        for (const badCss of [
+          '[data-addon-host-owner="e2e-first"] ~ * { background-color: rgb(255, 0, 0) !important; }',
+          '@\\\\69mport url("https://evil.example/x.css");',
+          '@scope (body) { body { background-color: rgb(255, 0, 0) !important; } }',
+        ]) {
+          try { addonHost.injectStyle('bad', badCss); } catch (e) { blockedErrors.push(e.message); }
+        }
+        document.documentElement.setAttribute('data-e2e-f1-blocked', String(blockedErrors.length));
+        const modal = addonHost.openModal('e2e-first.modal', { title: 'E2E Modal', badge: 'v1.1.0' });
+        modal.bodyEl.textContent = 'MODAL_BODY_OK';
         `,
         'utf8'
       );
@@ -67,7 +81,10 @@ test(
           version: '1.0.0',
           capabilities: ['renderer'],
           entry: { rendererScript: 'renderer.js', mainHookScript: null },
-          uiSlots: [{ slot: 'status-bar', slotId: 'e2e-first.bar', exclusive: true }],
+          uiSlots: [
+            { slot: 'status-bar', slotId: 'e2e-first.bar', exclusive: true },
+            { slot: 'modal', slotId: 'e2e-first.modal' },
+          ],
           isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'e2e-first' },
           loadOrder: 10,
         }),
@@ -187,17 +204,28 @@ test(
                 const s1 = document.querySelector('[data-addon-host-owner="e2e-first"][data-addon-host-slot="e2e-first.bar"]');
                 const s2 = document.querySelector('[data-addon-host-owner="e2e-second"][data-addon-host-slot="e2e-second.overlay"]');
                 if (!s1 || !s2) return null;
-                const s1Style = document.querySelector('style[data-addon-host-owner="e2e-first"]');
+                const s1Style = document.querySelector('style[data-addon-host-owner="e2e-first"][data-addon-host-style="e2e-first:s1"]');
+                const modalDialog = document.querySelector('[data-addon-host-modal-dialog="1"][data-addon-host-owner="e2e-first"]');
+                const bodyBg = getComputedStyle(document.body).backgroundColor;
+                const s2Bg = getComputedStyle(s2).backgroundColor;
+                // Trigger Escape to verify host modal closes cleanly in real Chromium
+                window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+                const modalClosedByEsc = !document.querySelector('[data-addon-host-modal-dialog="1"][data-addon-host-owner="e2e-first"]');
                 return {
                   firstText: s1.textContent,
                   firstTranslate: s1.getAttribute('translate'),
                   firstAgyAttr: s1.getAttribute('data-agy-no-translate'),
                   firstStyleScope: s1Style ? s1Style.getAttribute('data-addon-host-style-scope') : null,
                   firstStyleText: s1Style ? s1Style.textContent : '',
+                  f1BlockedCount: document.documentElement.getAttribute('data-e2e-f1-blocked'),
+                  bodyBgNotRed: bodyBg !== 'rgb(255, 0, 0)',
+                  siblingBgNotRed: s2Bg !== 'rgb(255, 0, 0)',
+                  modalOpened: Boolean(modalDialog && modalDialog.getAttribute('role') === 'dialog' && modalDialog.getAttribute('aria-modal') === 'true'),
+                  modalClosedByEsc,
                   secondText: s2.textContent,
                   mainWorldObjectProtoGet: typeof Object.prototype.get,
                   mainWorldHostApiExposed: typeof window.__ADDON_HOST_API__,
-                  styleCount: document.querySelectorAll('style[data-addon-host-owner]').length,
+                  styleCount: document.querySelectorAll('style[data-addon-host-owner="e2e-first"], style[data-addon-host-owner="e2e-second"]').length,
                 };
               })()\`)
             );
@@ -292,14 +320,20 @@ test(
       assert.equal(res.initial.firstAgyAttr, 'true');
       assert.equal(res.initial.firstStyleScope, 'owner');
       assert.match(res.initial.firstStyleText, /\[data-addon-host-owner="e2e-first"\]\s+\.e2e-first/);
+      assert.equal(res.initial.f1BlockedCount, '3', 'R1-F1: all 3 dangerous/sibling CSS payloads must throw in real Electron');
+      assert.equal(res.initial.bodyBgNotRed, true, 'R1-F1: :not()/:is() bypass must NOT paint document.body red in real Blink');
+      assert.equal(res.initial.siblingBgNotRed, true, 'R1-F1: :not()/:is() bypass must NOT paint sibling e2e-second red in real Blink');
+      assert.equal(res.initial.modalOpened, true, 'Host standard modal must open with role=dialog & aria-modal=true');
+      assert.equal(res.initial.modalClosedByEsc, true, 'Host standard modal must close on Escape in real Chromium');
       assert.equal(res.initial.secondText, 'E2E_SECOND_READY');
-      assert.equal(res.initial.styleCount, 2);
+      assert.equal(res.initial.styleCount, 4);
       assert.equal(res.initial.mainWorldObjectProtoGet, 'undefined', 'Isolated world must protect main-world Object.prototype');
       assert.equal(res.initial.mainWorldHostApiExposed, 'undefined', 'Isolated world must not expose host globals in main world');
       assert.equal(res.afterDisable.disposedAttr, 'yes');
       assert.equal(res.afterDisable.secondRemainingEls, 0);
-      assert.equal(res.afterDisable.firstRemainingEls, 2);
-      assert.equal(res.afterReload.firstRemainingEls, 2);
+      assert.equal(res.afterDisable.firstRemainingEls, 4);
+      // After reload, e2e-first re-opens its modal (backdrop + dialog = +2 elements) alongside bar slot + 3 styles = 6
+      assert.equal(res.afterReload.firstRemainingEls, 6);
       assert.equal(res.afterReload.secondRemainingEls, 0);
       assert.equal(res.mainHookDisposed, 1);
       assert.deepEqual(res.mainHookBroker, {

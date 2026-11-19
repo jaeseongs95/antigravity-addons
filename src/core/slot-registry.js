@@ -125,6 +125,7 @@ function createSlotRegistry() {
         slotId: s.slotId,
         exclusive: Boolean(s.exclusive),
         scope: s.scope || 'addon-owned-slot',
+        anchor: typeof s.anchor === 'string' && s.anchor ? s.anchor : null,
       });
     }
     if (storageNs) ownersByStorageNs.set(storageNs, pluginId);

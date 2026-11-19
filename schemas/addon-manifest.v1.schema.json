@@ -93,9 +93,11 @@
             "enum": [
               "title-bar",
               "sidebar",
+              "overview-pane",
               "status-bar",
               "composer-toolbar",
               "settings-pane",
+              "page-section",
               "aux-pane",
               "modal",
               "overlay",
@@ -107,6 +109,11 @@
           "slotId": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9._-]{1,95}$"
+          },
+          "anchor": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+            "description": "Optional semantic HostProfile uiAnchor key (e.g. sidebar, settings-pane, automation-page, customizations-page)."
           },
           "exclusive": {
             "type": "boolean",

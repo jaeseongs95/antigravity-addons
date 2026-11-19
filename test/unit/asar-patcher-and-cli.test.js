@@ -608,6 +608,21 @@ test('TC-019 (P0): same-version Build A vs Build B mismatch fails closed (ERR_OR
     const rbForced = rollbackAsarAddonHost(paths, ANTIGRAVITY_HOST_PROFILE, { force: true });
     assert.equal(rbForced.status, 'ROLLED_BACK');
     assert.deepEqual(fs.readFileSync(asarPath), buildBBuf);
+
+    // NB3: --refresh-orig against a Build C whose transformExactSize fails must NOT mutate existing Build B .orig!
+    const buildCBuf = buildSyntheticAsar(asarPath, {
+      version: '2.33.0',
+      anchorTarget: '// missing anchor target so transform fails',
+    });
+    const buildBOrigPath = `${asarPath}.v2.33.0.orig`;
+    const buildBOrigBefore = fs.readFileSync(buildBOrigPath);
+    const failedRefresh = installAsarAddonHost(
+      { ...paths, ALLOW_REFRESH_ORIG: true },
+      ANTIGRAVITY_HOST_PROFILE
+    );
+    assert.equal(failedRefresh.status, 'ERR_EXACT_SIZE_TRANSFORM_FAILED');
+    assert.deepEqual(fs.readFileSync(buildBOrigPath), buildBOrigBefore, 'NB3: failed refresh must preserve existing .orig');
+    assert.deepEqual(fs.readFileSync(asarPath), buildCBuf, 'NB3: failed refresh must leave live app.asar untouched');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

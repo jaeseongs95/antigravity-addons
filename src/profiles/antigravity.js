@@ -58,6 +58,15 @@ const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
   mainAnchorTarget: MAIN_ANCHOR_TARGET,
   mainAnchorReplacement: MAIN_ANCHOR_REPLACEMENT,
   extraNoTranslateAttributes: Object.freeze(['data-agy-no-translate']),
+  uiAnchors: Object.freeze({
+    sidebar: Object.freeze(['aside', 'nav']),
+    'overview-pane': Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
+    'status-bar': Object.freeze(['[data-addon-host-slot="antigravity-statusbar.root"]', 'footer']),
+    'settings-pane': Object.freeze(['.settings-modal-container', '[role="dialog"]']),
+    'automation-page': Object.freeze(['[data-testid="automation-view"]', 'main']),
+    'customizations-page': Object.freeze(['[data-testid="customizations-view"]', 'main']),
+    'modal-root': Object.freeze(['body']),
+  }),
   allowedUrlProtocols: Object.freeze(['http:', 'https:']),
   allowedUrlHosts: Object.freeze(['127.0.0.1', 'localhost', '::1', '[::1]']),
   legacyPatchMarkers: Object.freeze([

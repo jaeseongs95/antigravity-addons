@@ -423,3 +423,35 @@ test('TC-023b (P2): createManifestValidator works purely with an in-memory FileS
   assert.equal(symEscape.ok, false);
   assert.equal(symEscape.reason, 'ERR_PLUGIN_DIR_SYMLINK_ESCAPE');
 });
+
+test('TC-025a (Framework UI Regions & Modal Slots): schema and slot-registry support overview-pane, page-section, modal, and semantic anchor metadata', () => {
+  const multiRegionManifest = {
+    schemaVersion: 1,
+    pluginId: 'multi-region-addon',
+    displayName: 'Multi-Region Addon',
+    version: '1.0.0',
+    trustLevel: 'restricted',
+    capabilities: ['renderer'],
+    entry: { rendererScript: 'dist/renderer.js', mainHookScript: null },
+    uiSlots: [
+      { slot: 'overview-pane', slotId: 'multi-region.overview', anchor: 'overview-pane' },
+      { slot: 'page-section', slotId: 'multi-region.automation', anchor: 'automation-page' },
+      { slot: 'page-section', slotId: 'multi-region.customizations', anchor: 'customizations-page' },
+      { slot: 'modal', slotId: 'multi-region.quick-modal' },
+    ],
+    isolation: {
+      noTranslate: true,
+      i18nSelfManaged: true,
+      respectsNoTranslate: true,
+      storageNamespace: 'multi-region-addon',
+    },
+    loadOrder: 40,
+  };
+  const val = validateAddonManifest(multiRegionManifest);
+  assert.equal(val.ok, true);
+  const slotRes = detectSlotConflicts([multiRegionManifest, STATUSBAR_MANIFEST]);
+  assert.equal(slotRes.ok, true);
+  assert.equal(slotRes.slots.bySlot['page-section'].length, 2);
+  assert.equal(slotRes.slots.bySlot['page-section'][0].anchor, 'automation-page');
+  assert.equal(slotRes.slots.bySlot.modal[0].slotId, 'multi-region.quick-modal');
+});

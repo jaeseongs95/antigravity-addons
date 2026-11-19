@@ -62,7 +62,16 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
       });
     },
 
-    registerManifest(ctx, manifest, { hostVersion = pkg.version, strictTrustPolicy = false } = {}) {
+    registerManifest(
+      ctx,
+      manifest,
+      {
+        hostVersion = pkg.version,
+        strictTrustPolicy = false,
+        mainHookTimeoutMs = 5000,
+        rendererExecTimeoutMs = 10000,
+      } = {}
+    ) {
       const { activeProfile, paths } = ctx;
       const lockRes = acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000);
       if (!lockRes.ok) {
@@ -109,7 +118,12 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
         writeAtomicSync(targetPath, JSON.stringify(manifest, null, 2) + '\n');
         writeAtomicSync(
           paths.LOADER_SCRIPT_PATH,
-          buildHostLoaderScriptSource(paths, activeProfile, { hostVersion })
+          buildHostLoaderScriptSource(paths, activeProfile, {
+            hostVersion,
+            strictTrustPolicy,
+            mainHookTimeoutMs,
+            rendererExecTimeoutMs,
+          })
         );
         return {
           ok: true,
@@ -122,7 +136,16 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
       }
     },
 
-    unregisterManifest(ctx, pluginId, { hostVersion = pkg.version } = {}) {
+    unregisterManifest(
+      ctx,
+      pluginId,
+      {
+        hostVersion = pkg.version,
+        strictTrustPolicy = false,
+        mainHookTimeoutMs = 5000,
+        rendererExecTimeoutMs = 10000,
+      } = {}
+    ) {
       const { activeProfile, paths } = ctx;
       const idCheck = validatePluginId(pluginId);
       if (!idCheck.ok) {
@@ -161,7 +184,12 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
         if (paths.LOADER_SCRIPT_PATH && fs.existsSync(paths.LOADER_SCRIPT_PATH)) {
           writeAtomicSync(
             paths.LOADER_SCRIPT_PATH,
-            buildHostLoaderScriptSource(paths, activeProfile, { hostVersion })
+            buildHostLoaderScriptSource(paths, activeProfile, {
+              hostVersion,
+              strictTrustPolicy,
+              mainHookTimeoutMs,
+              rendererExecTimeoutMs,
+            })
           );
         }
         return { ok: true, removed: true, removedCount: toDelete.size, pluginId };

@@ -91,7 +91,17 @@ function createElectronHostLifecyclePort() {
      * 3. If ASAR patching fails, automatically compensate by restoring or removing the staged loader
      *    so zero half-installed state remains.
      */
-    installHost(ctx, { replaceLegacy = false, refreshOrig = false, hostVersion = pkg.version } = {}) {
+    installHost(
+      ctx,
+      {
+        replaceLegacy = false,
+        refreshOrig = false,
+        hostVersion = pkg.version,
+        strictTrustPolicy = false,
+        mainHookTimeoutMs = 5000,
+        rendererExecTimeoutMs = 10000,
+      } = {}
+    ) {
       const { activeProfile, paths } = ctx;
       const lockRes = acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000);
       if (!lockRes.ok) {
@@ -130,7 +140,12 @@ function createElectronHostLifecyclePort() {
         try {
           writeAtomicSync(
             paths.LOADER_SCRIPT_PATH,
-            buildHostLoaderScriptSource(paths, activeProfile, { hostVersion })
+            buildHostLoaderScriptSource(paths, activeProfile, {
+              hostVersion,
+              strictTrustPolicy,
+              mainHookTimeoutMs,
+              rendererExecTimeoutMs,
+            })
           );
           loaderStaged = true;
         } catch (err) {

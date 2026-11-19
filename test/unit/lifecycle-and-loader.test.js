@@ -1314,3 +1314,543 @@ test('TC-022 (P1): async fault isolation (mainHook rejection/timeout, renderer P
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('TC-024 (R1-F1, R1-F2, R1-F3 & NB2/NB4): CSS bypass elimination, renderer exec timeout + polluted Promise immunity, mainHook disposed broker guard + async dispose serialization, and renderer error reader', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-tc024-'));
+  try {
+    const pluginsRoot = path.join(dir, 'plugins');
+    const addonsDir = path.join(dir, 'addons.d');
+    const configPath = path.join(dir, 'config.json');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    for (const id of ['css-attacker', 'hanging-addon', 'pollute-and-reject', 'after-hang-peer', 'slow-dispose-hook']) {
+      fs.mkdirSync(path.join(pluginsRoot, id), { recursive: true });
+    }
+
+    // 1) R1-F1: CSS attacker attempting :not(), :is(), ~ sibling, hex @\69mport, @scope, @property, @starting-style, @\6d edia
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'css-attacker', 'entry.js'),
+      `
+      const sNot = addonHost.injectStyle('not', ':not([data-addon-host-owner="css-attacker"]) { color: red }');
+      const sIs = addonHost.injectStyle('is', ':is([data-addon-host-owner="css-attacker"], body) { color: red }');
+      window.__TC024_CSS_NOT__ = sNot.textContent;
+      window.__TC024_CSS_IS__ = sIs.textContent;
+      const blocked = {};
+      const payloads = [
+        ['ownerSibling', '[data-addon-host-owner="css-attacker"] ~ * { color: red }'],
+        ['bodySibling', 'body ~ * { color: red }'],
+        ['bodyClassPlus', 'body.dark + div { color: red }'],
+        ['hexImport', '@\\\\69mport url("https://evil.example/x.css");'],
+        ['hexJsUrl', '.a { background: url(j\\\\61vascript:alert(1)); }'],
+        ['atScope', '@scope (body) { div { color: red } }'],
+        ['atProperty', '@property --x { syntax: "*"; inherits: false; }'],
+        ['atStarting', '@starting-style { body { opacity: 0 } }'],
+        ['atEscMedia', '@\\\\6d edia screen { .a { color: red } }'],
+        ['atFontFace', '@font-face { font-family: evil; }'],
+      ];
+      for (const [k, css] of payloads) {
+        try { addonHost.injectStyle('b_' + k, css); blocked[k] = 'ALLOWED'; } catch (e) { blocked[k] = e.message; }
+      }
+      window.__TC024_CSS_BLOCKED__ = blocked;
+      // R1-F2: Also pollute Promise.prototype.catch and Promise.resolve to attack subsequent plugins
+      Promise.prototype.catch = function() { throw new Error('HIJACKED_PROMISE_CATCH'); };
+      Promise.resolve = function() { throw new Error('HIJACKED_PROMISE_RESOLVE'); };
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '01-css-attacker.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'css-attacker',
+        displayName: 'CSS Attacker',
+        version: '1.0.0',
+        trustLevel: 'restricted',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [{ slot: 'overlay', slotId: 'css-attacker.slot' }],
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'css-attacker' },
+        loadOrder: 10,
+      }),
+      'utf8'
+    );
+
+    // 2) R1-F2: Plugin returning rejected Promise AFTER Promise.prototype.catch & Promise.resolve were polluted
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'pollute-and-reject', 'entry.js'),
+      `
+      addonHost.mountSlot('pollute-and-reject.slot');
+      return new Promise((_, reject) => reject(new Error('POLLUTED_REJECT_CAUGHT')));
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '02-pollute-and-reject.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'pollute-and-reject',
+        displayName: 'Pollute Reject',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [{ slot: 'overlay', slotId: 'pollute-and-reject.slot' }],
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'pollute-and-reject' },
+        loadOrder: 20,
+      }),
+      'utf8'
+    );
+
+    // 3) R1-F2: Hanging renderer addon (unresolved Promise) -> must time out & clean partial DOM without starving peer!
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'hanging-addon', 'entry.js'),
+      `
+      addonHost.mountSlot('hanging-addon.slot');
+      return new Promise(() => {});
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '03-hanging-addon.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'hanging-addon',
+        displayName: 'Hanging Addon',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [{ slot: 'overlay', slotId: 'hanging-addon.slot' }],
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'hanging-addon' },
+        loadOrder: 30,
+      }),
+      'utf8'
+    );
+
+    // 4) R1-F2: Healthy peer AFTER hanging-addon -> MUST still run to ACTIVE!
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'after-hang-peer', 'entry.js'),
+      `
+      const el = addonHost.mountSlot('after-hang-peer.slot');
+      el.textContent = 'SURVIVED_HANG';
+      addonHost.reportError(new Error('RECORDED_DIAG_ERR'));
+      window.__AFTER_HANG_RAN__ = true;
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '04-after-hang-peer.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'after-hang-peer',
+        displayName: 'After Hang Peer',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [{ slot: 'status-bar', slotId: 'after-hang-peer.slot' }],
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'after-hang-peer' },
+        loadOrder: 40,
+      }),
+      'utf8'
+    );
+
+    // 5) R1-F3 & NB2: mainHook testing broker disposed-guard, slow async dispose serialization, & destroyed contents cleanup
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'slow-dispose-hook', 'hook.cjs'),
+      `
+      let activations = 0;
+      module.exports = {
+        activate(ctx) {
+          activations++;
+          globalThis.__TC024_HOOK__ = {
+            activations,
+            appBridge: ctx.app,
+            wcBridge: null,
+          };
+        },
+        onWebContentsCreated({ contents }) {
+          if (globalThis.__TC024_HOOK__) globalThis.__TC024_HOOK__.wcBridge = contents;
+          contents.on('dom-ready', () => {});
+        },
+        dispose() {
+          return new Promise((r) => setTimeout(r, 60));
+        },
+      };
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '05-slow-dispose-hook.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'slow-dispose-hook',
+        displayName: 'Slow Dispose Hook',
+        version: '1.0.0',
+        trustLevel: 'trusted',
+        capabilities: ['mainHook'],
+        entry: { rendererScript: null, mainHookScript: 'hook.cjs' },
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'slow-dispose-hook' },
+        loadOrder: 50,
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+
+    const loaderSrc = buildHostLoaderScriptSource(
+      { ADDONS_DIR: addonsDir, PLUGINS_ROOT_DIR: pluginsRoot, CONFIG_JSON_PATH: configPath },
+      ANTIGRAVITY_HOST_PROFILE,
+      { mainHookTimeoutMs: 120, rendererExecTimeoutMs: 120 }
+    );
+    const mod = { exports: {} };
+    vm.runInNewContext(loaderSrc, { require, module: mod, exports: mod.exports, URL, console, setTimeout, clearTimeout });
+
+    const body = {
+      children: [],
+      appendChild(el) { el.parentNode = this; this.children.push(el); },
+      removeChild(el) { this.children = this.children.filter((c) => c !== el); el.parentNode = null; },
+    };
+    const fakeDocument = {
+      body,
+      head: body,
+      createElement(tag) {
+        const attrs = Object.create(null);
+        return {
+          tagName: tag.toUpperCase(),
+          attrs,
+          setAttribute(k, v) { attrs[k] = String(v); },
+          getAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
+          textContent: '',
+          parentNode: null,
+        };
+      },
+    };
+    const win = {
+      document: fakeDocument,
+      location: { protocol: 'http:', host: '127.0.0.1:4173', origin: 'http://127.0.0.1:4173' },
+    };
+    const ctx = vm.createContext({ window: win, document: fakeDocument });
+
+    const wcListeners = new Map();
+    const fakeContents = {
+      getType: () => 'window',
+      getURL: () => 'http://127.0.0.1:4173/app',
+      isDestroyed: () => false,
+      on(ev, fn) { if (!wcListeners.has(ev)) wcListeners.set(ev, new Set()); wcListeners.get(ev).add(fn); },
+      removeListener(ev, fn) { if (wcListeners.has(ev)) wcListeners.get(ev).delete(fn); },
+      async executeJavaScriptInIsolatedWorld(_id, sources) {
+        return vm.runInContext(sources[0].code, ctx);
+      },
+    };
+    const fakeApp = { on() {}, removeListener() {} };
+
+    mod.exports.attachWebContents(fakeContents, fakeApp);
+    for (const fn of Array.from(wcListeners.get('dom-ready') || [])) fn();
+    await new Promise((r) => setTimeout(r, 260));
+
+    // Verify R1-F1 CSS bypass defenses
+    assert.match(win.__TC024_CSS_NOT__, /^\[data-addon-host-owner="css-attacker"\] :not\(/);
+    assert.match(win.__TC024_CSS_IS__, /^\[data-addon-host-owner="css-attacker"\] :is\(/);
+    assert.equal(win.__TC024_CSS_BLOCKED__.ownerSibling, 'ERR_FORBIDDEN_CSS_SELECTOR');
+    assert.equal(win.__TC024_CSS_BLOCKED__.bodySibling, 'ERR_FORBIDDEN_CSS_SELECTOR');
+    assert.equal(win.__TC024_CSS_BLOCKED__.bodyClassPlus, 'ERR_FORBIDDEN_CSS_SELECTOR');
+    assert.equal(win.__TC024_CSS_BLOCKED__.hexImport, 'ERR_FORBIDDEN_CSS_CONSTRUCT');
+    assert.equal(win.__TC024_CSS_BLOCKED__.hexJsUrl, 'ERR_FORBIDDEN_CSS_CONSTRUCT');
+    assert.equal(win.__TC024_CSS_BLOCKED__.atScope, 'ERR_FORBIDDEN_CSS_AT_RULE');
+    assert.equal(win.__TC024_CSS_BLOCKED__.atProperty, 'ERR_FORBIDDEN_CSS_AT_RULE');
+    assert.equal(win.__TC024_CSS_BLOCKED__.atStarting, 'ERR_FORBIDDEN_CSS_AT_RULE');
+    assert.equal(win.__TC024_CSS_BLOCKED__.atEscMedia, 'ERR_FORBIDDEN_CSS_AT_RULE');
+    assert.equal(win.__TC024_CSS_BLOCKED__.atFontFace, 'ERR_FORBIDDEN_CSS_AT_RULE');
+
+    // Verify R1-F2 polluted Promise immunity + hanging addon timeout + healthy peer survival
+    const states = mod.exports.getAddonLifecycleStates();
+    assert.equal(states['pollute-and-reject'].renderer.state, 'FAILED');
+    assert.match(states['pollute-and-reject'].renderer.lastError, /POLLUTED_REJECT_CAUGHT/);
+    assert.equal(body.children.some((c) => c.getAttribute('data-addon-host-owner') === 'pollute-and-reject'), false);
+
+    assert.equal(states['hanging-addon'].renderer.state, 'FAILED');
+    assert.match(states['hanging-addon'].renderer.lastError, /ERR_RENDERER_EXEC_TIMEOUT/);
+    assert.equal(body.children.some((c) => c.getAttribute('data-addon-host-owner') === 'hanging-addon'), false);
+
+    assert.equal(win.__AFTER_HANG_RAN__, true, 'R1-F2: healthy peer after hanging addon must NOT be starved');
+    assert.equal(states['after-hang-peer'].renderer.state, 'ACTIVE');
+
+    // Verify NB4: host-authenticated collectRendererErrors reads __ADDON_HOST_GET_ERRORS__
+    const peerErrs = await mod.exports.collectRendererErrors(fakeContents, 'after-hang-peer');
+    assert.ok(peerErrs.some((e) => e.message === 'RECORDED_DIAG_ERR'));
+
+    // Verify NB2: emitting destroyed on a second contents immediately removes its plugin listeners
+    const tempListeners = new Map();
+    const tempContents = {
+      getType: () => 'window',
+      getURL: () => 'http://127.0.0.1:4173/temp',
+      isDestroyed: () => false,
+      on(ev, fn) { if (!tempListeners.has(ev)) tempListeners.set(ev, new Set()); tempListeners.get(ev).add(fn); },
+      removeListener(ev, fn) { if (tempListeners.has(ev)) tempListeners.get(ev).delete(fn); },
+      async executeJavaScriptInIsolatedWorld() { return true; },
+    };
+    mod.exports.attachWebContents(tempContents, fakeApp);
+    assert.ok((tempListeners.get('dom-ready') || new Set()).size >= 2);
+    for (const fn of Array.from(tempListeners.get('destroyed') || [])) fn();
+    assert.equal((tempListeners.get('dom-ready') || new Set()).size, 1, 'NB2: plugin listener removed immediately on destroyed');
+
+    // Verify R1-F3: disable slow-dispose-hook -> old bridges MUST reject immediately with ERR_MAIN_HOOK_DISPOSED
+    const oldAppBridge = globalThis.__TC024_HOOK__.appBridge;
+    const oldWcBridge = globalThis.__TC024_HOOK__.wcBridge;
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'slow-dispose-hook': { enabled: false } } }), 'utf8');
+    mod.exports.syncMainHooks(fakeApp);
+    assert.throws(() => oldAppBridge.onBeforeQuit(() => {}), /ERR_MAIN_HOOK_DISPOSED/);
+    assert.throws(() => oldWcBridge.on('dom-ready', () => {}), /ERR_MAIN_HOOK_DISPOSED/);
+    await assert.rejects(() => oldWcBridge.executeInIsolatedWorld('1'), /ERR_MAIN_HOOK_DISPOSED/);
+
+    // Immediately re-enable while 60ms async dispose is still in flight -> must serialize & end in ACTIVE (never overwritten by stale DISPOSED!)
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+    mod.exports.syncMainHooks(fakeApp);
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(globalThis.__TC024_HOOK__.activations, 2, 'R1-F3: re-activation must run after async dispose settles');
+    assert.equal(mod.exports.getAddonLifecycleStates()['slow-dispose-hook'].mainHook.state, 'ACTIVE', 'R1-F3: stale async dispose must NOT overwrite new ACTIVE state');
+  } finally {
+    delete globalThis.__TC024_HOOK__;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TC-025 (Framework UI Standard): multi-region anchors with loadOrder ordering, host modal/popover stack (ESC, focus restore, ignoreOutsideClickEls, cross-plugin guard), and Action Contribution Port', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-tc025-'));
+  try {
+    const pluginsRoot = path.join(dir, 'plugins');
+    const addonsDir = path.join(dir, 'addons.d');
+    const configPath = path.join(dir, 'config.json');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'surface-bar'), { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'ko-contributor'), { recursive: true });
+
+    // 1) Contributor plugin (loadOrder 20): mounts into automation-page anchor, registers status-bar action, opens popover + nested dialog
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'ko-contributor', 'entry.js'),
+      `
+      window.__KO_MISSING_ANCHOR__ = addonHost.mountSlot('ko-contributor.overview');
+      const autoSlot = addonHost.mountSlot('ko-contributor.automation');
+      autoSlot.textContent = 'KO_AUTO';
+      addonHost.registerAction({
+        surface: 'status-bar',
+        id: 'engine-btn',
+        label: '번역:구글',
+        title: '번역 설정',
+        description: '번역 엔진 전환',
+        order: 30,
+        onClick(ctx) {
+          window.__LAST_ACTION_CTX__ = { shift: Boolean(ctx.event && ctx.event.shiftKey), sessionId: ctx.sessionId };
+          addonHost.updateAction('engine-btn', { label: '번역:LLM' });
+        },
+      });
+      window.__KO_MODAL_API__ = addonHost;
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '01-ko-contributor.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'ko-contributor',
+        displayName: 'KO Contributor',
+        version: '1.0.0',
+        trustLevel: 'restricted',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [
+          { slot: 'overview-pane', slotId: 'ko-contributor.overview', anchor: 'overview-pane' },
+          { slot: 'page-section', slotId: 'ko-contributor.automation', anchor: 'automation-page' },
+          { slot: 'modal', slotId: 'ko-contributor.popover' },
+          { slot: 'modal', slotId: 'ko-contributor.dialog' },
+        ],
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'ko-contributor' },
+        loadOrder: 20,
+      }),
+      'utf8'
+    );
+
+    // 2) Surface owner plugin (loadOrder 50): mounts into SAME automation-page anchor (ordered AFTER loadOrder 20) & subscribes to status-bar actions
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'surface-bar', 'entry.js'),
+      `
+      const autoSlot2 = addonHost.mountSlot('surface-bar.automation');
+      autoSlot2.textContent = 'SB_AUTO';
+      window.__ACTION_UPDATES__ = [];
+      window.__INITIAL_ACTIONS__ = addonHost.listActions('status-bar');
+      addonHost.onActionsChanged('status-bar', (list) => {
+        window.__ACTION_UPDATES__.push(list.map((a) => a.label));
+      });
+      window.__SB_HANDLE__ = addonHost;
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '02-surface-bar.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'surface-bar',
+        displayName: 'Surface Bar',
+        version: '1.0.0',
+        trustLevel: 'restricted',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [
+          { slot: 'status-bar', slotId: 'surface-bar.root', exclusive: true },
+          { slot: 'page-section', slotId: 'surface-bar.automation', anchor: 'automation-page' },
+        ],
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'surface-bar' },
+        loadOrder: 50,
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+
+    const loaderSrc = buildHostLoaderScriptSource(
+      { ADDONS_DIR: addonsDir, PLUGINS_ROOT_DIR: pluginsRoot, CONFIG_JSON_PATH: configPath },
+      ANTIGRAVITY_HOST_PROFILE
+    );
+    const mod = { exports: {} };
+    vm.runInNewContext(loaderSrc, { require, module: mod, exports: mod.exports, URL, console, setTimeout, clearTimeout });
+
+    function makeNode(tag) {
+      const attrs = Object.create(null);
+      const listeners = Object.create(null);
+      const node = {
+        tagName: tag.toUpperCase(),
+        attrs,
+        style: {},
+        children: [],
+        parentNode: null,
+        textContent: '',
+        focused: false,
+        setAttribute(k, v) { attrs[k] = String(v); },
+        getAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
+        appendChild(ch) { ch.parentNode = this; this.children.push(ch); return ch; },
+        insertBefore(ch, ref) {
+          ch.parentNode = this;
+          const idx = ref ? this.children.indexOf(ref) : -1;
+          if (idx === -1) this.children.push(ch);
+          else this.children.splice(idx, 0, ch);
+          return ch;
+        },
+        removeChild(ch) { this.children = this.children.filter((c) => c !== ch); ch.parentNode = null; },
+        contains(target) {
+          if (target === this) return true;
+          return this.children.some((c) => typeof c.contains === 'function' && c.contains(target));
+        },
+        addEventListener(ev, fn) { if (!listeners[ev]) listeners[ev] = []; listeners[ev].push(fn); },
+        removeEventListener(ev, fn) { if (listeners[ev]) listeners[ev] = listeners[ev].filter((f) => f !== fn); },
+        dispatch(ev, evtObj) { for (const fn of (listeners[ev] || []).slice()) fn(evtObj); },
+        focus() { this.focused = true; },
+        getBoundingClientRect() { return { top: 700, bottom: 730, left: 800, right: 920 }; },
+      };
+      return node;
+    }
+
+    const body = makeNode('body');
+    const automationView = makeNode('div');
+    automationView.setAttribute('data-testid', 'automation-view');
+    body.appendChild(automationView);
+    const triggerBtn = makeNode('button');
+    body.appendChild(triggerBtn);
+
+    const winListeners = Object.create(null);
+    const fakeDocument = {
+      body,
+      head: body,
+      activeElement: triggerBtn,
+      createElement: makeNode,
+      querySelector(sel) {
+        if (sel === '[data-testid="automation-view"]') return automationView;
+        if (sel === 'body') return body;
+        return null;
+      },
+    };
+    const win = {
+      document: fakeDocument,
+      innerWidth: 1280,
+      innerHeight: 800,
+      location: { protocol: 'http:', host: '127.0.0.1:4173', origin: 'http://127.0.0.1:4173' },
+      addEventListener(ev, fn) { if (!winListeners[ev]) winListeners[ev] = []; winListeners[ev].push(fn); },
+      removeEventListener(ev, fn) { if (winListeners[ev]) winListeners[ev] = winListeners[ev].filter((f) => f !== fn); },
+      dispatch(ev, evtObj) { for (const fn of (winListeners[ev] || []).slice()) fn(evtObj); },
+    };
+    const ctx = vm.createContext({ window: win, document: fakeDocument });
+    const listeners = {};
+    mod.exports.attachWebContents(
+      {
+        getType: () => 'window',
+        getURL: () => 'http://127.0.0.1:4173/app',
+        on(ev, fn) { listeners[ev] = fn; },
+        async executeJavaScriptInIsolatedWorld(_id, sources) {
+          return vm.runInContext(sources[0].code, ctx);
+        },
+      },
+      {}
+    );
+
+    listeners['dom-ready']();
+    await new Promise((r) => setTimeout(r, 40));
+
+    // 1) Multi-region anchors & deterministic loadOrder ordering
+    assert.equal(win.__KO_MISSING_ANCHOR__, null, 'Unmounted anchor returns null cleanly');
+    assert.equal(automationView.children.length, 2);
+    assert.equal(automationView.children[0].getAttribute('data-addon-host-owner'), 'ko-contributor');
+    assert.equal(automationView.children[1].getAttribute('data-addon-host-owner'), 'surface-bar');
+
+    // 2) Host-Neutral Action Contribution Port (loadOrder-independent + dynamic label + event forwarding)
+    assert.equal(win.__INITIAL_ACTIONS__.length, 1);
+    assert.equal(win.__INITIAL_ACTIONS__[0].label, '번역:구글');
+    win.__INITIAL_ACTIONS__[0].invoke({ event: { shiftKey: true }, buttonEl: triggerBtn, sessionId: 'sess-1' });
+    assert.deepEqual({ ...win.__LAST_ACTION_CTX__ }, { shift: true, sessionId: 'sess-1' });
+    assert.deepEqual(Array.from(win.__ACTION_UPDATES__[0]), ['번역:LLM']);
+
+    // 3) Host Standard Popover + Nested Modal Stack (zIndex, ignoreOutsideClickEls, ESC top-most only, focus restore, cross-plugin guard)
+    let popoverClosedCount = 0;
+    let dialogClosedCount = 0;
+    const pop = win.__KO_MODAL_API__.openModal('ko-contributor.popover', {
+      mode: 'popover',
+      anchorEl: triggerBtn,
+      placement: 'top-end',
+      ignoreOutsideClickEls: [triggerBtn],
+      onClose: () => { popoverClosedCount++; },
+    });
+    assert.equal(pop.rootEl.getAttribute('data-addon-host-owner'), 'ko-contributor');
+    assert.ok(pop.rootEl.style.bottom, 'Popover positioned above bottom anchor');
+    // Clicking ignored trigger button must NOT dismiss popover
+    win.dispatch('mousedown', { target: triggerBtn });
+    assert.equal(win.__KO_MODAL_API__.isModalOpen('ko-contributor.popover'), true);
+
+    // Open nested centered dialog on top of popover
+    const dlg = win.__KO_MODAL_API__.openModal('ko-contributor.dialog', {
+      mode: 'dialog',
+      title: '한글 번역 설정',
+      badge: 'v2.2.0',
+      onClose: () => { dialogClosedCount++; },
+    });
+    assert.ok(dlg.zIndex > pop.zIndex, 'Nested dialog stacks strictly above popover');
+    assert.throws(
+      () => win.__SB_HANDLE__.closeModal('ko-contributor.dialog'),
+      /ERR_FORBIDDEN_CROSS_PLUGIN_MODAL/,
+      'Cross-plugin modal close must be rejected'
+    );
+
+    // First ESC closes ONLY top-most dialog (popover stays open!)
+    win.dispatch('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} });
+    assert.equal(dialogClosedCount, 1);
+    assert.equal(win.__KO_MODAL_API__.isModalOpen('ko-contributor.dialog'), false);
+    assert.equal(win.__KO_MODAL_API__.isModalOpen('ko-contributor.popover'), true);
+
+    // Second ESC closes popover and restores focus to triggerBtn
+    triggerBtn.focused = false;
+    win.dispatch('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} });
+    assert.equal(popoverClosedCount, 1);
+    assert.equal(triggerBtn.focused, true, 'Closing modal/popover restores focus to previousFocusEl');
+
+    // Disable ko-contributor -> action automatically removed & surface-bar notified
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'ko-contributor': { enabled: false } } }), 'utf8');
+    listeners['did-finish-load']();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(win.__SB_HANDLE__.listActions('status-bar').length, 0, 'Disposed contributor actions auto-removed');
+    assert.equal(automationView.children.length, 1, 'Disposed contributor slot removed from shared page anchor');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

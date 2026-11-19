@@ -38,16 +38,19 @@ This specification defines the single common contract that native desktop plugin
 - `getNoTranslateSelector()`: returns `"[data-addon-host-owner], [translate=\"no\"]"` plus any profile-configured opt-out attribute selectors.
 
 ### Per-Plugin Scoped Capability Handle (`addonHost` argument)
-- `pluginId`, `trustLevel`, `hostVersion`, `hostProfileId`, `storageNamespace`, `ipcChannelPrefix`
+- `pluginId`, `trustLevel`, `loadOrder`, `hostVersion`, `hostProfileId`, `storageNamespace`, `ipcChannelPrefix`
 - `getNoTranslateSelector()`: same selector as `window.__ADDON_HOST_API__.getNoTranslateSelector()`.
-- `mountSlot(slotId, parentEl?, { shadow?: boolean })`: mounts only a `slotId` declared in this plugin's `uiSlots` (optionally returning an attached ShadowRoot when `{ shadow: true }`).
+- `resolveAnchor(anchorKey)`: resolves a semantic `HostProfile.uiAnchors` region (`sidebar`, `overview-pane`, `status-bar`, `settings-pane`, `automation-page`, `customizations-page`, `modal-root`) to its live native DOM element (or `null` when that view is not currently mounted).
+- `mountSlot(slotId, parentEl?, { anchor?, position?, shadow?: boolean })`: mounts only a `slotId` declared in this plugin's `uiSlots` into an owner-isolated container (`data-addon-host-owner`, `data-addon-host-slot`, `data-addon-host-order`, `translate="no"`, zero `contain: layout` so `position: fixed` descendants stay intact), ordered deterministically by `loadOrder` inside shared native regions (optionally returning an attached ShadowRoot when `{ shadow: true }`).
 - `unmountSlot(slotId)`: removes only a slot owned by this plugin.
-- `injectStyle(styleId, cssText, { scope?: "owner" | "global" })` / `removeStyle(styleId)`: manages `<style>` tags with dangerous CSS construct blocking and automatic `[data-addon-host-owner="<pluginId>"]` scoping (global scope restricted to `trusted` + `document-transform`).
+- `openModal(slotId, { title?, badge?, mode?: "dialog" | "popover", anchorEl?, placement?, ignoreOutsideClickEls?, width?, maxWidth?, closeOnBackdrop?, closeOnEsc?, shadow?, onClose? })` / `closeModal(slotId)` / `toggleModal(slotId, opts?)` / `isModalOpen(slotId)`: host-owned single modal/popover z-index stack with top-most `Escape` dismissal, backdrop/outside-click handling, focus restoration, dark/light tokens, `role="dialog"`, `data-addon-host-owner="<pluginId>"` on portal containers, cross-plugin close guard (`ERR_FORBIDDEN_CROSS_PLUGIN_MODAL`), and automatic teardown on `dispose()`.
+- `registerAction({ surface, id, label, title?, description?, order?, source?, disabled?, onClick })` / `updateAction(id, patch)` / `unregisterAction(id)` / `listActions(surface)` / `onActionsChanged(surface, listener)`: host-neutral Action Contribution Port decoupling surface owners (e.g., `status-bar`) from contributing plugins regardless of `loadOrder`, passing `{ pluginId, actionId, surface, event, buttonEl, anchorEl, sessionId }` to `onClick` with fault isolation and automatic cleanup on `dispose()`.
+- `injectStyle(styleId, cssText, { scope?: "owner" | "global" })` / `removeStyle(styleId)`: decodes CSS escapes before checking forbidden constructs (`@import`, `javascript:`, `expression(`, `behavior:`, `-moz-binding:`), enforces a strict `@`-rule allowlist (`@media`/`@supports`/`@container`/`@layer`/`@keyframes` only; blocks `@scope`, `@property`, `@starting-style`, `@font-face`, escaped `@`-rules), rejects owner-escaping sibling selectors (`~`/`+`), and strictly scopes rules under `[data-addon-host-owner="<pluginId>"]` (global scope restricted to `trusted` + `document-transform`).
 - `listOwnedSlots()`: lists active `slotId`s owned by this plugin.
-- `reportError(err)`: records plugin runtime errors into the host-authenticated diagnostics buffer.
-- `runSafe(fn)`: executes a sync or async callback inside an error-capturing boundary that never rejects unhandled.
+- `reportError(err)`: records plugin runtime errors into the host-authenticated diagnostics buffer (`collectRendererErrors()`).
+- `runSafe(fn)`: executes a sync or async callback inside a prototype-safe error-capturing boundary that never rejects unhandled.
 - `addManagedListener(target, eventType, handler, opts?)`: registers a fault-isolated event listener automatically detached on `dispose()`.
-- `onDispose(fn)` / `dispose()`: cleans up managed listeners, callbacks, slots, and styles for this plugin only.
+- `onDispose(fn)` / `dispose()`: cleans up contributed actions, action subscriptions, open modals/popovers, managed listeners, callbacks, slots, and styles for this plugin only.
 
 ## 5. Main Process Hook Surface (`entry.mainHookScript`)
 
