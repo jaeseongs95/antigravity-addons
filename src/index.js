@@ -2,9 +2,11 @@
 
 const hostProfilePort = require('./core/host-profile-port');
 const hostPorts = require('./core/host-ports');
+const fsPort = require('./core/fs-port');
 const manifestValidator = require('./core/manifest-validator');
 const slotRegistry = require('./core/slot-registry');
 const lifecycleCoordinator = require('./core/lifecycle-coordinator');
+const nodeFsPort = require('./adapters/node-fs-port');
 const fsLockAtomic = require('./adapters/fs-lock-atomic');
 const electronHostProfilePort = require('./adapters/electron/electron-host-profile-port');
 const electronHostLifecyclePort = require('./adapters/electron/electron-host-lifecycle-port');
@@ -31,9 +33,11 @@ function getDefaultCliApp() {
 module.exports = {
   ...hostProfilePort,
   ...hostPorts,
+  ...fsPort,
   ...manifestValidator,
   ...slotRegistry,
   ...lifecycleCoordinator,
+  ...nodeFsPort,
   ...fsLockAtomic,
   ...electronHostProfilePort,
   ...electronHostLifecyclePort,

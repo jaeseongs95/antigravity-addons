@@ -92,7 +92,15 @@ test(
         `
         let disposed = 0;
         module.exports = {
-          activate(ctx) { ctx.app.__e2eHookState = { get disposed() { return disposed; } }; },
+          activate(ctx) {
+            globalThis.__e2eHookState = {
+              get disposed() { return disposed; },
+              appFrozen: Object.isFrozen(ctx.app),
+              appQuitHidden: typeof ctx.app.quit === 'undefined',
+              appExitHidden: typeof ctx.app.exit === 'undefined',
+              hasGetVersion: typeof ctx.app.getVersion === 'function',
+            };
+          },
           dispose() { disposed++; },
         };
         `,
@@ -179,10 +187,13 @@ test(
                 const s1 = document.querySelector('[data-addon-host-owner="e2e-first"][data-addon-host-slot="e2e-first.bar"]');
                 const s2 = document.querySelector('[data-addon-host-owner="e2e-second"][data-addon-host-slot="e2e-second.overlay"]');
                 if (!s1 || !s2) return null;
+                const s1Style = document.querySelector('style[data-addon-host-owner="e2e-first"]');
                 return {
                   firstText: s1.textContent,
                   firstTranslate: s1.getAttribute('translate'),
                   firstAgyAttr: s1.getAttribute('data-agy-no-translate'),
+                  firstStyleScope: s1Style ? s1Style.getAttribute('data-addon-host-style-scope') : null,
+                  firstStyleText: s1Style ? s1Style.textContent : '',
                   secondText: s2.textContent,
                   mainWorldObjectProtoGet: typeof Object.prototype.get,
                   mainWorldHostApiExposed: typeof window.__ADDON_HOST_API__,
@@ -235,7 +246,16 @@ test(
               initial,
               afterDisable,
               afterReload,
-              mainHookDisposed: app.__e2eHookState ? app.__e2eHookState.disposed : -1,
+              mainHookDisposed: globalThis.__e2eHookState ? globalThis.__e2eHookState.disposed : -1,
+              mainHookBroker: globalThis.__e2eHookState
+                ? {
+                    appFrozen: globalThis.__e2eHookState.appFrozen,
+                    appQuitHidden: globalThis.__e2eHookState.appQuitHidden,
+                    appExitHidden: globalThis.__e2eHookState.appExitHidden,
+                    hasGetVersion: globalThis.__e2eHookState.hasGetVersion,
+                  }
+                : null,
+              lifecycleStates: loader.getAddonLifecycleStates(),
               blankCount,
             };
             process.stdout.write('E2E_RESULT:' + JSON.stringify(result) + '\\n');
@@ -270,6 +290,8 @@ test(
       assert.equal(res.initial.firstText, 'E2E_FIRST_READY');
       assert.equal(res.initial.firstTranslate, 'no');
       assert.equal(res.initial.firstAgyAttr, 'true');
+      assert.equal(res.initial.firstStyleScope, 'owner');
+      assert.match(res.initial.firstStyleText, /\[data-addon-host-owner="e2e-first"\]\s+\.e2e-first/);
       assert.equal(res.initial.secondText, 'E2E_SECOND_READY');
       assert.equal(res.initial.styleCount, 2);
       assert.equal(res.initial.mainWorldObjectProtoGet, 'undefined', 'Isolated world must protect main-world Object.prototype');
@@ -280,6 +302,14 @@ test(
       assert.equal(res.afterReload.firstRemainingEls, 2);
       assert.equal(res.afterReload.secondRemainingEls, 0);
       assert.equal(res.mainHookDisposed, 1);
+      assert.deepEqual(res.mainHookBroker, {
+        appFrozen: true,
+        appQuitHidden: true,
+        appExitHidden: true,
+        hasGetVersion: true,
+      });
+      assert.equal(res.lifecycleStates['e2e-second'].mainHook.state, 'DISPOSED');
+      assert.equal(res.lifecycleStates['e2e-first'].renderer.state, 'ACTIVE');
       assert.equal(res.blankCount, 0);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

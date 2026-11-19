@@ -4,32 +4,37 @@
  * Generates the single shared Electron host loader (`addon-host-loader.js`)
  * consumed by the 1-line `app.asar` bootstrap hook.
  *
- * Security & Isolation Guarantees:
- * - Single source of truth: runtime loader delegates directly to `src/core/lifecycle-coordinator.js`
- *   (Ajv schema, FORBIDDEN_IDS, pluginId regex, duplicate pluginId blocking, pluginsRoot symlink
- *   confinement, compatibility, slot/namespace/IPC conflict checks).
- * - Prototype-pollution-immune Capability-Token Scoped API:
- *   - Captures pristine Object/Array/Function primitives at bootstrap before any plugin runs.
- *   - Stores pending capability tokens and owned slots/styles in null-prototype dictionaries
- *     (`Object.create(null)`) so hooked `Map.prototype.set` / `Object.prototype` cannot steal tokens.
- *   - Binds immutable `spec` at `__ADDON_HOST_REGISTER_CAP__(hostSecret, token, spec)` time so
- *     `__ADDON_HOST_CONSUME_CAP__(token)` ignores any caller-supplied spec.
- *   - Verifies live host ownership via a non-spoofable nonce challenge (`__ADDON_HOST_VERIFY__`)
- *     before sending `hostSecret` into the renderer.
- * - Serialized injection queue (`dom-ready` + `did-finish-load` race-free), deterministic sequential
- *   `loadOrder` execution with per-plugin `try/catch` fault isolation, SPA `pushState` non-re-injection,
- *   and `syncMainHooks` on both `attachWebContents` and `enqueueInject` so single-window reloads
- *   immediately dispose disabled/unregistered `mainHook`s.
+ * Security & Isolation Guarantees (v1.1.0):
+ * - Single source of truth: runtime loader delegates to `src/core/lifecycle-coordinator.js`
+ *   with injected `NodeFileSystemPort` (`src/adapters/node-fs-port.js`).
+ * - Explicit Trust Model (`trusted` | `restricted`) + Owner CSS Auto-Scoping:
+ *   - Non-`document-transform` & `restricted` addons automatically scope CSS rules under
+ *     `[data-addon-host-owner="<pluginId>"]`, blocking `@import`/`javascript:`/`expression(`
+ *     and rejecting `{ scope: "global" }` (`ERR_FORBIDDEN_GLOBAL_STYLE_SCOPE`).
+ *   - Prototype-pollution-immune Capability-Token Scoped API (`Reflect.apply`, null-prototype
+ *     dictionaries & descriptors, non-spoofable nonce challenge, origin+location verification).
+ * - Least-Privilege `mainHook` & `webContents` Brokers:
+ *   - Never passes raw Electron `app` or raw `webContents` to plugins.
+ *   - Enforces URL allowlist and `isolatedWorldId` on every isolated execution and auto-cleans
+ *     every broker-registered listener on `dispose()` or async activation failure.
+ * - Async Fault Isolation & Explicit Addon Lifecycle State Machine:
+ *   - Tracks `PENDING` -> `ACTIVATING` -> `ACTIVE` / `FAILED` / `DISPOSING` -> `DISPOSED`
+ *     per addon (`getAddonLifecycleStates()`), catches async `activate()`/`dispose()` rejections
+ *     and activation timeouts, and provides `addonHost.runSafe()`, `reportError()`, and
+ *     `addManagedListener()`.
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
+const pkg = require('../../../package.json');
 const { assertValidElectronHostProfile } = require('./electron-host-profile-port');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
+const { createNodeFileSystemPort } = require('../node-fs-port');
 const { isPluginEnabledInConfig } = require('./config-reader');
 
 const DEFAULT_ALLOWED_PROTOCOLS = Object.freeze(['http:', 'https:']);
 const DEFAULT_ALLOWED_HOSTS = Object.freeze(['127.0.0.1', 'localhost', '::1', '[::1]']);
+const DEFAULT_NODE_FS_PORT = createNodeFileSystemPort();
 
 function isAllowedRendererUrl(rawUrl, profile = null) {
   if (typeof rawUrl !== 'string' || !rawUrl) return false;
@@ -77,7 +82,13 @@ function loadRawManifestsFromDir(addonsDir) {
 
 function collectExecutableAddons(
   paths,
-  { checkFilesExist = true, hostProfileId = null, hostVersion = null } = {}
+  {
+    checkFilesExist = true,
+    hostProfileId = null,
+    hostVersion = null,
+    strictTrustPolicy = false,
+    fsPort = DEFAULT_NODE_FS_PORT,
+  } = {}
 ) {
   const rawEntries = loadRawManifestsFromDir(paths.ADDONS_DIR);
   return planAddonExecution(rawEntries, {
@@ -85,12 +96,14 @@ function collectExecutableAddons(
     checkFilesExist,
     hostProfileId,
     hostVersion,
+    strictTrustPolicy,
+    fsPort,
     isEnabled: (pluginId) => isPluginEnabledInConfig(paths.CONFIG_JSON_PATH, pluginId),
   });
 }
 
 function buildRendererHostApiBootstrapSource({
-  hostVersion = '1.0.1',
+  hostVersion = pkg.version,
   hostProfileId = 'default',
   extraNoTranslateAttributes = [],
 } = {}) {
@@ -113,11 +126,36 @@ function buildRendererHostApiBootstrapSource({
   const _ArrayIsArray = Array.isArray;
   const _String = String;
   const _StrToLower = String.prototype.toLowerCase;
+  const _StrTrim = String.prototype.trim;
+  const _StrSlice = String.prototype.slice;
+  const _StrIndexOf = String.prototype.indexOf;
+  const _StrReplace = String.prototype.replace;
+  const _RegExpTest = RegExp.prototype.test;
   const _Error = Error;
+  const _Promise = Promise;
   const _ReflectApply = Reflect.apply;
 
   function toLowerSafe(v) {
     return _ReflectApply(_StrToLower, _String(v || ''), []);
+  }
+  function trimSafe(v) {
+    return _ReflectApply(_StrTrim, _String(v || ''), []);
+  }
+  function sliceSafe(v, s, e) {
+    return e === undefined
+      ? _ReflectApply(_StrSlice, _String(v || ''), [s])
+      : _ReflectApply(_StrSlice, _String(v || ''), [s, e]);
+  }
+  function indexOfSafe(v, needle, fromIdx) {
+    return fromIdx === undefined
+      ? _ReflectApply(_StrIndexOf, _String(v || ''), [needle])
+      : _ReflectApply(_StrIndexOf, _String(v || ''), [needle, fromIdx]);
+  }
+  function replaceSafe(v, re, rep) {
+    return _ReflectApply(_StrReplace, _String(v || ''), [re, rep]);
+  }
+  function testSafe(re, v) {
+    return _ReflectApply(_RegExpTest, re, [_String(v || '')]);
   }
 
   // R5-F3: Null-prototype property descriptors prevent Object.prototype.get/set pollution
@@ -129,6 +167,142 @@ function buildRendererHostApiBootstrapSource({
     d.enumerable = enumerable;
     d.configurable = configurable;
     return d;
+  }
+
+  // P1: CSS danger filter + owner selector scoping (prototype-pollution immune)
+  const FORBIDDEN_CSS_RE = /@import\\b|javascript\\s*:|expression\\s*\\(|behavior\\s*:|-moz-binding\\s*:/i;
+  const CSS_COMMENT_RE = /\\/\\*[\\s\\S]*?\\*\\//g;
+  const AT_PRESERVE_RE = /^@(?:(?:-webkit-)?keyframes|font-face|property|counter-style)\\b/i;
+  const AT_NESTED_RE = /^@(?:media|supports|container|layer|document)\\b/i;
+  const ROOT_TAG_ONLY_RE = /^(?::root|html|body)$/i;
+  const ROOT_TAG_PREFIX_RE = /^(?:html|body)(?=[\\s>+~.#\\[:])/i;
+
+  function assertSafeCssConstructs(rawCss) {
+    const withoutComments = replaceSafe(rawCss, CSS_COMMENT_RE, '');
+    if (testSafe(FORBIDDEN_CSS_RE, withoutComments)) {
+      throw new _Error('ERR_FORBIDDEN_CSS_CONSTRUCT');
+    }
+    return withoutComments;
+  }
+
+  function scopeSelectorList(selectorList, ownerPrefix) {
+    let out = '';
+    let start = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let quote = '';
+    const len = selectorList.length;
+
+    function appendScoped(part) {
+      const sel = trimSafe(part);
+      if (!sel) return;
+      let scoped;
+      if (indexOfSafe(sel, ownerPrefix) !== -1) {
+        scoped = sel;
+      } else if (testSafe(ROOT_TAG_ONLY_RE, sel)) {
+        scoped = ownerPrefix;
+      } else if (testSafe(ROOT_TAG_PREFIX_RE, sel)) {
+        scoped = ownerPrefix + replaceSafe(sel, ROOT_TAG_PREFIX_RE, '');
+      } else {
+        scoped = ownerPrefix + ' ' + sel;
+      }
+      out = out ? out + ', ' + scoped : scoped;
+    }
+
+    for (let i = 0; i < len; i++) {
+      const ch = selectorList[i];
+      if (quote) {
+        if (ch === '\\\\') { i++; continue; }
+        if (ch === quote) quote = '';
+        continue;
+      }
+      if (ch === '"' || ch === "'") { quote = ch; continue; }
+      if (ch === '(') { parenDepth++; continue; }
+      if (ch === ')' && parenDepth > 0) { parenDepth--; continue; }
+      if (ch === '[') { bracketDepth++; continue; }
+      if (ch === ']' && bracketDepth > 0) { bracketDepth--; continue; }
+      if (ch === ',' && parenDepth === 0 && bracketDepth === 0) {
+        appendScoped(sliceSafe(selectorList, start, i));
+        start = i + 1;
+      }
+    }
+    appendScoped(sliceSafe(selectorList, start));
+    return out;
+  }
+
+  function scopeCssBlock(cssText, ownerPrefix) {
+    let out = '';
+    let i = 0;
+    const len = cssText.length;
+
+    while (i < len) {
+      let headerStart = i;
+      let bracePos = -1;
+      let semiPos = -1;
+      let quote = '';
+      for (let j = i; j < len; j++) {
+        const ch = cssText[j];
+        if (quote) {
+          if (ch === '\\\\') { j++; continue; }
+          if (ch === quote) quote = '';
+          continue;
+        }
+        if (ch === '"' || ch === "'") { quote = ch; continue; }
+        if (ch === ';') { semiPos = j; break; }
+        if (ch === '{') { bracePos = j; break; }
+      }
+      if (semiPos !== -1 && (bracePos === -1 || semiPos < bracePos)) {
+        const stmt = trimSafe(sliceSafe(cssText, headerStart, semiPos + 1));
+        if (stmt) out += stmt + '\\n';
+        i = semiPos + 1;
+        continue;
+      }
+      if (bracePos === -1) {
+        break;
+      }
+      let depth = 1;
+      let k = bracePos + 1;
+      quote = '';
+      while (k < len && depth > 0) {
+        const ch = cssText[k];
+        if (quote) {
+          if (ch === '\\\\') { k += 2; continue; }
+          if (ch === quote) quote = '';
+          k++;
+          continue;
+        }
+        if (ch === '"' || ch === "'") { quote = ch; k++; continue; }
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        k++;
+      }
+      const header = trimSafe(sliceSafe(cssText, headerStart, bracePos));
+      const body = sliceSafe(cssText, bracePos + 1, Math.max(bracePos + 1, k - 1));
+      if (header) {
+        if (header[0] === '@') {
+          if (testSafe(AT_PRESERVE_RE, header)) {
+            out += header + ' {' + body + '}\\n';
+          } else if (testSafe(AT_NESTED_RE, header)) {
+            out += header + ' {\\n' + scopeCssBlock(body, ownerPrefix) + '}\\n';
+          } else {
+            out += header + ' {' + body + '}\\n';
+          }
+        } else {
+          const scopedHeader = scopeSelectorList(header, ownerPrefix);
+          if (scopedHeader) {
+            out += scopedHeader + ' {' + body + '}\\n';
+          }
+        }
+      }
+      i = k;
+    }
+    return trimSafe(out);
+  }
+
+  function scopeCssToOwner(rawCss, pluginId) {
+    const clean = assertSafeCssConstructs(rawCss);
+    const ownerPrefix = '[data-addon-host-owner="' + pluginId + '"]';
+    return scopeCssBlock(clean, ownerPrefix);
   }
 
   // R7-F3: Strictly compare protocol + host (+ non-'null' origin) so custom schemes
@@ -160,9 +334,6 @@ function buildRendererHostApiBootstrapSource({
     }
   }
 
-  // R3-F1: Never trust a pre-existing window.__ADDON_HOST_VERIFY__ before defining our own
-  // non-configurable properties. If a page pre-spoofed them as non-configurable, _ObjDefineProperty
-  // throws and the host fails closed without leaking hostSecret or capToken.
   const NO_TRANSLATE_SELECTOR = ${serializeSafeInlineJson(noTranslateSelector)};
   const EXTRA_NO_TRANSLATE_ATTRS = _ObjFreeze(${serializeSafeInlineJson(extraAttrs)});
   const slotOwners = _ObjCreate(null);
@@ -170,14 +341,29 @@ function buildRendererHostApiBootstrapSource({
   const styleOwners = _ObjCreate(null);
   const styleElements = _ObjCreate(null);
   const disposers = _ObjCreate(null);
+  const managedListeners = _ObjCreate(null);
+  const pluginErrors = _ObjCreate(null);
   const pendingSpecs = _ObjCreate(null);
   const activeHandles = _ObjCreate(null);
+
+  function recordPluginError(pluginId, err) {
+    if (!_has(pluginErrors, pluginId)) {
+      pluginErrors[pluginId] = { count: 0, items: _ObjCreate(null) };
+    }
+    const bucket = pluginErrors[pluginId];
+    const msg = err && typeof err === 'object' && err.message ? _String(err.message) : _String(err || 'UNKNOWN_ERROR');
+    bucket.items[bucket.count % 20] = _ObjFreeze({ seq: bucket.count + 1, message: msg });
+    bucket.count++;
+  }
 
   function createScopedHandle(spec) {
     const pluginId = _String(spec.pluginId);
     const allowedSlots = spec.allowedSlotsMap || _ObjCreate(null);
     const storageNamespace = spec.storageNamespace ? _String(spec.storageNamespace) : pluginId;
     const ipcChannelPrefix = spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null;
+    const trustLevel = spec.trustLevel === 'trusted' ? 'trusted' : 'restricted';
+    const hasDocumentTransformSlot = Boolean(spec.hasDocumentTransformSlot);
+    const allowGlobalStyle = trustLevel === 'trusted' && hasDocumentTransformSlot;
     let disposed = false;
 
     function assertNotDisposed() {
@@ -186,6 +372,7 @@ function buildRendererHostApiBootstrapSource({
 
     const handle = _ObjFreeze({
       pluginId,
+      trustLevel,
       hostVersion: ${serializeSafeInlineJson(hostVersion)},
       hostProfileId: ${serializeSafeInlineJson(hostProfileId)},
       storageNamespace,
@@ -193,7 +380,7 @@ function buildRendererHostApiBootstrapSource({
       getNoTranslateSelector() {
         return NO_TRANSLATE_SELECTOR;
       },
-      mountSlot(slotId, parentEl) {
+      mountSlot(slotId, parentEl, opts) {
         assertNotDisposed();
         if (!slotId || typeof slotId !== 'string') throw new _Error('ERR_INVALID_SLOT_ID');
         if (!_has(allowedSlots, slotId)) {
@@ -218,6 +405,9 @@ function buildRendererHostApiBootstrapSource({
         if (hostParent && el.parentNode !== hostParent && typeof hostParent.appendChild === 'function') {
           hostParent.appendChild(el);
         }
+        if (opts && typeof opts === 'object' && opts.shadow === true && typeof el.attachShadow === 'function') {
+          return el.shadowRoot || el.attachShadow({ mode: 'open' });
+        }
         return el;
       },
       unmountSlot(slotId) {
@@ -232,13 +422,30 @@ function buildRendererHostApiBootstrapSource({
         delete slotElements[slotId];
         return true;
       },
-      injectStyle(styleId, cssText) {
+      injectStyle(styleId, cssText, opts) {
         assertNotDisposed();
         if (!styleId || typeof styleId !== 'string') throw new _Error('ERR_INVALID_STYLE_ID');
         const scopedKey = pluginId + ':' + styleId;
         if (_has(styleOwners, scopedKey) && styleOwners[scopedKey] !== pluginId) {
           throw new _Error('ERR_STYLE_OWNED_BY_ANOTHER_PLUGIN:' + styleId);
         }
+        const rawCss = _String(cssText || '');
+        const requestedScope =
+          opts && typeof opts === 'object' && typeof opts.scope === 'string'
+            ? opts.scope
+            : allowGlobalStyle
+              ? 'global'
+              : 'owner';
+        if (requestedScope !== 'owner' && requestedScope !== 'global') {
+          throw new _Error('ERR_INVALID_STYLE_SCOPE:' + requestedScope);
+        }
+        if (requestedScope === 'global' && !allowGlobalStyle) {
+          throw new _Error('ERR_FORBIDDEN_GLOBAL_STYLE_SCOPE:' + pluginId);
+        }
+        const finalCss = requestedScope === 'global'
+          ? assertSafeCssConstructs(rawCss)
+          : scopeCssToOwner(rawCss, pluginId);
+
         let styleEl = _has(styleElements, scopedKey) ? styleElements[scopedKey] : null;
         if (!styleEl) {
           styleEl = document.createElement('style');
@@ -249,7 +456,8 @@ function buildRendererHostApiBootstrapSource({
           const head = document.head || document.documentElement || document.body;
           if (head && typeof head.appendChild === 'function') head.appendChild(styleEl);
         }
-        styleEl.textContent = _String(cssText || '');
+        styleEl.setAttribute('data-addon-host-style-scope', requestedScope);
+        styleEl.textContent = finalCss;
         return styleEl;
       },
       removeStyle(styleId) {
@@ -276,6 +484,59 @@ function buildRendererHostApiBootstrapSource({
         }
         return out;
       },
+      reportError(err) {
+        recordPluginError(pluginId, err);
+      },
+      runSafe(fn) {
+        if (disposed || typeof fn !== 'function') return _Promise.resolve(undefined);
+        try {
+          const res = _ReflectApply(fn, undefined, []);
+          if (res && typeof res.then === 'function') {
+            return _Promise.resolve(res).catch((asyncErr) => {
+              recordPluginError(pluginId, asyncErr);
+              return undefined;
+            });
+          }
+          return _Promise.resolve(res);
+        } catch (syncErr) {
+          recordPluginError(pluginId, syncErr);
+          return _Promise.resolve(undefined);
+        }
+      },
+      addManagedListener(target, eventType, handler, opts) {
+        assertNotDisposed();
+        if (!target || typeof target.addEventListener !== 'function' || typeof handler !== 'function') {
+          throw new _Error('ERR_INVALID_LISTENER_TARGET');
+        }
+        const wrapped = function() {
+          if (disposed) return;
+          try {
+            const ret = _ReflectApply(handler, this, arguments);
+            if (ret && typeof ret.then === 'function') {
+              _Promise.resolve(ret).catch((asyncErr) => recordPluginError(pluginId, asyncErr));
+            }
+          } catch (syncErr) {
+            recordPluginError(pluginId, syncErr);
+          }
+        };
+        target.addEventListener(eventType, wrapped, opts);
+        if (!_has(managedListeners, pluginId)) {
+          managedListeners[pluginId] = { count: 0, items: _ObjCreate(null) };
+        }
+        const bucket = managedListeners[pluginId];
+        const idx = bucket.count++;
+        bucket.items[idx] = { target, eventType, wrapped, opts, removed: false };
+        return function removeManagedListener() {
+          const item = bucket.items[idx];
+          if (!item || item.removed) return;
+          item.removed = true;
+          try {
+            if (typeof item.target.removeEventListener === 'function') {
+              item.target.removeEventListener(item.eventType, item.wrapped, item.opts);
+            }
+          } catch (_err) {}
+        };
+      },
       onDispose(fn) {
         assertNotDisposed();
         if (typeof fn !== 'function') return;
@@ -289,6 +550,24 @@ function buildRendererHostApiBootstrapSource({
         if (disposed) return;
         disposed = true;
         delete activeHandles[pluginId];
+        // Clean managed event listeners first so callbacks never fire during teardown
+        try {
+          const lb = _has(managedListeners, pluginId) ? managedListeners[pluginId] : null;
+          delete managedListeners[pluginId];
+          if (lb) {
+            for (let i = 0; i < lb.count; i++) {
+              const item = lb.items[i];
+              if (item && !item.removed) {
+                item.removed = true;
+                try {
+                  if (typeof item.target.removeEventListener === 'function') {
+                    item.target.removeEventListener(item.eventType, item.wrapped, item.opts);
+                  }
+                } catch (_err) {}
+              }
+            }
+          }
+        } catch (_err) {}
         // R6-F3: Invoke disposers via captured Reflect.apply (immune to Function.prototype.call pollution)
         try {
           const bucket = _has(disposers, pluginId) ? disposers[pluginId] : null;
@@ -382,6 +661,8 @@ function buildRendererHostApiBootstrapSource({
           allowedSlotsMap: _ObjFreeze(allowedSlotsMap),
           storageNamespace: spec.storageNamespace ? _String(spec.storageNamespace) : _String(spec.pluginId),
           ipcChannelPrefix: spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null,
+          trustLevel: spec.trustLevel === 'trusted' ? 'trusted' : 'restricted',
+          hasDocumentTransformSlot: Boolean(spec.hasDocumentTransformSlot),
         });
       },
       false,
@@ -450,10 +731,37 @@ function buildRendererHostApiBootstrapSource({
       false
     )
   );
+
+  // P1: Host-authenticated retrieval of isolated async renderer errors
+  _ObjDefineProperty(
+    window,
+    '__ADDON_HOST_GET_ERRORS__',
+    makeDataDesc(
+      function(hostSecret, nonce, expectedOrigin, pluginId) {
+        assertHostOriginAndAuth(hostSecret, nonce, expectedOrigin, 'ERR_FORBIDDEN_HOST_ERROR_READ');
+        const id = _String(pluginId || '');
+        if (!_has(pluginErrors, id)) return [];
+        const b = pluginErrors[id];
+        const out = [];
+        const n = b.count < 20 ? b.count : 20;
+        for (let i = 0; i < n; i++) {
+          _ObjDefineProperty(out, i, makeDataDesc(b.items[i], true, true, true));
+        }
+        return out;
+      },
+      false,
+      false,
+      false
+    )
+  );
 })();`;
 }
 
-function buildHostLoaderScriptSource(paths, profile, { hostVersion = '1.0.1' } = {}) {
+function buildHostLoaderScriptSource(
+  paths,
+  profile,
+  { hostVersion = pkg.version, strictTrustPolicy = false, mainHookTimeoutMs = 5000 } = {}
+) {
   assertValidElectronHostProfile(profile);
   const extraAttrs = Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [];
   const allowedProtocols =
@@ -477,6 +785,9 @@ function buildHostLoaderScriptSource(paths, profile, { hostVersion = '1.0.1' } =
     configJsonPath: paths.CONFIG_JSON_PATH,
     hostProfileId: profile.id,
     hostVersion,
+    strictTrustPolicy: Boolean(strictTrustPolicy),
+    mainHookTimeoutMs:
+      Number.isInteger(mainHookTimeoutMs) && mainHookTimeoutMs >= 100 ? mainHookTimeoutMs : 5000,
     allowedProtocols,
     allowedHosts,
     isolatedWorldId:
@@ -484,12 +795,13 @@ function buildHostLoaderScriptSource(paths, profile, { hostVersion = '1.0.1' } =
         ? profile.isolatedWorldId
         : 999,
     coreLifecyclePath: path.resolve(__dirname, '..', '..', 'core', 'lifecycle-coordinator.js'),
+    nodeFsPortPath: path.resolve(__dirname, '..', 'node-fs-port.js'),
     configReaderPath: path.resolve(__dirname, 'config-reader.js'),
   };
 
   return `'use strict';
 // Auto-generated by antigravity-native-addon-host (${profile.patchMarker}).
-// Single isolated mainHook + top-frame renderer loader.
+// Single isolated mainHook (least-privilege broker + async isolation) + top-frame renderer loader.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -498,7 +810,10 @@ const HOST_CFG = ${serializeSafeInlineJson(cfg)};
 const RENDERER_API_BOOTSTRAP_TEMPLATE = ${serializeSafeInlineJson(bootstrapApiTemplate)};
 
 const { planAddonExecution } = require(HOST_CFG.coreLifecyclePath);
+const { createNodeFileSystemPort } = require(HOST_CFG.nodeFsPortPath);
 const { isPluginEnabledInConfig } = require(HOST_CFG.configReaderPath);
+
+const nodeFsPort = createNodeFileSystemPort();
 
 const diagnostics = [];
 function recordDiag(level, code, detail) {
@@ -508,6 +823,32 @@ function recordDiag(level, code, detail) {
 
 function getDiagnostics() {
   return diagnostics.slice();
+}
+
+// P1: Explicit Addon Lifecycle State Machine (PENDING -> ACTIVATING -> ACTIVE / FAILED / DISPOSING -> DISPOSED)
+const addonLifecycleStates = new Map();
+function setLifecycleState(pluginId, kind, state, lastError) {
+  let rec = addonLifecycleStates.get(pluginId);
+  if (!rec) {
+    rec = {};
+    addonLifecycleStates.set(pluginId, rec);
+  }
+  rec[kind] = {
+    state,
+    lastError: lastError ? String(lastError) : null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function getAddonLifecycleStates() {
+  const out = {};
+  for (const [pluginId, rec] of addonLifecycleStates.entries()) {
+    out[pluginId] = {
+      mainHook: rec.mainHook ? { ...rec.mainHook } : null,
+      renderer: rec.renderer ? { ...rec.renderer } : null,
+    };
+  }
+  return out;
 }
 
 function isAllowedRendererUrl(rawUrl) {
@@ -539,6 +880,8 @@ function collectExecutionPlan() {
     checkFilesExist: true,
     hostProfileId: HOST_CFG.hostProfileId,
     hostVersion: HOST_CFG.hostVersion,
+    strictTrustPolicy: HOST_CFG.strictTrustPolicy,
+    fsPort: nodeFsPort,
     isEnabled: (pluginId) => isPluginEnabledInConfig(HOST_CFG.configJsonPath, pluginId),
   });
   for (const rej of plan.rejected) {
@@ -551,6 +894,8 @@ function collectActiveAddons() {
   return collectExecutionPlan().active.map((item) => ({
     pluginId: item.pluginId,
     loadOrder: item.loadOrder,
+    trustLevel: item.trustLevel || 'restricted',
+    hasDocumentTransformSlot: Boolean(item.hasDocumentTransformSlot),
     rendererPath: item.resolvedEntries.rendererScript,
     mainHookPath: item.resolvedEntries.mainHookScript,
     allowedSlotIds: (item.manifest.uiSlots || []).map((s) => s.slotId),
@@ -559,42 +904,269 @@ function collectActiveAddons() {
   }));
 }
 
+// P1: Least-Privilege Main Host Broker (never exposes raw Electron app.quit/exit/relaunch)
+const ALLOWED_APP_PATHS = new Set(['userData', 'temp', 'logs']);
+const ALLOWED_WC_EVENTS = new Set(['dom-ready', 'did-finish-load', 'did-navigate', 'did-fail-load', 'destroyed']);
+
+function createScopedMainHostBridge(electronApp, pluginId, cleanupFns) {
+  return Object.freeze({
+    getVersion() {
+      return electronApp && typeof electronApp.getVersion === 'function' ? electronApp.getVersion() : null;
+    },
+    getPath(name) {
+      if (!ALLOWED_APP_PATHS.has(String(name || ''))) {
+        throw new Error('ERR_FORBIDDEN_APP_PATH:' + String(name || ''));
+      }
+      return electronApp && typeof electronApp.getPath === 'function' ? electronApp.getPath(name) : null;
+    },
+    onBeforeQuit(fn) {
+      if (typeof fn !== 'function' || !electronApp || typeof electronApp.on !== 'function') return () => {};
+      const wrapped = (...args) => {
+        try {
+          const ret = fn(...args);
+          if (ret && typeof ret.then === 'function') {
+            Promise.resolve(ret).catch((err) => {
+              recordDiag('error', 'ERR_MAIN_HOOK_BEFORE_QUIT_ASYNC', pluginId + ': ' + (err && err.message));
+            });
+          }
+        } catch (err) {
+          recordDiag('error', 'ERR_MAIN_HOOK_BEFORE_QUIT', pluginId + ': ' + (err && err.message));
+        }
+      };
+      electronApp.on('before-quit', wrapped);
+      let removed = false;
+      const detach = () => {
+        if (removed) return;
+        removed = true;
+        try {
+          if (typeof electronApp.removeListener === 'function') {
+            electronApp.removeListener('before-quit', wrapped);
+          }
+        } catch (_e) {}
+      };
+      cleanupFns.push(detach);
+      return detach;
+    },
+  });
+}
+
+function createScopedWebContentsBridge(contents, pluginId, cleanupFns) {
+  const registeredListeners = new Set();
+  const worldId = HOST_CFG.isolatedWorldId || 999;
+
+  function assertAllowedLiveUrl() {
+    if (!contents || (typeof contents.isDestroyed === 'function' && contents.isDestroyed())) {
+      throw new Error('ERR_WEBCONTENTS_DESTROYED');
+    }
+    const liveUrl = typeof contents.getURL === 'function' ? contents.getURL() : '';
+    if (!isAllowedRendererUrl(liveUrl)) {
+      throw new Error('ERR_FORBIDDEN_RENDERER_URL');
+    }
+  }
+
+  return Object.freeze({
+    getType() {
+      return contents && typeof contents.getType === 'function' ? contents.getType() : 'unknown';
+    },
+    getURL() {
+      return contents && typeof contents.getURL === 'function' ? contents.getURL() : '';
+    },
+    isDestroyed() {
+      return contents && typeof contents.isDestroyed === 'function' ? Boolean(contents.isDestroyed()) : false;
+    },
+    on(eventName, fn) {
+      const ev = String(eventName || '');
+      if (!ALLOWED_WC_EVENTS.has(ev)) {
+        throw new Error('ERR_FORBIDDEN_WEBCONTENTS_EVENT:' + ev);
+      }
+      if (typeof fn !== 'function' || !contents || typeof contents.on !== 'function') return;
+      const wrapped = (...args) => {
+        try {
+          const ret = fn(...args);
+          if (ret && typeof ret.then === 'function') {
+            Promise.resolve(ret).catch((err) => {
+              recordDiag('error', 'ERR_MAIN_HOOK_EVENT_ASYNC', pluginId + ':' + ev + ': ' + (err && err.message));
+            });
+          }
+        } catch (err) {
+          recordDiag('error', 'ERR_MAIN_HOOK_EVENT', pluginId + ':' + ev + ': ' + (err && err.message));
+        }
+      };
+      const record = { ev, fn, wrapped };
+      registeredListeners.add(record);
+      contents.on(ev, wrapped);
+      cleanupFns.push(() => {
+        if (!registeredListeners.has(record)) return;
+        registeredListeners.delete(record);
+        try {
+          if (typeof contents.removeListener === 'function') contents.removeListener(ev, wrapped);
+        } catch (_e) {}
+      });
+    },
+    removeListener(eventName, fn) {
+      const ev = String(eventName || '');
+      for (const rec of Array.from(registeredListeners)) {
+        if (rec.fn === fn && (!ev || rec.ev === ev)) {
+          registeredListeners.delete(rec);
+          try {
+            if (typeof contents.removeListener === 'function') {
+              contents.removeListener(rec.ev, rec.wrapped);
+            }
+          } catch (_e) {}
+        }
+      }
+    },
+    executeInIsolatedWorld(code) {
+      try {
+        assertAllowedLiveUrl();
+      } catch (err) {
+        return Promise.reject(err);
+      }
+      if (typeof contents.executeJavaScriptInIsolatedWorld === 'function') {
+        return Promise.resolve(contents.executeJavaScriptInIsolatedWorld(worldId, [{ code: String(code || '') }], true));
+      }
+      if (typeof contents.executeJavaScript === 'function') {
+        return Promise.resolve(contents.executeJavaScript(String(code || ''), true));
+      }
+      return Promise.reject(new Error('ERR_ISOLATED_EXEC_UNAVAILABLE'));
+    },
+    executeJavaScriptInIsolatedWorld(requestedWorldId, sources, userGesture) {
+      if (requestedWorldId !== worldId) {
+        return Promise.reject(new Error('ERR_FORBIDDEN_WORLD_ID:' + String(requestedWorldId)));
+      }
+      try {
+        assertAllowedLiveUrl();
+      } catch (err) {
+        return Promise.reject(err);
+      }
+      if (typeof contents.executeJavaScriptInIsolatedWorld === 'function') {
+        return Promise.resolve(contents.executeJavaScriptInIsolatedWorld(worldId, sources, Boolean(userGesture)));
+      }
+      const code = Array.isArray(sources) && sources[0] ? String(sources[0].code || '') : '';
+      if (typeof contents.executeJavaScript === 'function') {
+        return Promise.resolve(contents.executeJavaScript(code, Boolean(userGesture)));
+      }
+      return Promise.reject(new Error('ERR_ISOLATED_EXEC_UNAVAILABLE'));
+    },
+  });
+}
+
 const loadedMainHooks = new Map();
+const failedMainHookIds = new Set();
+
+function runCleanupFns(cleanupFns) {
+  for (const fn of cleanupFns.splice(0, cleanupFns.length)) {
+    try { fn(); } catch (_e) {}
+  }
+}
+
+function disposeMainHookEntry(pluginId, entry) {
+  setLifecycleState(pluginId, 'mainHook', 'DISPOSING');
+  const finish = (errMsg) => {
+    runCleanupFns(entry.cleanupFns);
+    setLifecycleState(pluginId, 'mainHook', 'DISPOSED', errMsg || null);
+  };
+  try {
+    if (entry && entry.mod && typeof entry.mod.dispose === 'function') {
+      const ret = entry.mod.dispose();
+      if (ret && typeof ret.then === 'function') {
+        return Promise.resolve(ret)
+          .then(() => finish(null))
+          .catch((err) => {
+            const msg = err && err.message ? err.message : String(err);
+            recordDiag('error', 'ERR_MAIN_HOOK_DISPOSE_ASYNC', pluginId + ': ' + msg);
+            finish(msg);
+          });
+      }
+    }
+    finish(null);
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    recordDiag('error', 'ERR_MAIN_HOOK_DISPOSE', pluginId + ': ' + msg);
+    finish(msg);
+  }
+  return Promise.resolve();
+}
 
 function syncMainHooks(electronApp) {
   const active = collectActiveAddons();
   const activeMainIds = new Set(active.filter((a) => a.mainHookPath).map((a) => a.pluginId));
 
+  // Clear failure latch when an addon is removed/disabled so re-enabling gets a clean attempt
+  for (const failedId of Array.from(failedMainHookIds)) {
+    if (!activeMainIds.has(failedId)) {
+      failedMainHookIds.delete(failedId);
+    }
+  }
+
   for (const [pluginId, entry] of Array.from(loadedMainHooks.entries())) {
     if (!activeMainIds.has(pluginId)) {
-      try {
-        if (entry && entry.mod && typeof entry.mod.dispose === 'function') {
-          entry.mod.dispose();
-        }
-      } catch (err) {
-        recordDiag('error', 'ERR_MAIN_HOOK_DISPOSE', pluginId + ': ' + (err && err.message));
-      }
       loadedMainHooks.delete(pluginId);
+      void disposeMainHookEntry(pluginId, entry);
     }
   }
 
   for (const addon of active) {
-    if (!addon.mainHookPath || loadedMainHooks.has(addon.pluginId)) continue;
+    if (!addon.mainHookPath || loadedMainHooks.has(addon.pluginId) || failedMainHookIds.has(addon.pluginId)) {
+      continue;
+    }
+    const cleanupFns = [];
+    setLifecycleState(addon.pluginId, 'mainHook', 'ACTIVATING');
     try {
       const mod = require(addon.mainHookPath);
-      const ctx = {
-        app: electronApp,
+      const hostBridge = createScopedMainHostBridge(electronApp, addon.pluginId, cleanupFns);
+      const ctx = Object.freeze({
+        app: hostBridge,
+        hostBridge,
         pluginId: addon.pluginId,
+        trustLevel: addon.trustLevel,
         hostProfileId: HOST_CFG.hostProfileId,
         hostVersion: HOST_CFG.hostVersion,
+        isolatedWorldId: HOST_CFG.isolatedWorldId,
         storageNamespace: addon.storageNamespace,
         ipcChannelPrefix: addon.ipcChannelPrefix,
-      };
-      if (typeof mod === 'function') mod(ctx);
-      else if (mod && typeof mod.activate === 'function') mod.activate(ctx);
-      loadedMainHooks.set(addon.pluginId, { mod, addon });
+      });
+      const entry = { mod, addon, cleanupFns, activatePromise: null };
+      loadedMainHooks.set(addon.pluginId, entry);
+
+      let ret;
+      if (typeof mod === 'function') ret = mod(ctx);
+      else if (mod && typeof mod.activate === 'function') ret = mod.activate(ctx);
+
+      if (ret && typeof ret.then === 'function') {
+        let timer = null;
+        const timeoutPromise = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('ERR_MAIN_HOOK_ACTIVATE_TIMEOUT')), HOST_CFG.mainHookTimeoutMs);
+          if (timer && typeof timer.unref === 'function') timer.unref();
+        });
+        entry.activatePromise = Promise.race([Promise.resolve(ret), timeoutPromise])
+          .then(() => {
+            if (timer) clearTimeout(timer);
+            if (loadedMainHooks.get(addon.pluginId) === entry) {
+              setLifecycleState(addon.pluginId, 'mainHook', 'ACTIVE');
+            }
+          })
+          .catch((err) => {
+            if (timer) clearTimeout(timer);
+            const msg = err && err.message ? err.message : String(err);
+            recordDiag('error', 'ERR_MAIN_HOOK_ACTIVATE_ASYNC', addon.pluginId + ': ' + msg);
+            runCleanupFns(cleanupFns);
+            if (loadedMainHooks.get(addon.pluginId) === entry) {
+              loadedMainHooks.delete(addon.pluginId);
+              failedMainHookIds.add(addon.pluginId);
+              setLifecycleState(addon.pluginId, 'mainHook', 'FAILED', msg);
+            }
+          });
+      } else {
+        setLifecycleState(addon.pluginId, 'mainHook', 'ACTIVE');
+      }
     } catch (err) {
-      recordDiag('error', 'ERR_MAIN_HOOK_ACTIVATE', addon.pluginId + ': ' + (err && err.message));
+      const msg = err && err.message ? err.message : String(err);
+      loadedMainHooks.delete(addon.pluginId);
+      failedMainHookIds.add(addon.pluginId);
+      runCleanupFns(cleanupFns);
+      setLifecycleState(addon.pluginId, 'mainHook', 'FAILED', msg);
+      recordDiag('error', 'ERR_MAIN_HOOK_ACTIVATE', addon.pluginId + ': ' + msg);
     }
   }
 }
@@ -606,12 +1178,21 @@ function attachWebContents(contents, electronApp) {
   for (const [pluginId, entry] of loadedMainHooks.entries()) {
     if (entry && entry.mod && typeof entry.mod.onWebContentsCreated === 'function') {
       try {
-        entry.mod.onWebContentsCreated({
-          app: electronApp,
-          contents,
+        const scopedContents = createScopedWebContentsBridge(contents, pluginId, entry.cleanupFns);
+        const hostBridge = createScopedMainHostBridge(electronApp, pluginId, entry.cleanupFns);
+        const ret = entry.mod.onWebContentsCreated({
+          app: hostBridge,
+          hostBridge,
+          contents: scopedContents,
           pluginId,
+          isolatedWorldId: HOST_CFG.isolatedWorldId,
           isAllowedRendererUrl,
         });
+        if (ret && typeof ret.then === 'function') {
+          Promise.resolve(ret).catch((err) => {
+            recordDiag('error', 'ERR_MAIN_HOOK_WEBCONTENTS_ASYNC', pluginId + ': ' + (err && err.message));
+          });
+        }
       } catch (err) {
         recordDiag('error', 'ERR_MAIN_HOOK_WEBCONTENTS', pluginId + ': ' + (err && err.message));
       }
@@ -735,6 +1316,7 @@ function attachWebContents(contents, electronApp) {
                 if (!pendingNav && navGeneration === passGen) resetCredentials();
                 return;
               }
+              setLifecycleState(prevId, 'renderer', 'DISPOSING');
               try {
                 await execInRenderer(
                   'typeof window.__ADDON_HOST_DISPOSE__ === "function" && window.__ADDON_HOST_DISPOSE__(' +
@@ -743,8 +1325,11 @@ function attachWebContents(contents, electronApp) {
                     JSON.stringify(trustedLoc) + ',' +
                     JSON.stringify(prevId) + ');'
                 );
+                setLifecycleState(prevId, 'renderer', 'DISPOSED');
               } catch (err) {
-                recordDiag('error', 'ERR_RENDERER_DISPOSE', prevId + ': ' + (err && err.message));
+                const msg = err && err.message ? err.message : String(err);
+                setLifecycleState(prevId, 'renderer', 'DISPOSED', msg);
+                recordDiag('error', 'ERR_RENDERER_DISPOSE', prevId + ': ' + msg);
               }
               if (pendingNav || navGeneration !== passGen) return;
               injectedIds.delete(prevId);
@@ -759,6 +1344,7 @@ function attachWebContents(contents, electronApp) {
         for (const addon of addons) {
           if (pendingNav || navGeneration !== passGen) break;
           let capToken = '';
+          setLifecycleState(addon.pluginId, 'renderer', 'ACTIVATING');
           try {
             // NB2: Read renderer script BEFORE registering capability token so missing/unreadable files leak no token
             const rawCode = fs.readFileSync(addon.rendererPath, 'utf8');
@@ -775,6 +1361,8 @@ function attachWebContents(contents, electronApp) {
               allowedSlotIds: addon.allowedSlotIds,
               storageNamespace: addon.storageNamespace,
               ipcChannelPrefix: addon.ipcChannelPrefix,
+              trustLevel: addon.trustLevel,
+              hasDocumentTransformSlot: addon.hasDocumentTransformSlot,
             };
             await execInRenderer(
               'window.__ADDON_HOST_REGISTER_CAP__(' +
@@ -792,15 +1380,23 @@ function attachWebContents(contents, electronApp) {
               if (!pendingNav && navGeneration === passGen) resetCredentials();
               break;
             }
-            // R6-F4: On partial execution throw, immediately dispose partial slots/styles before rethrowing
+            // R6-F4 & P1: On sync throw OR returned Promise rejection, isolate & clean up partial slots/styles
             const wrapped =
               '(function(){\\n' +
               '  const __addonHandle = window.__ADDON_HOST_CONSUME_CAP__(' + JSON.stringify(capToken) + ');\\n' +
               '  try {\\n' +
-              '    (function(addonHost){\\n' +
+              '    const __addonRet = (function(addonHost){\\n' +
               rawCode +
               '\\n    })(__addonHandle);\\n' +
+              '    if (__addonRet && typeof __addonRet.then === "function") {\\n' +
+              '      return Promise.resolve(__addonRet).catch(function(__asyncErr){\\n' +
+              '        try { __addonHandle.reportError(__asyncErr); } catch (_r) {}\\n' +
+              '        try { __addonHandle.dispose(); } catch (_d) {}\\n' +
+              '        throw __asyncErr;\\n' +
+              '      });\\n' +
+              '    }\\n' +
               '  } catch (__addonErr) {\\n' +
+              '    try { __addonHandle.reportError(__addonErr); } catch (_r) {}\\n' +
               '    try { __addonHandle.dispose(); } catch (_d) {}\\n' +
               '    throw __addonErr;\\n' +
               '  }\\n' +
@@ -812,11 +1408,14 @@ function attachWebContents(contents, electronApp) {
               break;
             }
             injectedIds.add(addon.pluginId);
+            setLifecycleState(addon.pluginId, 'renderer', 'ACTIVE');
           } catch (err) {
             // R6-F4, R7-F4 & R8-F2: Isolate failing plugin only for current generation;
             // ONLY call REVOKE_CAP if the renderer is STILL verified trusted (never leak secrets to untrusted doc).
+            const msg = err && err.message ? err.message : String(err);
             if (!pendingNav && navGeneration === passGen) {
               failedIds.add(addon.pluginId);
+              setLifecycleState(addon.pluginId, 'renderer', 'FAILED', msg);
             }
             if (capToken && hostSecret && instanceNonce && !pendingNav && navGeneration === passGen) {
               try {
@@ -832,7 +1431,7 @@ function attachWebContents(contents, electronApp) {
                 }
               } catch (_revErr) {}
             }
-            recordDiag('error', 'ERR_RENDERER_INJECT', addon.pluginId + ': ' + (err && err.message));
+            recordDiag('error', 'ERR_RENDERER_INJECT', addon.pluginId + ': ' + msg);
           }
         }
       } catch (err) {
@@ -843,9 +1442,6 @@ function attachWebContents(contents, electronApp) {
   };
 
   if (typeof contents.on === 'function') {
-    // R7-F4: Separate pending navigation (abort in-flight passes) from committed navigation (reset credentials).
-    // If a navigation is aborted (did-fail-load / download), the existing live document keeps its valid
-    // credentials and avoids re-bootstrapping over non-configurable properties.
     contents.on('did-start-navigation', (evt, _url, isInPlace, isMainFrame) => {
       const inPlace =
         evt && typeof evt === 'object' && typeof evt.isSameDocument === 'boolean'
@@ -890,6 +1486,7 @@ module.exports = {
   runMainHooks: syncMainHooks,
   attachWebContents,
   getDiagnostics,
+  getAddonLifecycleStates,
 };
 `;
 }

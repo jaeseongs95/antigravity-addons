@@ -35,6 +35,11 @@
       "type": "string",
       "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
     },
+    "trustLevel": {
+      "type": "string",
+      "enum": ["trusted", "restricted"],
+      "description": "Explicit execution trust policy. Restricted plugins cannot use mainHook, document-transform, or global CSS."
+    },
     "compatibility": {
       "type": "object",
       "additionalProperties": false,

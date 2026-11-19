@@ -280,7 +280,14 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       let disposed = 0;
       let wcCount = 0;
       module.exports = {
-        activate(ctx) { ctx.app.__hookState = { get disposed(){return disposed;}, get wcCount(){return wcCount;} }; },
+        activate(ctx) {
+          globalThis.__TC008_HOOK_STATE__ = {
+            get disposed(){ return disposed; },
+            get wcCount(){ return wcCount; },
+            appFrozen: Object.isFrozen(ctx.app),
+            appQuitHidden: typeof ctx.app.quit === 'undefined',
+          };
+        },
         onWebContentsCreated() { wcCount++; },
         dispose() { disposed++; },
       };
@@ -410,8 +417,10 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
 
     // R2-F4, R5-F5, R6-F3, R6-F4, NB3: Disabling plugin-second via config.json must dispose BOTH its mainHook AND renderer handle
     // with 0 calls to polluted Function.prototype.call (Reflect.apply), must NOT re-run plugin-boom, and handle becomes unusable after dispose
-    assert.equal(fakeApp.__hookState.wcCount, 1);
-    assert.equal(fakeApp.__hookState.disposed, 0);
+    assert.equal(globalThis.__TC008_HOOK_STATE__.appFrozen, true, 'P1: mainHook ctx.app broker must be frozen');
+    assert.equal(globalThis.__TC008_HOOK_STATE__.appQuitHidden, true, 'P1: mainHook ctx.app broker must hide raw app.quit');
+    assert.equal(globalThis.__TC008_HOOK_STATE__.wcCount, 1);
+    assert.equal(globalThis.__TC008_HOOK_STATE__.disposed, 0);
     assert.equal(rendererWindow.__SECOND_DISPOSED__, undefined);
     rendererWindow.__WATCH_DISPOSE_CALL__ = true;
     fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'plugin-second': { enabled: false } } }), 'utf8');
@@ -420,7 +429,7 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
     rendererWindow.__WATCH_DISPOSE_CALL__ = false;
     assert.equal(rendererWindow.__FN_CALL_DURING_DISPOSE__, 0, 'R6-F3: dispose() must invoke Function.prototype.call 0 times (Reflect.apply)');
     assert.equal(rendererWindow.__BOOM_RUN_COUNT__, 1, 'R6-F4: failed plugin must NOT re-execute on subsequent did-finish-load');
-    assert.equal(fakeApp.__hookState.disposed, 1, 'R2-F4: disabled mainHook must be disposed on single-window reload');
+    assert.equal(globalThis.__TC008_HOOK_STATE__.disposed, 1, 'R2-F4: disabled mainHook must be disposed on single-window reload');
     assert.equal(rendererWindow.__SECOND_DISPOSED__, true, 'R5-F5/R5-F3: disabled renderer addon must be disposed even under Object.prototype.get pollution');
     assert.equal(rendererWindow.__SECOND_DISPOSE_THIS_IS_UNDEFINED__, true, 'NB2: onDispose callback must not receive internal bucket as `this`');
     assert.equal(
@@ -434,7 +443,7 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       'NB3: disposed handle must reject subsequent mountSlot calls'
     );
     mod.exports.attachWebContents({ getType: () => 'window', getURL: () => currentUrl, on() {} }, fakeApp);
-    assert.equal(fakeApp.__hookState.wcCount, 1, 'F3: disabled mainHook must not receive onWebContentsCreated');
+    assert.equal(globalThis.__TC008_HOOK_STATE__.wcCount, 1, 'F3: disabled mainHook must not receive onWebContentsCreated');
 
     // NB2: Diagnostics buffer must capture rejected traversal + throwing peer
     const diags = mod.exports.getDiagnostics();
@@ -475,6 +484,7 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       assert.equal(spoofedSecrets.length, 0, `R4-F1 (${mode}): must leak 0 hostSecret/capToken across 2 events`);
     }
   } finally {
+    delete globalThis.__TC008_HOOK_STATE__;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -575,6 +585,7 @@ test('TC-015 (R5-F2): mid-loop async executeJavaScript redirect to disallowed or
       'R5-F2: diagnostics must record ERR_RENDERER_TOCTOU_ABORT'
     );
   } finally {
+    delete globalThis.__TC008_HOOK_STATE__;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -711,6 +722,7 @@ test('TC-017 (R7-F3 & R7-F4): custom protocol origin comparison, null-origin fra
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(docWin.__CUSTOM_RUNS__, 1, 'R7-F4: new committed document must inject custom-p1 cleanly');
   } finally {
+    delete globalThis.__TC008_HOOK_STATE__;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -815,6 +827,489 @@ test('TC-018 (R8-F2): untrusted !trustedLocBeforeExec/catch never sends REVOKE_C
       assert.equal(registerCapCalls, 0, 'R8-F2(b): postVerify race must NOT commit credentials or call REGISTER_CAP');
       assert.equal(win.__R8_RAN__, undefined, 'R8-F2(b): addon must NOT execute after postVerify race');
     }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TC-021 (P1): CSS owner auto-scoping, dangerous CSS rejection, global scope enforcement, shadow mount, and least-privilege mainHook/contents brokers with auto-cleanup', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-tc021-'));
+  try {
+    const pluginsRoot = path.join(dir, 'plugins');
+    const addonsDir = path.join(dir, 'addons.d');
+    const configPath = path.join(dir, 'config.json');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'restricted-ui'), { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'trusted-transform'), { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'trusted-hook'), { recursive: true });
+
+    // 1) Restricted UI addon: owner auto-scoping, shadow mount, dangerous CSS & global scope rejection
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'restricted-ui', 'entry.js'),
+      `
+      const shadowRoot = addonHost.mountSlot('restricted-ui.panel', null, { shadow: true });
+      window.__SHADOW_ATTACHED__ = Boolean(shadowRoot && shadowRoot.__isShadowRoot);
+      const st = addonHost.injectStyle('base', 'body { margin: 0 } .btn, #id { color: red } @media (min-width: 1px) { .m { display: flex } } @keyframes spin { from { opacity: 0 } to { opacity: 1 } }');
+      window.__SCOPED_CSS__ = st.textContent;
+      window.__SCOPED_ATTR__ = st.getAttribute('data-addon-host-style-scope');
+      window.__TRUST_LEVEL__ = addonHost.trustLevel;
+      const errs = {};
+      for (const [k, fn] of [
+        ['import', () => addonHost.injectStyle('bad1', '@import url("https://evil.example/x.css");')],
+        ['jsUrl', () => addonHost.injectStyle('bad2', '.a{background:url(javascript:alert(1))}')],
+        ['expr', () => addonHost.injectStyle('bad3', '.a{width:expression(alert(1))}')],
+        ['globalDenied', () => addonHost.injectStyle('bad4', 'body{display:none}', { scope: 'global' })],
+      ]) {
+        try { fn(); errs[k] = 'ALLOWED'; } catch (e) { errs[k] = e.message; }
+      }
+      window.__CSS_ERRORS__ = errs;
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, 'restricted-ui.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'restricted-ui',
+        displayName: 'Restricted UI',
+        version: '1.0.0',
+        trustLevel: 'restricted',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [{ slot: 'overlay', slotId: 'restricted-ui.panel' }],
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'restricted-ui' },
+        loadOrder: 10,
+      }),
+      'utf8'
+    );
+
+    // 2) Trusted document-transform addon: global style scope allowed (still blocks @import)
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'trusted-transform', 'entry.js'),
+      `
+      const st = addonHost.injectStyle('overlay', '.cursor-edit { display: block }');
+      window.__GLOBAL_CSS__ = st.textContent;
+      window.__GLOBAL_SCOPE__ = st.getAttribute('data-addon-host-style-scope');
+      try {
+        addonHost.injectStyle('bad-global', '@import url("x.css");');
+        window.__GLOBAL_IMPORT_ERR__ = 'ALLOWED';
+      } catch (e) {
+        window.__GLOBAL_IMPORT_ERR__ = e.message;
+      }
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, 'trusted-transform.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'trusted-transform',
+        displayName: 'Trusted Transform',
+        version: '1.0.0',
+        trustLevel: 'trusted',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [{ slot: 'document-transform', slotId: 'trusted-transform.doc', scope: 'native-host-only' }],
+        isolation: { noTranslate: false, i18nSelfManaged: true, respectsNoTranslate: true, storageNamespace: 'trusted-transform' },
+        loadOrder: 20,
+      }),
+      'utf8'
+    );
+
+    // 3) Trusted mainHook addon: tests least-privilege app & webContents brokers + auto-cleanup on dispose
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'trusted-hook', 'hook.cjs'),
+      `
+      module.exports = {
+        activate(ctx) {
+          const probe = {
+            appFrozen: Object.isFrozen(ctx.app),
+            quitHidden: typeof ctx.app.quit === 'undefined',
+            exitHidden: typeof ctx.app.exit === 'undefined',
+            relaunchHidden: typeof ctx.app.relaunch === 'undefined',
+            version: ctx.app.getVersion(),
+            userData: ctx.app.getPath('userData'),
+          };
+          try { ctx.app.getPath('exe'); probe.exePathErr = 'ALLOWED'; } catch (e) { probe.exePathErr = e.message; }
+          ctx.app.onBeforeQuit(() => {});
+          globalThis.__TC021_BROKER_PROBE__ = probe;
+        },
+        async onWebContentsCreated({ contents }) {
+          const p = globalThis.__TC021_BROKER_PROBE__;
+          p.wcFrozen = Object.isFrozen(contents);
+          p.loadUrlHidden = typeof contents.loadURL === 'undefined';
+          p.sessionHidden = typeof contents.session === 'undefined';
+          p.rawExecHidden = typeof contents.executeJavaScript === 'undefined';
+          try { contents.on('will-navigate', () => {}); p.badEvtErr = 'ALLOWED'; } catch (e) { p.badEvtErr = e.message; }
+          contents.on('dom-ready', () => {});
+          contents.on('did-finish-load', () => {});
+          try {
+            await contents.executeJavaScriptInIsolatedWorld(0, [{ code: '1' }], true);
+            p.world0Err = 'ALLOWED';
+          } catch (e) {
+            p.world0Err = e.message;
+          }
+          p.allowedExecResult = await contents.executeInIsolatedWorld('1 + 41');
+        },
+        dispose() {},
+      };
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, 'trusted-hook.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'trusted-hook',
+        displayName: 'Trusted Hook',
+        version: '1.0.0',
+        trustLevel: 'trusted',
+        capabilities: ['mainHook'],
+        entry: { rendererScript: null, mainHookScript: 'hook.cjs' },
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'trusted-hook' },
+        loadOrder: 30,
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+
+    const loaderSrc = buildHostLoaderScriptSource(
+      { ADDONS_DIR: addonsDir, PLUGINS_ROOT_DIR: pluginsRoot, CONFIG_JSON_PATH: configPath },
+      ANTIGRAVITY_HOST_PROFILE,
+      { strictTrustPolicy: true }
+    );
+    const mod = { exports: {} };
+    vm.runInNewContext(loaderSrc, { require, module: mod, exports: mod.exports, URL, console, setTimeout, clearTimeout });
+
+    const body = {
+      children: [],
+      appendChild(el) { el.parentNode = this; this.children.push(el); },
+      removeChild(el) { this.children = this.children.filter((c) => c !== el); el.parentNode = null; },
+    };
+    const fakeDocument = {
+      body,
+      head: body,
+      createElement(tag) {
+        const attrs = Object.create(null);
+        return {
+          tagName: tag.toUpperCase(),
+          attrs,
+          shadowRoot: null,
+          attachShadow() { this.shadowRoot = { __isShadowRoot: true }; return this.shadowRoot; },
+          setAttribute(k, v) { attrs[k] = String(v); },
+          getAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
+          textContent: '',
+          parentNode: null,
+        };
+      },
+    };
+    const win = {
+      document: fakeDocument,
+      location: { protocol: 'http:', host: '127.0.0.1:4173', origin: 'http://127.0.0.1:4173' },
+    };
+    const ctx = vm.createContext({ window: win, document: fakeDocument });
+
+    const appListeners = new Map();
+    const fakeApp = {
+      getVersion: () => '2.33.0',
+      getPath: (name) => `/fake/${name}`,
+      quit() { throw new Error('MUST_NOT_EXPOSE_QUIT'); },
+      exit() { throw new Error('MUST_NOT_EXPOSE_EXIT'); },
+      relaunch() { throw new Error('MUST_NOT_EXPOSE_RELAUNCH'); },
+      on(ev, fn) { if (!appListeners.has(ev)) appListeners.set(ev, new Set()); appListeners.get(ev).add(fn); },
+      removeListener(ev, fn) { if (appListeners.has(ev)) appListeners.get(ev).delete(fn); },
+    };
+
+    const currentUrl = 'http://127.0.0.1:4173/app';
+    const wcListeners = new Map();
+    const fakeContents = {
+      getType: () => 'window',
+      getURL: () => currentUrl,
+      isDestroyed: () => false,
+      loadURL() { throw new Error('MUST_NOT_EXPOSE_LOADURL'); },
+      session: { secret: true },
+      on(ev, fn) { if (!wcListeners.has(ev)) wcListeners.set(ev, new Set()); wcListeners.get(ev).add(fn); },
+      removeListener(ev, fn) { if (wcListeners.has(ev)) wcListeners.get(ev).delete(fn); },
+      async executeJavaScriptInIsolatedWorld(worldId, sources) {
+        assert.equal(worldId, 999);
+        return vm.runInContext(sources[0].code, ctx);
+      },
+    };
+
+    mod.exports.attachWebContents(fakeContents, fakeApp);
+    for (const fn of Array.from(wcListeners.get('dom-ready') || [])) fn();
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Verify CSS auto-scoping & danger filtering
+    assert.equal(win.__SHADOW_ATTACHED__, true);
+    assert.equal(win.__TRUST_LEVEL__, 'restricted');
+    assert.equal(win.__SCOPED_ATTR__, 'owner');
+    assert.match(win.__SCOPED_CSS__, /\[data-addon-host-owner="restricted-ui"\]\s*\{\s*margin: 0\s*\}/);
+    assert.match(win.__SCOPED_CSS__, /\[data-addon-host-owner="restricted-ui"\] \.btn, \[data-addon-host-owner="restricted-ui"\] #id/);
+    assert.match(win.__SCOPED_CSS__, /@media \(min-width: 1px\)\s*\{\s*\[data-addon-host-owner="restricted-ui"\] \.m/);
+    assert.match(win.__SCOPED_CSS__, /@keyframes spin/);
+    assert.equal(win.__CSS_ERRORS__.import, 'ERR_FORBIDDEN_CSS_CONSTRUCT');
+    assert.equal(win.__CSS_ERRORS__.jsUrl, 'ERR_FORBIDDEN_CSS_CONSTRUCT');
+    assert.equal(win.__CSS_ERRORS__.expr, 'ERR_FORBIDDEN_CSS_CONSTRUCT');
+    assert.match(win.__CSS_ERRORS__.globalDenied, /ERR_FORBIDDEN_GLOBAL_STYLE_SCOPE/);
+
+    // Verify trusted document-transform global CSS allowance + @import guard
+    assert.equal(win.__GLOBAL_SCOPE__, 'global');
+    assert.match(win.__GLOBAL_CSS__, /\.cursor-edit/);
+    assert.equal(win.__GLOBAL_IMPORT_ERR__, 'ERR_FORBIDDEN_CSS_CONSTRUCT');
+
+    // Verify mainHook & webContents least-privilege brokers
+    const p = globalThis.__TC021_BROKER_PROBE__;
+    assert.equal(p.appFrozen, true);
+    assert.equal(p.quitHidden, true);
+    assert.equal(p.exitHidden, true);
+    assert.equal(p.relaunchHidden, true);
+    assert.equal(p.version, '2.33.0');
+    assert.equal(p.userData, '/fake/userData');
+    assert.match(p.exePathErr, /ERR_FORBIDDEN_APP_PATH:exe/);
+    assert.equal(p.wcFrozen, true);
+    assert.equal(p.loadUrlHidden, true);
+    assert.equal(p.sessionHidden, true);
+    assert.equal(p.rawExecHidden, true);
+    assert.match(p.badEvtErr, /ERR_FORBIDDEN_WEBCONTENTS_EVENT:will-navigate/);
+    assert.match(p.world0Err, /ERR_FORBIDDEN_WORLD_ID:0/);
+    assert.equal(p.allowedExecResult, 42);
+    assert.equal((appListeners.get('before-quit') || new Set()).size, 1);
+    const wcDomReadyBeforeDispose = (wcListeners.get('dom-ready') || new Set()).size;
+    assert.ok(wcDomReadyBeforeDispose >= 2);
+
+    // Disable trusted-hook -> broker must auto-detach BOTH before-quit and webContents listeners!
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'trusted-hook': { enabled: false } } }), 'utf8');
+    mod.exports.syncMainHooks(fakeApp);
+    assert.equal((appListeners.get('before-quit') || new Set()).size, 0, 'P1: before-quit listener must auto-detach on dispose');
+    assert.equal(
+      (wcListeners.get('dom-ready') || new Set()).size,
+      wcDomReadyBeforeDispose - 1,
+      'P1: webContents listener must auto-detach on dispose'
+    );
+  } finally {
+    delete globalThis.__TC021_BROKER_PROBE__;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TC-022 (P1): async fault isolation (mainHook rejection/timeout, renderer Promise rejection, runSafe, addManagedListener) and explicit lifecycle state machine', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-tc022-'));
+  try {
+    const pluginsRoot = path.join(dir, 'plugins');
+    const addonsDir = path.join(dir, 'addons.d');
+    const configPath = path.join(dir, 'config.json');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    for (const id of ['async-reject-hook', 'async-timeout-hook', 'async-fail-renderer', 'healthy-peer']) {
+      fs.mkdirSync(path.join(pluginsRoot, id), { recursive: true });
+    }
+
+    // 1) Async rejecting mainHook (registers before-quit listener BEFORE rejecting -> must auto-clean)
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'async-reject-hook', 'hook.cjs'),
+      `
+      module.exports = {
+        async activate(ctx) {
+          ctx.app.onBeforeQuit(() => {});
+          await new Promise((r) => setTimeout(r, 15));
+          throw new Error('ASYNC_HOOK_BOOM');
+        },
+      };
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '01-async-reject-hook.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'async-reject-hook',
+        displayName: 'Async Reject Hook',
+        version: '1.0.0',
+        trustLevel: 'trusted',
+        capabilities: ['mainHook'],
+        entry: { rendererScript: null, mainHookScript: 'hook.cjs' },
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'async-reject-hook' },
+        loadOrder: 10,
+      }),
+      'utf8'
+    );
+
+    // 2) Async hanging mainHook -> times out at mainHookTimeoutMs: 120
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'async-timeout-hook', 'hook.cjs'),
+      `
+      module.exports = {
+        activate(ctx) {
+          ctx.app.onBeforeQuit(() => {});
+          return new Promise(() => {});
+        },
+      };
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '02-async-timeout-hook.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'async-timeout-hook',
+        displayName: 'Async Timeout Hook',
+        version: '1.0.0',
+        trustLevel: 'trusted',
+        capabilities: ['mainHook'],
+        entry: { rendererScript: null, mainHookScript: 'hook.cjs' },
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'async-timeout-hook' },
+        loadOrder: 20,
+      }),
+      'utf8'
+    );
+
+    // 3) Renderer addon returning a rejected Promise after mounting a partial slot
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'async-fail-renderer', 'entry.js'),
+      `
+      addonHost.mountSlot('async-fail-renderer.slot');
+      return Promise.reject(new Error('ASYNC_RENDERER_BOOM'));
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '03-async-fail-renderer.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'async-fail-renderer',
+        displayName: 'Async Fail Renderer',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [{ slot: 'overlay', slotId: 'async-fail-renderer.slot' }],
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'async-fail-renderer' },
+        loadOrder: 30,
+      }),
+      'utf8'
+    );
+
+    // 4) Healthy peer using runSafe + addManagedListener (auto-cleaned on dispose)
+    fs.writeFileSync(
+      path.join(pluginsRoot, 'healthy-peer', 'entry.js'),
+      `
+      const el = addonHost.mountSlot('healthy-peer.slot');
+      el.textContent = 'HEALTHY_OK';
+      window.__RUN_SAFE_DONE__ = addonHost.runSafe(async () => {
+        throw new Error('CONTAINED_ASYNC_ERROR');
+      });
+      addonHost.addManagedListener(window.__FAKE_TARGET__, 'ping', async () => {
+        window.__PING_COUNT__ = (window.__PING_COUNT__ || 0) + 1;
+        throw new Error('CONTAINED_LISTENER_ERROR');
+      });
+      `,
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, '04-healthy-peer.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'healthy-peer',
+        displayName: 'Healthy Peer',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [{ slot: 'status-bar', slotId: 'healthy-peer.slot' }],
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'healthy-peer' },
+        loadOrder: 40,
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+
+    const loaderSrc = buildHostLoaderScriptSource(
+      { ADDONS_DIR: addonsDir, PLUGINS_ROOT_DIR: pluginsRoot, CONFIG_JSON_PATH: configPath },
+      ANTIGRAVITY_HOST_PROFILE,
+      { mainHookTimeoutMs: 120 }
+    );
+    const mod = { exports: {} };
+    vm.runInNewContext(loaderSrc, { require, module: mod, exports: mod.exports, URL, console, setTimeout, clearTimeout });
+
+    const beforeQuitSet = new Set();
+    const fakeApp = {
+      on(ev, fn) { if (ev === 'before-quit') beforeQuitSet.add(fn); },
+      removeListener(ev, fn) { if (ev === 'before-quit') beforeQuitSet.delete(fn); },
+    };
+
+    const targetListeners = new Set();
+    const fakeTarget = {
+      addEventListener(_ev, fn) { targetListeners.add(fn); },
+      removeEventListener(_ev, fn) { targetListeners.delete(fn); },
+      emit() { for (const fn of Array.from(targetListeners)) fn(); },
+    };
+    const body = {
+      children: [],
+      appendChild(el) { el.parentNode = this; this.children.push(el); },
+      removeChild(el) { this.children = this.children.filter((c) => c !== el); el.parentNode = null; },
+    };
+    const fakeDocument = {
+      body,
+      head: body,
+      createElement(tag) {
+        const attrs = Object.create(null);
+        return {
+          tagName: tag.toUpperCase(),
+          attrs,
+          setAttribute(k, v) { attrs[k] = String(v); },
+          getAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
+          textContent: '',
+          parentNode: null,
+        };
+      },
+    };
+    const win = {
+      document: fakeDocument,
+      __FAKE_TARGET__: fakeTarget,
+      location: { protocol: 'http:', host: '127.0.0.1:4173', origin: 'http://127.0.0.1:4173' },
+    };
+    const ctx = vm.createContext({ window: win, document: fakeDocument });
+    const listeners = {};
+    mod.exports.attachWebContents(
+      {
+        getType: () => 'window',
+        getURL: () => 'http://127.0.0.1:4173/home',
+        on(ev, fn) { listeners[ev] = fn; },
+        async executeJavaScriptInIsolatedWorld(_id, sources) {
+          return vm.runInContext(sources[0].code, ctx);
+        },
+      },
+      fakeApp
+    );
+
+    listeners['dom-ready']();
+    await new Promise((r) => setTimeout(r, 200));
+
+    const states = mod.exports.getAddonLifecycleStates();
+    assert.equal(states['async-reject-hook'].mainHook.state, 'FAILED');
+    assert.match(states['async-reject-hook'].mainHook.lastError, /ASYNC_HOOK_BOOM/);
+    assert.equal(states['async-timeout-hook'].mainHook.state, 'FAILED');
+    assert.match(states['async-timeout-hook'].mainHook.lastError, /ERR_MAIN_HOOK_ACTIVATE_TIMEOUT/);
+    assert.equal(beforeQuitSet.size, 0, 'P1: failed/timed-out async mainHooks must auto-clean broker listeners');
+
+    assert.equal(states['async-fail-renderer'].renderer.state, 'FAILED');
+    assert.match(states['async-fail-renderer'].renderer.lastError, /ASYNC_RENDERER_BOOM/);
+    assert.equal(
+      body.children.some((c) => c.getAttribute('data-addon-host-owner') === 'async-fail-renderer'),
+      false,
+      'P1: async-failing renderer addon partial slots must be cleaned up'
+    );
+
+    assert.equal(states['healthy-peer'].renderer.state, 'ACTIVE');
+    assert.equal(targetListeners.size, 1);
+    fakeTarget.emit();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(win.__PING_COUNT__, 1);
+
+    // Disable healthy-peer -> managed listener must be removed automatically and state transitions to DISPOSED
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'healthy-peer': { enabled: false } } }), 'utf8');
+    listeners['did-finish-load']();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(targetListeners.size, 0, 'P1: addManagedListener must auto-detach on dispose');
+    assert.equal(mod.exports.getAddonLifecycleStates()['healthy-peer'].renderer.state, 'DISPOSED');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

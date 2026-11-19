@@ -1,23 +1,22 @@
 'use strict';
 
 /**
- * Vendor-neutral AddonManifest.v1 validator backed by Ajv JSON Schema,
- * strict `<pluginsRoot>/<pluginId>/` realpath confinement (blocks pluginId dir symlink escape),
- * compatibility checks (hostProfile, minHostVersion), and document-transform scope enforcement.
+ * Runtime- & vendor-neutral AddonManifest.v1 validator backed by Ajv JSON Schema,
+ * injected `FileSystemPort` (`src/core/fs-port.js`) realpath confinement,
+ * compatibility checks (hostProfile, minHostVersion), explicit trust model
+ * (`trusted` | `restricted`), and document-transform scope enforcement.
+ *
+ * ZERO direct `node:fs` or `node:path` imports (SOLID DIP).
  */
 
-const fs = require('node:fs');
-const path = require('node:path');
 const Ajv = require('ajv');
-
-const SCHEMA_PATH = path.resolve(__dirname, '..', '..', 'schemas', 'addon-manifest.v1.schema.json');
-const MANIFEST_SCHEMA = JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8'));
-
-const ajv = new Ajv({ allErrors: true, strict: false });
-const validateSchema = ajv.compile(MANIFEST_SCHEMA);
+const MANIFEST_SCHEMA = require('../../schemas/addon-manifest.v1.schema.json');
+const { assertFileSystemPort } = require('./fs-port');
 
 const FORBIDDEN_IDS = new Set(['__proto__', 'constructor', 'prototype']);
 const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
+const SEMVER_RE =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function validatePluginId(pluginId) {
   if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
@@ -28,9 +27,6 @@ function validatePluginId(pluginId) {
   }
   return { ok: true, pluginId };
 }
-
-const SEMVER_RE =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function parseSemver(ver) {
   if (typeof ver !== 'string') return null;
@@ -80,28 +76,72 @@ function compareSemver(a, b) {
   return 0;
 }
 
-function resolveConfinedScriptPath(relScript, pluginDir, { pluginsRootDir = null, checkExists = true } = {}) {
+/**
+ * Pure JS portable path-only fallback used when `checkExists` is false and no `fsPort` was supplied.
+ */
+function normalizePortableSegments(rawPath) {
+  const slashNorm = String(rawPath || '').replace(/\\/g, '/');
+  const isAbs = slashNorm.startsWith('/') || /^[A-Za-z]:\//.test(slashNorm);
+  const parts = slashNorm.split('/');
+  const stack = [];
+  for (const part of parts) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (stack.length > 0 && stack[stack.length - 1] !== '..') {
+        stack.pop();
+      } else if (!isAbs) {
+        stack.push('..');
+      }
+    } else {
+      stack.push(part);
+    }
+  }
+  return { isAbs, normalized: (isAbs ? '/' : '') + stack.join('/') };
+}
+
+function resolveConfinedScriptPath(
+  relScript,
+  pluginDir,
+  { pluginsRootDir = null, checkExists = true, fsPort = null } = {}
+) {
   if (typeof relScript !== 'string' || !relScript.trim()) {
     return { ok: false, reason: 'EMPTY_ENTRY_SCRIPT' };
   }
-  if (path.isAbsolute(relScript) || /^[A-Za-z]:/.test(relScript) || relScript.includes('\0')) {
+  if (relScript.includes('\0') || /^[A-Za-z]:/.test(relScript) || relScript.startsWith('/') || relScript.startsWith('\\')) {
     return { ok: false, reason: 'ERR_ENTRY_ESCAPES_PLUGIN_DIR' };
   }
-  const normalized = path.normalize(relScript);
-  if (normalized.startsWith('..') || normalized.includes(`..${path.sep}`)) {
+
+  if (!fsPort) {
+    if (checkExists) {
+      return { ok: false, reason: 'ERR_FS_PORT_REQUIRED' };
+    }
+    const { isAbs, normalized } = normalizePortableSegments(relScript);
+    if (isAbs || !normalized || normalized === '..' || normalized.startsWith('../') || normalized.includes('/../')) {
+      return { ok: false, reason: 'ERR_ENTRY_ESCAPES_PLUGIN_DIR' };
+    }
+    const baseClean = String(pluginDir || '').replace(/[\\/]+$/, '');
+    return { ok: true, resolvedPath: baseClean ? `${baseClean}/${normalized}` : normalized };
+  }
+
+  const io = assertFileSystemPort(fsPort);
+  if (io.isAbsolute(relScript)) {
     return { ok: false, reason: 'ERR_ENTRY_ESCAPES_PLUGIN_DIR' };
   }
-  const resolvedBase = path.resolve(pluginDir);
-  const resolvedTarget = path.resolve(resolvedBase, normalized);
-  const rel = path.relative(resolvedBase, resolvedTarget);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+  const normalized = io.normalize(relScript);
+  if (normalized === '..' || normalized.startsWith(`..${io.sep}`) || normalized.includes(`${io.sep}..${io.sep}`) || normalized.startsWith('..')) {
+    return { ok: false, reason: 'ERR_ENTRY_ESCAPES_PLUGIN_DIR' };
+  }
+  const resolvedBase = io.resolve(pluginDir);
+  const resolvedTarget = io.resolve(resolvedBase, normalized);
+  const rel = io.relative(resolvedBase, resolvedTarget);
+  if (!rel || rel.startsWith('..') || io.isAbsolute(rel)) {
     return { ok: false, reason: 'ERR_ENTRY_ESCAPES_PLUGIN_DIR' };
   }
 
   if (pluginsRootDir) {
-    const resolvedRoot = path.resolve(pluginsRootDir);
-    const rootRel = path.relative(resolvedRoot, resolvedBase);
-    if (!rootRel || rootRel.startsWith('..') || path.isAbsolute(rootRel)) {
+    const resolvedRoot = io.resolve(pluginsRootDir);
+    const rootRel = io.relative(resolvedRoot, resolvedBase);
+    if (!rootRel || rootRel.startsWith('..') || io.isAbsolute(rootRel)) {
       return { ok: false, reason: 'ERR_PLUGIN_DIR_ESCAPES_ROOT' };
     }
   }
@@ -110,22 +150,22 @@ function resolveConfinedScriptPath(relScript, pluginDir, { pluginsRootDir = null
     return { ok: true, resolvedPath: resolvedTarget };
   }
 
-  if (!fs.existsSync(resolvedTarget) || !fs.statSync(resolvedTarget).isFile()) {
+  if (!io.existsSync(resolvedTarget) || !io.isFileSync(resolvedTarget)) {
     return { ok: false, reason: 'ERR_ENTRY_SCRIPT_NOT_FOUND', resolvedPath: resolvedTarget };
   }
 
   try {
-    const realBase = fs.realpathSync(resolvedBase);
-    if (pluginsRootDir && fs.existsSync(pluginsRootDir)) {
-      const realRoot = fs.realpathSync(path.resolve(pluginsRootDir));
-      const realRootRel = path.relative(realRoot, realBase);
-      if (!realRootRel || realRootRel.startsWith('..') || path.isAbsolute(realRootRel)) {
+    const realBase = io.realpathSync(resolvedBase);
+    if (pluginsRootDir && io.existsSync(pluginsRootDir)) {
+      const realRoot = io.realpathSync(io.resolve(pluginsRootDir));
+      const realRootRel = io.relative(realRoot, realBase);
+      if (!realRootRel || realRootRel.startsWith('..') || io.isAbsolute(realRootRel)) {
         return { ok: false, reason: 'ERR_PLUGIN_DIR_SYMLINK_ESCAPE' };
       }
     }
-    const realTarget = fs.realpathSync(resolvedTarget);
-    const realRel = path.relative(realBase, realTarget);
-    if (!realRel || realRel.startsWith('..') || path.isAbsolute(realRel)) {
+    const realTarget = io.realpathSync(resolvedTarget);
+    const realRel = io.relative(realBase, realTarget);
+    if (!realRel || realRel.startsWith('..') || io.isAbsolute(realRel)) {
       return { ok: false, reason: 'ERR_ENTRY_ESCAPES_PLUGIN_DIR' };
     }
     return { ok: true, resolvedPath: realTarget };
@@ -134,154 +174,214 @@ function resolveConfinedScriptPath(relScript, pluginDir, { pluginsRootDir = null
   }
 }
 
-function validateAddonManifest(
-  manifest,
-  { pluginsRootDir = null, checkFilesExist = false, hostProfileId = null, hostVersion = undefined } = {}
-) {
-  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
-    return { ok: false, reason: 'INVALID_MANIFEST_OBJECT', errors: ['Manifest must be a JSON object'] };
-  }
+function createManifestValidator({ schema = MANIFEST_SCHEMA, fsPort = null } = {}) {
+  const defaultFsPort = fsPort ? assertFileSystemPort(fsPort) : null;
+  const ajv = new Ajv({ allErrors: true, strict: false });
+  const validateSchema = ajv.compile(schema);
 
-  const schemaOk = validateSchema(manifest);
-  if (!schemaOk) {
-    const errors = (validateSchema.errors || []).map((e) => `${e.instancePath || '/'} ${e.message}`);
-    return { ok: false, reason: 'ERR_MANIFEST_SCHEMA_INVALID', errors };
-  }
-
-  if (FORBIDDEN_IDS.has(manifest.pluginId)) {
-    return { ok: false, reason: 'ERR_FORBIDDEN_PLUGIN_ID', errors: [`Forbidden pluginId: ${manifest.pluginId}`] };
-  }
-
-  if (manifest.compatibility) {
-    if (hostProfileId && manifest.compatibility.hostProfile && manifest.compatibility.hostProfile !== hostProfileId) {
-      return {
-        ok: false,
-        reason: 'ERR_INCOMPATIBLE_HOST_PROFILE',
-        errors: [`Requires hostProfile "${manifest.compatibility.hostProfile}", current is "${hostProfileId}"`],
-      };
+  function validate(
+    manifest,
+    {
+      pluginsRootDir = null,
+      checkFilesExist = false,
+      hostProfileId = null,
+      hostVersion = undefined,
+      strictTrustPolicy = false,
+      fsPort: callFsPort = null,
+    } = {}
+  ) {
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+      return { ok: false, reason: 'INVALID_MANIFEST_OBJECT', errors: ['Manifest must be a JSON object'] };
     }
-    if (manifest.compatibility.minHostVersion) {
-      if (!parseSemver(manifest.compatibility.minHostVersion)) {
+
+    const schemaOk = validateSchema(manifest);
+    if (!schemaOk) {
+      const errors = (validateSchema.errors || []).map((e) => `${e.instancePath || '/'} ${e.message}`);
+      return { ok: false, reason: 'ERR_MANIFEST_SCHEMA_INVALID', errors };
+    }
+
+    if (FORBIDDEN_IDS.has(manifest.pluginId)) {
+      return { ok: false, reason: 'ERR_FORBIDDEN_PLUGIN_ID', errors: [`Forbidden pluginId: ${manifest.pluginId}`] };
+    }
+
+    if (manifest.compatibility) {
+      if (hostProfileId && manifest.compatibility.hostProfile && manifest.compatibility.hostProfile !== hostProfileId) {
         return {
           ok: false,
-          reason: 'ERR_MANIFEST_SCHEMA_INVALID',
-          errors: [`Invalid SemVer 2.0.0 minHostVersion: ${manifest.compatibility.minHostVersion}`],
+          reason: 'ERR_INCOMPATIBLE_HOST_PROFILE',
+          errors: [`Requires hostProfile "${manifest.compatibility.hostProfile}", current is "${hostProfileId}"`],
         };
       }
-      if (hostVersion !== undefined) {
-        const cmp = compareSemver(hostVersion, manifest.compatibility.minHostVersion);
-        if (cmp === null || cmp < 0) {
+      if (manifest.compatibility.minHostVersion) {
+        if (!parseSemver(manifest.compatibility.minHostVersion)) {
           return {
             ok: false,
-            reason: 'ERR_INCOMPATIBLE_HOST_VERSION',
-            errors: [`Requires hostVersion >= ${manifest.compatibility.minHostVersion}, current is ${hostVersion}`],
+            reason: 'ERR_MANIFEST_SCHEMA_INVALID',
+            errors: [`Invalid SemVer 2.0.0 minHostVersion: ${manifest.compatibility.minHostVersion}`],
+          };
+        }
+        if (hostVersion !== undefined) {
+          const cmp = compareSemver(hostVersion, manifest.compatibility.minHostVersion);
+          if (cmp === null || cmp < 0) {
+            return {
+              ok: false,
+              reason: 'ERR_INCOMPATIBLE_HOST_VERSION',
+              errors: [`Requires hostVersion >= ${manifest.compatibility.minHostVersion}, current is ${hostVersion}`],
+            };
+          }
+        }
+      }
+    }
+
+    const caps = new Set(manifest.capabilities || []);
+    const entry = manifest.entry || {};
+    if (caps.has('renderer') && !entry.rendererScript) {
+      return {
+        ok: false,
+        reason: 'ERR_MISSING_RENDERER_ENTRY',
+        errors: ['Capability "renderer" requires entry.rendererScript'],
+      };
+    }
+    if (caps.has('mainHook') && !entry.mainHookScript) {
+      return {
+        ok: false,
+        reason: 'ERR_MISSING_MAIN_HOOK_ENTRY',
+        errors: ['Capability "mainHook" requires entry.mainHookScript'],
+      };
+    }
+    if (!caps.has('renderer') && entry.rendererScript) {
+      return {
+        ok: false,
+        reason: 'ERR_UNDECLARED_RENDERER_CAPABILITY',
+        errors: ['entry.rendererScript declared without "renderer" capability'],
+      };
+    }
+    if (!caps.has('mainHook') && entry.mainHookScript) {
+      return {
+        ok: false,
+        reason: 'ERR_UNDECLARED_MAIN_HOOK_CAPABILITY',
+        errors: ['entry.mainHookScript declared without "mainHook" capability'],
+      };
+    }
+
+    const uiSlots = Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [];
+    const seenSlotIds = new Set();
+    let hasDocumentTransformSlot = false;
+    for (const s of uiSlots) {
+      if (seenSlotIds.has(s.slotId)) {
+        return {
+          ok: false,
+          reason: 'ERR_DUPLICATE_SLOT_ID_IN_MANIFEST',
+          errors: [`Duplicate slotId "${s.slotId}" within the same manifest`],
+        };
+      }
+      seenSlotIds.add(s.slotId);
+      if (s.slot === 'document-transform') {
+        hasDocumentTransformSlot = true;
+        if (s.scope !== 'native-host-only') {
+          return {
+            ok: false,
+            reason: 'ERR_DOCUMENT_TRANSFORM_SCOPE_REQUIRED',
+            errors: ['document-transform slot MUST explicitly set scope: "native-host-only"'],
+          };
+        }
+        if (manifest.isolation && manifest.isolation.respectsNoTranslate === false) {
+          return {
+            ok: false,
+            reason: 'ERR_DOCUMENT_TRANSFORM_MUST_RESPECT_NO_TRANSLATE',
+            errors: ['document-transform addons must keep isolation.respectsNoTranslate !== false'],
           };
         }
       }
     }
-  }
 
-  const caps = new Set(manifest.capabilities || []);
-  const entry = manifest.entry || {};
-  if (caps.has('renderer') && !entry.rendererScript) {
-    return {
-      ok: false,
-      reason: 'ERR_MISSING_RENDERER_ENTRY',
-      errors: ['Capability "renderer" requires entry.rendererScript'],
-    };
-  }
-  if (caps.has('mainHook') && !entry.mainHookScript) {
-    return {
-      ok: false,
-      reason: 'ERR_MISSING_MAIN_HOOK_ENTRY',
-      errors: ['Capability "mainHook" requires entry.mainHookScript'],
-    };
-  }
-  if (!caps.has('renderer') && entry.rendererScript) {
-    return {
-      ok: false,
-      reason: 'ERR_UNDECLARED_RENDERER_CAPABILITY',
-      errors: ['entry.rendererScript declared without "renderer" capability'],
-    };
-  }
-  if (!caps.has('mainHook') && entry.mainHookScript) {
-    return {
-      ok: false,
-      reason: 'ERR_UNDECLARED_MAIN_HOOK_CAPABILITY',
-      errors: ['entry.mainHookScript declared without "mainHook" capability'],
-    };
-  }
-
-  const uiSlots = Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [];
-  const seenSlotIds = new Set();
-  for (const s of uiSlots) {
-    if (seenSlotIds.has(s.slotId)) {
-      return {
-        ok: false,
-        reason: 'ERR_DUPLICATE_SLOT_ID_IN_MANIFEST',
-        errors: [`Duplicate slotId "${s.slotId}" within the same manifest`],
-      };
-    }
-    seenSlotIds.add(s.slotId);
-    if (s.slot === 'document-transform') {
-      if (s.scope !== 'native-host-only') {
+    // Explicit trust policy enforcement (P1):
+    // - Declared `restricted` (or `strictTrustPolicy: true` without explicit `trusted`) CANNOT use
+    //   `mainHook` or `document-transform`.
+    // - Legacy v1.0 manifests omitting `trustLevel` stay compatible in non-strict mode while carrying
+    //   `implicitTrustLevel: true` so hosts/diagnostics can audit them.
+    const declaredTrust = manifest.trustLevel || null;
+    const requiresTrusted = caps.has('mainHook') || hasDocumentTransformSlot;
+    const effectiveTrustLevel = declaredTrust || (strictTrustPolicy ? 'restricted' : requiresTrusted ? 'trusted' : 'restricted');
+    if (effectiveTrustLevel === 'restricted') {
+      if (caps.has('mainHook')) {
         return {
           ok: false,
-          reason: 'ERR_DOCUMENT_TRANSFORM_SCOPE_REQUIRED',
-          errors: ['document-transform slot MUST explicitly set scope: "native-host-only"'],
+          reason: 'ERR_RESTRICTED_MAIN_HOOK_FORBIDDEN',
+          errors: ['Restricted plugins cannot declare "mainHook" capability; requires trustLevel: "trusted"'],
         };
       }
-      if (manifest.isolation && manifest.isolation.respectsNoTranslate === false) {
+      if (hasDocumentTransformSlot) {
         return {
           ok: false,
-          reason: 'ERR_DOCUMENT_TRANSFORM_MUST_RESPECT_NO_TRANSLATE',
-          errors: ['document-transform addons must keep isolation.respectsNoTranslate !== false'],
+          reason: 'ERR_RESTRICTED_DOCUMENT_TRANSFORM_FORBIDDEN',
+          errors: ['Restricted plugins cannot declare "document-transform" slot; requires trustLevel: "trusted"'],
         };
       }
     }
-  }
 
-  const resolvedEntries = { rendererScript: null, mainHookScript: null };
-  const pluginDir = pluginsRootDir ? path.join(pluginsRootDir, manifest.pluginId) : path.join('plugins', manifest.pluginId);
+    const activeFsPort = callFsPort ? assertFileSystemPort(callFsPort) : defaultFsPort;
+    const resolvedEntries = { rendererScript: null, mainHookScript: null };
+    const pluginDir = activeFsPort
+      ? pluginsRootDir
+        ? activeFsPort.join(pluginsRootDir, manifest.pluginId)
+        : activeFsPort.join('plugins', manifest.pluginId)
+      : pluginsRootDir
+        ? `${String(pluginsRootDir).replace(/[\\/]+$/, '')}/${manifest.pluginId}`
+        : `plugins/${manifest.pluginId}`;
 
-  if (entry.rendererScript) {
-    const res = resolveConfinedScriptPath(entry.rendererScript, pluginDir, {
-      pluginsRootDir,
-      checkExists: Boolean(checkFilesExist && pluginsRootDir),
-    });
-    if (!res.ok) {
-      return { ok: false, reason: res.reason, errors: [`rendererScript: ${res.reason}`] };
+    if (entry.rendererScript) {
+      const res = resolveConfinedScriptPath(entry.rendererScript, pluginDir, {
+        pluginsRootDir,
+        checkExists: Boolean(checkFilesExist && pluginsRootDir),
+        fsPort: activeFsPort,
+      });
+      if (!res.ok) {
+        return { ok: false, reason: res.reason, errors: [`rendererScript: ${res.reason}`] };
+      }
+      resolvedEntries.rendererScript = res.resolvedPath;
     }
-    resolvedEntries.rendererScript = res.resolvedPath;
-  }
 
-  if (entry.mainHookScript) {
-    const res = resolveConfinedScriptPath(entry.mainHookScript, pluginDir, {
-      pluginsRootDir,
-      checkExists: Boolean(checkFilesExist && pluginsRootDir),
-    });
-    if (!res.ok) {
-      return { ok: false, reason: res.reason, errors: [`mainHookScript: ${res.reason}`] };
+    if (entry.mainHookScript) {
+      const res = resolveConfinedScriptPath(entry.mainHookScript, pluginDir, {
+        pluginsRootDir,
+        checkExists: Boolean(checkFilesExist && pluginsRootDir),
+        fsPort: activeFsPort,
+      });
+      if (!res.ok) {
+        return { ok: false, reason: res.reason, errors: [`mainHookScript: ${res.reason}`] };
+      }
+      resolvedEntries.mainHookScript = res.resolvedPath;
     }
-    resolvedEntries.mainHookScript = res.resolvedPath;
+
+    return {
+      ok: true,
+      pluginId: manifest.pluginId,
+      loadOrder: typeof manifest.loadOrder === 'number' ? manifest.loadOrder : 100,
+      trustLevel: effectiveTrustLevel,
+      implicitTrustLevel: !declaredTrust,
+      hasDocumentTransformSlot,
+      resolvedEntries,
+      manifest,
+    };
   }
 
-  return {
-    ok: true,
-    pluginId: manifest.pluginId,
-    loadOrder: typeof manifest.loadOrder === 'number' ? manifest.loadOrder : 100,
-    resolvedEntries,
-    manifest,
-  };
+  return Object.freeze({ validate });
+}
+
+const defaultValidator = createManifestValidator();
+
+function validateAddonManifest(manifest, opts = {}) {
+  return defaultValidator.validate(manifest, opts);
 }
 
 module.exports = {
-  SCHEMA_PATH,
   MANIFEST_SCHEMA,
   FORBIDDEN_IDS,
   PLUGIN_ID_RE,
   validatePluginId,
   compareSemver,
   resolveConfinedScriptPath,
+  createManifestValidator,
   validateAddonManifest,
 };

@@ -3,7 +3,8 @@
 /**
  * Electron implementation of `AddonStorePort` (ISP / DIP / SRP).
  * Owns manifest directory planning, locked atomic registration/unregistration,
- * duplicate non-canonical manifest cleanup (NB1), and loader script refresh.
+ * duplicate non-canonical manifest cleanup with strict ADDONS_DIR confinement (R10-NB1),
+ * injected Node FileSystemPort binding, and loader script refresh.
  */
 
 const fs = require('node:fs');
@@ -11,6 +12,7 @@ const path = require('node:path');
 const pkg = require('../../../package.json');
 const { validateAddonManifest, validatePluginId } = require('../../core/manifest-validator');
 const { detectSlotConflicts } = require('../../core/slot-registry');
+const { createNodeFileSystemPort } = require('../node-fs-port');
 const {
   acquireExclusiveLockDetailed,
   releaseExclusiveLock,
@@ -29,40 +31,51 @@ function isDirectChildOfDir(dirPath, candidatePath) {
   return Boolean(rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(path.sep));
 }
 
-function createElectronAddonStorePort() {
+function createElectronAddonStorePort({ fsPort = null } = {}) {
+  const activeFsPort = fsPort || createNodeFileSystemPort();
+
   return Object.freeze({
-    planAddons(ctx, { checkFilesExist = true, hostVersion = pkg.version } = {}) {
+    planAddons(ctx, { checkFilesExist = true, hostVersion = pkg.version, strictTrustPolicy = false } = {}) {
       const { activeProfile, paths } = ctx;
       return collectExecutableAddons(paths, {
         checkFilesExist,
         hostProfileId: activeProfile.id,
         hostVersion,
+        strictTrustPolicy,
+        fsPort: activeFsPort,
       });
     },
 
-    validateManifest(ctx, manifest, { checkFilesExist = false, hostVersion = pkg.version } = {}) {
+    validateManifest(
+      ctx,
+      manifest,
+      { checkFilesExist = false, hostVersion = pkg.version, strictTrustPolicy = false } = {}
+    ) {
       const { activeProfile, paths } = ctx;
       return validateAddonManifest(manifest, {
         pluginsRootDir: paths.PLUGINS_ROOT_DIR,
         checkFilesExist,
         hostProfileId: activeProfile.id,
         hostVersion,
+        strictTrustPolicy,
+        fsPort: activeFsPort,
       });
     },
 
-    registerManifest(ctx, manifest, { hostVersion = pkg.version } = {}) {
+    registerManifest(ctx, manifest, { hostVersion = pkg.version, strictTrustPolicy = false } = {}) {
       const { activeProfile, paths } = ctx;
       const lockRes = acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000);
       if (!lockRes.ok) {
         return { ok: false, reason: lockRes.code, error: lockRes.error };
       }
       try {
-        // NB5: Validate manifest + check slot conflicts + write atomically under the single exclusive lock
         const check = validateAddonManifest(manifest, {
           pluginsRootDir: paths.PLUGINS_ROOT_DIR,
           checkFilesExist: true,
           hostProfileId: activeProfile.id,
           hostVersion,
+          strictTrustPolicy,
+          fsPort: activeFsPort,
         });
         if (!check.ok) {
           return { ok: false, reason: check.reason, errors: check.errors };
@@ -77,12 +90,16 @@ function createElectronAddonStorePort() {
         }
 
         const targetPath = path.join(paths.ADDONS_DIR, `${manifest.pluginId}.json`);
-        // NB1: Remove any stale non-canonical filename holding the same pluginId before writing canonical file
+        if (!isDirectChildOfDir(paths.ADDONS_DIR, targetPath)) {
+          return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
+        }
+        // R10-NB1: Symmetric isDirectChildOfDir confinement on non-canonical manifest cleanup
         for (const entry of existingEntries) {
           if (
             entry.manifest &&
             entry.manifest.pluginId === manifest.pluginId &&
             path.resolve(entry.source) !== path.resolve(targetPath) &&
+            isDirectChildOfDir(paths.ADDONS_DIR, entry.source) &&
             fs.existsSync(entry.source)
           ) {
             fs.unlinkSync(entry.source);
@@ -94,7 +111,12 @@ function createElectronAddonStorePort() {
           paths.LOADER_SCRIPT_PATH,
           buildHostLoaderScriptSource(paths, activeProfile, { hostVersion })
         );
-        return { ok: true, pluginId: manifest.pluginId, manifestPath: targetPath };
+        return {
+          ok: true,
+          pluginId: manifest.pluginId,
+          trustLevel: check.trustLevel,
+          manifestPath: targetPath,
+        };
       } finally {
         releaseExclusiveLock(paths.ADDONS_LOCK_PATH, lockRes.token);
       }
@@ -102,7 +124,6 @@ function createElectronAddonStorePort() {
 
     unregisterManifest(ctx, pluginId, { hostVersion = pkg.version } = {}) {
       const { activeProfile, paths } = ctx;
-      // R9-F1: Enforce domain pluginId invariant & ADDONS_DIR path confinement inside the port itself
       const idCheck = validatePluginId(pluginId);
       if (!idCheck.ok) {
         return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID', detail: idCheck.reason };
@@ -121,7 +142,6 @@ function createElectronAddonStorePort() {
         if (fs.existsSync(targetPath)) {
           toDelete.add(path.resolve(targetPath));
         }
-        // NB1: Also remove any non-canonical JSON files strictly inside addons.d/ that declare the same pluginId
         for (const entry of loadRawManifestsFromDir(paths.ADDONS_DIR)) {
           if (
             entry.manifest &&

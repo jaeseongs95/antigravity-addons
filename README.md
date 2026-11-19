@@ -9,11 +9,11 @@
 
 `antigravity-native-addon-host` eliminates cross-plugin conflicts when multiple native desktop plugins extend the same Electron application (default profile: **Antigravity Desktop**):
 
-- **Single `app.asar` Owner**: Only this host adapter patches, verifies, backs up (`.orig` + `.orig.json`), and rolls back `app.asar`. Plugins never touch `app.asar`.
-- **Declarative Contract (`AddonManifest.v1`)**: Plugins declare capabilities (`renderer`, `mainHook`), entry scripts, UI slots, and isolation attributes via JSON Schema (`schemas/addon-manifest.v1.schema.json`).
-- **Zero Cross-Plugin Intrusion**: Addon-owned UI slots automatically carry `translate="no"`, `data-agy-no-translate="true"`, and `data-addon-host-owner="<pluginId>"`. Exclusive slots and duplicate `slotId`s are blocked before registration.
-- **Fault & Config Isolation**: Reads `config.json` strictly read-only (`enabled: false` blocks loading immediately) and executes addons sequentially in deterministic `loadOrder` under per-plugin `try/catch` fault boundaries.
-- **Vendor-Independent Core**: `src/core/` has zero Antigravity or Electron literals; host-specific details live behind `HostProfile` (`src/profiles/antigravity.js`) and `src/adapters/electron/`.
+- **Single `app.asar` Owner & Verified Recovery**: Only this host adapter patches, verifies (build-hash identity check + recorded `patchedSha256` rollback guard), backs up (`.orig` + `.orig.json`), and transactionally installs/rolls back `app.asar` with automatic loader compensation on failure.
+- **Declarative Contract & Explicit Trust Model (`AddonManifest.v1`)**: Plugins declare `trustLevel` (`trusted` | `restricted`), capabilities (`renderer`, `mainHook`), entry scripts, UI slots, and isolation attributes via JSON Schema (`schemas/addon-manifest.v1.schema.json`). `mainHook` runs through least-privilege frozen brokers, never raw Electron `app`/`webContents`.
+- **Owner CSS Scoping & Zero Cross-Plugin Intrusion**: Addon-owned UI slots automatically carry `translate="no"`, `data-agy-no-translate="true"`, and `data-addon-host-owner="<pluginId>"` (with opt-in Shadow DOM `{ shadow: true }`). `injectStyle()` blocks `@import`/`javascript:`/`expression(` and auto-scopes selectors under `[data-addon-host-owner="<pluginId>"]`.
+- **Sync + Async Fault & Config Isolation**: Reads `config.json` strictly read-only (`enabled: false` blocks loading immediately and auto-cleans listeners), tracks per-addon lifecycle states (`PENDING -> ACTIVATING -> ACTIVE / FAILED / DISPOSING -> DISPOSED`), and isolates both sync throws and async Promise rejections / timeouts.
+- **Vendor- & Runtime-Independent Core**: `src/core/` has zero Antigravity, Electron, `node:fs`, or `node:path` imports (`FileSystemPort` DIP); host-specific details live behind `HostProfile` (`src/profiles/antigravity.js`) and `src/adapters/electron/`.
 
 ## Quick Start
 
@@ -31,6 +31,7 @@ node ./bin/addon-host.js --register path/to/addon-manifest.json
 
 # Install or roll back the single shared app.asar bootstrap hook
 node ./bin/addon-host.js --install
+node ./bin/addon-host.js --install --refresh-orig   # Archive previous .orig when vendor updates same appVersion build
 node ./bin/addon-host.js --rollback
 ```
 

@@ -2,8 +2,8 @@
 
 /**
  * Electron implementation of `HostLifecyclePort` (ISP / DIP / SRP).
- * Owns Electron profile/path resolution, ASAR status/diagnostics, atomic install+loader write,
- * and byte-identical rollback.
+ * Owns Electron profile/path resolution, ASAR status/diagnostics, transactional
+ * loader-first install with automatic compensation rollback, and verified rollback.
  */
 
 const fs = require('node:fs');
@@ -76,53 +76,124 @@ function createElectronHostLifecyclePort() {
       const asarDiag = diagnoseAsarState(paths, activeProfile);
       const backupHealthy =
         !asarDiag.asarExists || !asarDiag.hostInstalled || Boolean(asarDiag.origBackupValid);
+      const integrityHealthy = !asarDiag.origBuildMismatch && !asarDiag.patchedShaMismatch;
       return {
         ...asarDiag,
-        healthy: !asarDiag.hasLegacyConflict && backupHealthy,
+        healthy: !asarDiag.hasLegacyConflict && backupHealthy && integrityHealthy,
       };
     },
 
-    installHost(ctx, { replaceLegacy = false, hostVersion = pkg.version } = {}) {
+    /**
+     * Transactional Install (P2):
+     * 1. Acquire addons lock and stage `addon-host-loader.js` FIRST (saving any prior loader bytes).
+     *    If loader lock/write fails, `app.asar` is NEVER touched.
+     * 2. Patch `app.asar` via `installAsarAddonHost`.
+     * 3. If ASAR patching fails, automatically compensate by restoring or removing the staged loader
+     *    so zero half-installed state remains.
+     */
+    installHost(ctx, { replaceLegacy = false, refreshOrig = false, hostVersion = pkg.version } = {}) {
       const { activeProfile, paths } = ctx;
-      const asar = installAsarAddonHost(
-        { ...paths, ALLOW_REPLACE_LEGACY: Boolean(replaceLegacy) },
-        activeProfile
-      );
-      const asarOk =
-        asar.status === 'INSTALLED' ||
-        asar.status === 'ALREADY_INSTALLED' ||
-        asar.status === 'SKIPPED_NO_ASAR';
+      const lockRes = acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000);
+      if (!lockRes.ok) {
+        return {
+          ok: false,
+          status: 'FAILED',
+          phase: 'LOADER_LOCK_FAILED',
+          reason: lockRes.code,
+          error: lockRes.error,
+          loaderScriptPath: paths.LOADER_SCRIPT_PATH,
+        };
+      }
 
-      if (asarOk) {
-        const lockRes = acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000);
-        if (!lockRes.ok) {
-          return {
-            ok: false,
-            status: 'FAILED',
-            reason: lockRes.code,
-            error: lockRes.error,
-            loaderScriptPath: paths.LOADER_SCRIPT_PATH,
-            asar,
-          };
+      const hadPrevLoader = fs.existsSync(paths.LOADER_SCRIPT_PATH);
+      let prevLoaderContent = null;
+      let loaderStaged = false;
+
+      const compensateStagedLoader = () => {
+        if (!loaderStaged) return false;
+        try {
+          if (hadPrevLoader && prevLoaderContent !== null) {
+            writeAtomicSync(paths.LOADER_SCRIPT_PATH, prevLoaderContent);
+          } else if (fs.existsSync(paths.LOADER_SCRIPT_PATH)) {
+            fs.unlinkSync(paths.LOADER_SCRIPT_PATH);
+          }
+          return true;
+        } catch (_compErr) {
+          return false;
+        }
+      };
+
+      try {
+        if (hadPrevLoader) {
+          prevLoaderContent = fs.readFileSync(paths.LOADER_SCRIPT_PATH, 'utf8');
         }
         try {
           writeAtomicSync(
             paths.LOADER_SCRIPT_PATH,
             buildHostLoaderScriptSource(paths, activeProfile, { hostVersion })
           );
-        } finally {
-          releaseExclusiveLock(paths.ADDONS_LOCK_PATH, lockRes.token);
+          loaderStaged = true;
+        } catch (err) {
+          return {
+            ok: false,
+            status: 'FAILED',
+            phase: 'LOADER_STAGE_FAILED',
+            reason: 'ERR_LOADER_WRITE_FAILED',
+            error: err && err.message ? err.message : String(err),
+            loaderScriptPath: paths.LOADER_SCRIPT_PATH,
+          };
         }
-      }
 
-      const status =
-        asar.status === 'SKIPPED_NO_ASAR' ? 'SKIPPED_NO_ASAR' : asarOk ? 'INSTALLED' : 'FAILED';
-      return {
-        ok: asarOk,
-        status,
-        loaderScriptPath: paths.LOADER_SCRIPT_PATH,
-        asar,
-      };
+        let asar;
+        try {
+          asar = installAsarAddonHost(
+            {
+              ...paths,
+              ALLOW_REPLACE_LEGACY: Boolean(replaceLegacy),
+              ALLOW_REFRESH_ORIG: Boolean(refreshOrig),
+            },
+            activeProfile
+          );
+        } catch (err) {
+          const compensated = compensateStagedLoader();
+          return {
+            ok: false,
+            status: 'FAILED',
+            phase: 'ASAR_PATCH_THREW',
+            compensated,
+            error: err && err.message ? err.message : String(err),
+            loaderScriptPath: paths.LOADER_SCRIPT_PATH,
+          };
+        }
+
+        const asarOk =
+          asar.status === 'INSTALLED' ||
+          asar.status === 'ALREADY_INSTALLED' ||
+          asar.status === 'SKIPPED_NO_ASAR';
+
+        if (!asarOk) {
+          const compensated = compensateStagedLoader();
+          return {
+            ok: false,
+            status: 'FAILED',
+            phase: 'ASAR_PATCH_FAILED',
+            compensated,
+            loaderScriptPath: paths.LOADER_SCRIPT_PATH,
+            asar,
+          };
+        }
+
+        const status = asar.status === 'SKIPPED_NO_ASAR' ? 'SKIPPED_NO_ASAR' : 'INSTALLED';
+        return {
+          ok: true,
+          status,
+          phase: 'COMMITTED',
+          loaderScriptPath: paths.LOADER_SCRIPT_PATH,
+          asar,
+        };
+      } finally {
+        releaseExclusiveLock(paths.ADDONS_LOCK_PATH, lockRes.token);
+      }
     },
 
     rollbackHost(ctx, { force = false } = {}) {

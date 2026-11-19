@@ -78,3 +78,21 @@ test('TC-001d (R7-F2): electron-addon-store-port has zero coupling to asar-patch
     assert.equal(re.test(src), false, `AddonStorePort must not couple to ${re}`);
   }
 });
+
+test('TC-023 (P2): src/core/ has zero Node.js fs/path runtime imports (FileSystemPort DIP)', () => {
+  const coreFiles = walkJsFiles(path.join(REPO_ROOT, 'src', 'core'));
+  assert.ok(coreFiles.length >= 5);
+  const forbiddenNodeBuiltins = [
+    /require\(['"](?:node:)?fs['"]\)/,
+    /require\(['"](?:node:)?path['"]\)/,
+    /require\(['"](?:node:)?os['"]\)/,
+    /require\(['"](?:node:)?child_process['"]\)/,
+  ];
+  for (const file of coreFiles) {
+    const src = fs.readFileSync(file, 'utf8');
+    const rel = path.relative(REPO_ROOT, file);
+    for (const re of forbiddenNodeBuiltins) {
+      assert.equal(re.test(src), false, `Node runtime import ${re} leaked into core module ${rel}`);
+    }
+  }
+});

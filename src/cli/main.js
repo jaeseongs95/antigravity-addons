@@ -58,6 +58,7 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
         pluginId: a.pluginId,
         version: a.manifest.version,
         loadOrder: a.loadOrder,
+        trustLevel: a.trustLevel,
         capabilities: a.manifest.capabilities,
       })),
       disabledAddons: plan.disabled,
@@ -151,7 +152,7 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
       '  --validate <manifest.json>     Validate an AddonManifest.v1 file',
       '  --register <manifest.json>     Validate & atomically register a manifest',
       '  --unregister <pluginId>        Unregister a plugin manifest',
-      '  --install [--replace-legacy]   Install single shared host bootstrap hook',
+      '  --install [--replace-legacy] [--refresh-orig] Install single shared host bootstrap hook',
       '  --rollback [--force]           Restore original host bundle byte-identically',
       '  --version, -v                  Print version',
       '  --help, -h                     Print this help',
@@ -226,6 +227,7 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
     if (args.includes('--install')) {
       const out = lifecycle.installHost(ctx, {
         replaceLegacy: args.includes('--replace-legacy'),
+        refreshOrig: args.includes('--refresh-orig'),
         hostVersion,
       });
       process.stdout.write(JSON.stringify(out, null, 2) + '\n');
