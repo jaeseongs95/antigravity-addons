@@ -279,10 +279,6 @@ async function runCli(argv = process.argv.slice(2), pathOverrides = null, profil
   }
 
   if (args.includes('--install')) {
-    writeAtomicSync(
-      paths.LOADER_SCRIPT_PATH,
-      buildHostLoaderScriptSource(paths, activeProfile, { hostVersion: pkg.version })
-    );
     const asar = installAsarAddonHost(
       { ...paths, ALLOW_REPLACE_LEGACY: args.includes('--replace-legacy') },
       activeProfile
@@ -291,7 +287,15 @@ async function runCli(argv = process.argv.slice(2), pathOverrides = null, profil
       asar.status === 'INSTALLED' ||
       asar.status === 'ALREADY_INSTALLED' ||
       asar.status === 'SKIPPED_NO_ASAR';
-    const out = { status: ok ? 'INSTALLED' : 'FAILED', loaderScriptPath: paths.LOADER_SCRIPT_PATH, asar };
+    if (ok) {
+      writeAtomicSync(
+        paths.LOADER_SCRIPT_PATH,
+        buildHostLoaderScriptSource(paths, activeProfile, { hostVersion: pkg.version })
+      );
+    }
+    const status =
+      asar.status === 'SKIPPED_NO_ASAR' ? 'SKIPPED_NO_ASAR' : ok ? 'INSTALLED' : 'FAILED';
+    const out = { status, loaderScriptPath: paths.LOADER_SCRIPT_PATH, asar };
     process.stdout.write(JSON.stringify(out, null, 2) + '\n');
     if (!ok) process.exitCode = 1;
     return out;

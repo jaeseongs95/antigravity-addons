@@ -47,14 +47,27 @@ function planAddonExecution(
 
   validItems.sort((a, b) => {
     if (a.loadOrder !== b.loadOrder) return a.loadOrder - b.loadOrder;
-    return a.pluginId.localeCompare(b.pluginId);
+    if (a.pluginId < b.pluginId) return -1;
+    if (a.pluginId > b.pluginId) return 1;
+    return a.source < b.source ? -1 : a.source > b.source ? 1 : 0;
   });
 
   const slotRegistry = createSlotRegistry();
+  const seenPluginIds = new Set();
   const active = [];
   const disabled = [];
 
   for (const item of validItems) {
+    if (seenPluginIds.has(item.pluginId)) {
+      rejected.push({
+        source: item.source,
+        pluginId: item.pluginId,
+        reason: 'ERR_DUPLICATE_PLUGIN_ID',
+        errors: [`Duplicate manifest for pluginId "${item.pluginId}"`],
+      });
+      continue;
+    }
+    seenPluginIds.add(item.pluginId);
     let enabled = false;
     try {
       enabled = Boolean(isEnabled(item.pluginId));

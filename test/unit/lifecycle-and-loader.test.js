@@ -57,6 +57,20 @@ test('TC-006: planAddonExecution sorts by loadOrder, skips disabled plugins, and
         },
       },
       { source: 'bad.json', manifest: { schemaVersion: 99 } },
+      // R2-F2: duplicate pluginId in a separate manifest file must be rejected
+      {
+        source: 'a-duplicate.json',
+        manifest: {
+          schemaVersion: 1,
+          pluginId: 'plugin-a',
+          displayName: 'A Dup',
+          version: '1.0.0',
+          capabilities: ['renderer'],
+          entry: { rendererScript: 'index.js', mainHookScript: null },
+          isolation: { noTranslate: true, i18nSelfManaged: true },
+          loadOrder: 10,
+        },
+      },
     ],
     { isEnabled: (id) => id !== 'plugin-disabled' }
   );
@@ -67,7 +81,8 @@ test('TC-006: planAddonExecution sorts by loadOrder, skips disabled plugins, and
   );
   assert.equal(plan.disabled.length, 1);
   assert.equal(plan.disabled[0].pluginId, 'plugin-disabled');
-  assert.equal(plan.rejected.length, 1);
+  assert.equal(plan.rejected.length, 2);
+  assert.ok(plan.rejected.some((r) => r.reason === 'ERR_DUPLICATE_PLUGIN_ID'));
 });
 
 test('TC-007 (F5): isAllowedRendererUrl honors HostProfile protocols/hosts and blocks devtools/file/external', () => {
@@ -112,7 +127,7 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       'utf8'
     );
 
-    // Plugin 1 (loadOrder 10): mounts declared slot & tries to mount undeclared slot
+    // Plugin 1 (loadOrder 10): mounts declared slot, tries undeclared slot, AND hooks Map.prototype.set (R2-F3 attack)
     const p1Dir = path.join(pluginsRoot, 'plugin-first');
     fs.mkdirSync(p1Dir, { recursive: true });
     fs.writeFileSync(
@@ -120,6 +135,13 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       `
       window.__ORDER__ = window.__ORDER__ || [];
       window.__ORDER__.push('first');
+      // R2-F3 attack: attempt to hijack Map.prototype.set to steal subsequent plugin capability tokens
+      window.__STOLEN_TOKENS__ = [];
+      const origSet = Map.prototype.set;
+      Map.prototype.set = function(k, v) {
+        window.__STOLEN_TOKENS__.push(k);
+        return origSet.call(this, k, v);
+      };
       const el = addonHost.mountSlot('plugin-first.bar');
       el.textContent = 'FIRST';
       addonHost.injectStyle('theme', '.p1{color:green}');
@@ -233,12 +255,12 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       body,
       head: body,
       createElement(tag) {
-        const attrs = new Map();
+        const attrs = Object.create(null);
         const el = {
           tagName: tag.toUpperCase(),
           attrs,
-          setAttribute(k, v) { attrs.set(k, String(v)); },
-          getAttribute(k) { return attrs.get(k) ?? null; },
+          setAttribute(k, v) { attrs[k] = String(v); },
+          getAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
           textContent: '',
           parentNode: null,
         };
@@ -250,13 +272,6 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
     const rendererCtx = vm.createContext({
       window: rendererWindow,
       document: fakeDocument,
-      Map,
-      Set,
-      Error,
-      Object,
-      String,
-      Array,
-      Boolean,
     });
 
     let currentUrl = 'http://127.0.0.1:4173/home';
@@ -280,6 +295,7 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
 
     assert.equal(rendererWindow.__EVIL_RAN__, undefined, 'F1: traversal pluginId must never execute');
     assert.deepEqual(Array.from(rendererWindow.__ORDER__), ['first', 'second'], 'F3: must execute once in strict loadOrder');
+    assert.equal(rendererWindow.__STOLEN_TOKENS__.length, 0, 'R2-F3: Map.prototype.set hook must steal 0 capability tokens');
     assert.equal(rendererWindow.__UNDECLARED_ALLOWED__, undefined, 'F2: undeclared slot must be rejected');
     assert.match(String(rendererWindow.__UNDECLARED_ERR__), /ERR_UNDECLARED_SLOT/);
     assert.equal(rendererWindow.__CROSS_UNMOUNT_ALLOWED__, undefined, 'F2: cross-plugin unmount must be rejected');
@@ -300,12 +316,14 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
     await new Promise((r) => setTimeout(r, 30));
     assert.deepEqual(Array.from(rendererWindow.__ORDER__), ['first', 'second'], 'F3: SPA URL change must not re-inject');
 
-    // F3: Disabling plugin-second via config.json must dispose its mainHook and stop onWebContentsCreated
+    // R2-F4: Disabling plugin-second via config.json must dispose its mainHook on SINGLE-WINDOW reload (did-finish-load)
     assert.equal(fakeApp.__hookState.wcCount, 1);
     assert.equal(fakeApp.__hookState.disposed, 0);
     fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'plugin-second': { enabled: false } } }), 'utf8');
+    listeners['did-finish-load']();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(fakeApp.__hookState.disposed, 1, 'R2-F4: disabled mainHook must be disposed on single-window reload');
     mod.exports.attachWebContents({ getType: () => 'window', getURL: () => currentUrl, on() {} }, fakeApp);
-    assert.equal(fakeApp.__hookState.disposed, 1, 'F3: disabled mainHook must be disposed');
     assert.equal(fakeApp.__hookState.wcCount, 1, 'F3: disabled mainHook must not receive onWebContentsCreated');
 
     // NB2: Diagnostics buffer must capture rejected traversal + throwing peer

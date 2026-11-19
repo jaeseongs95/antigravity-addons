@@ -170,7 +170,7 @@ test('TC-005 (F4 & NB3): slot, storageNamespace, and ipcChannelPrefix collision 
   assert.equal(dupExclusive.ok, false);
   assert.equal(dupExclusive.conflicts[0].kind, 'EXCLUSIVE_SLOT_CONFLICT');
 
-  // F4: storageNamespace conflict
+  // F4 & R2-F2: storageNamespace conflict (including implicit default pluginId when storageNamespace omitted)
   const dupNs = detectSlotConflicts([
     STATUSBAR_MANIFEST,
     {
@@ -180,6 +180,23 @@ test('TC-005 (F4 & NB3): slot, storageNamespace, and ipcChannelPrefix collision 
   ]);
   assert.equal(dupNs.ok, false);
   assert.equal(dupNs.conflicts[0].code, 'ERR_NAMESPACE_CONFLICT');
+
+  const dupImplicitNs = detectSlotConflicts([
+    {
+      ...STATUSBAR_MANIFEST,
+      pluginId: 'implicit-ns-owner',
+      uiSlots: [{ slot: 'overlay', slotId: 'implicit-ns-owner.slot' }],
+      isolation: { noTranslate: true, i18nSelfManaged: true },
+    },
+    {
+      ...MCP_MANAGER_MANIFEST,
+      pluginId: 'explicit-ns-collider',
+      uiSlots: [{ slot: 'settings-pane', slotId: 'explicit-ns-collider.slot' }],
+      isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'implicit-ns-owner' },
+    },
+  ]);
+  assert.equal(dupImplicitNs.ok, false);
+  assert.equal(dupImplicitNs.conflicts[0].code, 'ERR_NAMESPACE_CONFLICT');
 
   // F4: ipcChannelPrefix overlap conflict
   const dupIpc = detectSlotConflicts([

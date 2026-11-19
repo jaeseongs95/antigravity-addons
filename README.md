@@ -12,7 +12,7 @@
 - **Single `app.asar` Owner**: Only this host adapter patches, verifies, backs up (`.orig` + `.orig.json`), and rolls back `app.asar`. Plugins never touch `app.asar`.
 - **Declarative Contract (`AddonManifest.v1`)**: Plugins declare capabilities (`renderer`, `mainHook`), entry scripts, UI slots, and isolation attributes via JSON Schema (`schemas/addon-manifest.v1.schema.json`).
 - **Zero Cross-Plugin Intrusion**: Addon-owned UI slots automatically carry `translate="no"`, `data-agy-no-translate="true"`, and `data-addon-host-owner="<pluginId>"`. Exclusive slots and duplicate `slotId`s are blocked before registration.
-- **Fault & Config Isolation**: Reads `config.json` strictly read-only (`enabled: false` blocks loading immediately) and isolates each plugin under independent `try/catch` + `Promise.allSettled`.
+- **Fault & Config Isolation**: Reads `config.json` strictly read-only (`enabled: false` blocks loading immediately) and executes addons sequentially in deterministic `loadOrder` under per-plugin `try/catch` fault boundaries.
 - **Vendor-Independent Core**: `src/core/` has zero Antigravity or Electron literals; host-specific details live behind `HostProfile` (`src/profiles/antigravity.js`) and `src/adapters/electron/`.
 
 ## Quick Start

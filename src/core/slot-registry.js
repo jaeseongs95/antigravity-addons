@@ -67,10 +67,13 @@ function createSlotRegistry() {
       }
     }
 
-    // 3) Storage namespace collision
-    const storageNs = typeof isolation.storageNamespace === 'string' && isolation.storageNamespace.trim()
-      ? isolation.storageNamespace.trim()
-      : null;
+    // 3) Storage namespace collision (defaults to pluginId when omitted so implicit defaults cannot collide)
+    const storageNs =
+      typeof isolation.storageNamespace === 'string' && isolation.storageNamespace.trim()
+        ? isolation.storageNamespace.trim()
+        : typeof pluginId === 'string' && pluginId.trim()
+          ? pluginId.trim()
+          : null;
     if (storageNs) {
       const exNsOwner = ownersByStorageNs.get(storageNs);
       if (exNsOwner && exNsOwner !== pluginId) {

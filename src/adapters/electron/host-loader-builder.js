@@ -4,18 +4,22 @@
  * Generates the single shared Electron host loader (`addon-host-loader.js`)
  * consumed by the 1-line `app.asar` bootstrap hook.
  *
- * Security & Isolation Guarantees (F1-F5, NB2):
+ * Security & Isolation Guarantees:
  * - Single source of truth: runtime loader delegates directly to `src/core/lifecycle-coordinator.js`
- *   (Ajv schema, FORBIDDEN_IDS, pluginId regex, pluginsRoot symlink confinement, compatibility,
- *   slot/namespace/IPC conflict checks).
- * - Capability-token Scoped API: global `window.__ADDON_HOST_API__` exposes ONLY read-only host info
- *   (`hostVersion`, `hostProfileId`, `getNoTranslateSelector()`). Each plugin receives its own immutable
- *   `addonHost` handle bound to its `pluginId` and declared `allowedSlotIds` via a one-time unguessable
- *   token, preventing cross-plugin impersonation or undeclared slot hijacking.
+ *   (Ajv schema, FORBIDDEN_IDS, pluginId regex, duplicate pluginId blocking, pluginsRoot symlink
+ *   confinement, compatibility, slot/namespace/IPC conflict checks).
+ * - Prototype-pollution-immune Capability-Token Scoped API:
+ *   - Captures pristine Object/Array/Function primitives at bootstrap before any plugin runs.
+ *   - Stores pending capability tokens and owned slots/styles in null-prototype dictionaries
+ *     (`Object.create(null)`) so hooked `Map.prototype.set` / `Object.prototype` cannot steal tokens.
+ *   - Binds immutable `spec` at `__ADDON_HOST_REGISTER_CAP__(hostSecret, token, spec)` time so
+ *     `__ADDON_HOST_CONSUME_CAP__(token)` ignores any caller-supplied spec.
+ *   - Verifies live host ownership via a non-spoofable nonce challenge (`__ADDON_HOST_VERIFY__`)
+ *     before sending `hostSecret` into the renderer.
  * - Serialized injection queue (`dom-ready` + `did-finish-load` race-free), deterministic sequential
  *   `loadOrder` execution with per-plugin `try/catch` fault isolation, SPA `pushState` non-re-injection,
- *   and `mainHook` deactivation cleanup (`dispose()` + removal from `onWebContentsCreated`).
- * - Vendor-neutral: URL allowlist & extra no-translate attributes come strictly from `HostProfile`.
+ *   and `syncMainHooks` on both `attachWebContents` and `enqueueInject` so single-window reloads
+ *   immediately dispose disabled/unregistered `mainHook`s.
  */
 
 const fs = require('node:fs');
@@ -86,7 +90,7 @@ function collectExecutableAddons(
 }
 
 function buildRendererHostApiBootstrapSource({
-  hostVersion = '1.0.0',
+  hostVersion = '1.0.1',
   hostProfileId = 'default',
   extraNoTranslateAttributes = [],
 } = {}) {
@@ -98,23 +102,42 @@ function buildRendererHostApiBootstrapSource({
   const noTranslateSelector = noTranslateParts.join(', ');
 
   return `(function(){
-  if (window.__ADDON_HOST_API__) return;
+  const _ObjCreate = Object.create;
+  const _ObjFreeze = Object.freeze;
+  const _ObjDefineProperty = Object.defineProperty;
+  const _ObjKeys = Object.keys;
+  const _ObjHasOwn = Object.prototype.hasOwnProperty;
+  const _ArrayIsArray = Array.isArray;
+  const _String = String;
+  const _Error = Error;
+  const _has = (dict, key) => _ObjHasOwn.call(dict, key);
+
+  if (typeof window.__ADDON_HOST_VERIFY__ === 'function') {
+    try {
+      if (window.__ADDON_HOST_VERIFY__(__INSTANCE_NONCE__)) return;
+    } catch (_e) {}
+  }
+
   const NO_TRANSLATE_SELECTOR = ${serializeSafeInlineJson(noTranslateSelector)};
-  const EXTRA_NO_TRANSLATE_ATTRS = Object.freeze(${serializeSafeInlineJson(extraAttrs)});
-  const slotOwners = new Map();
-  const slotElements = new Map();
-  const styleOwners = new Map();
-  const styleElements = new Map();
-  const disposers = new Map();
-  const pendingTokens = new Map();
+  const EXTRA_NO_TRANSLATE_ATTRS = _ObjFreeze(${serializeSafeInlineJson(extraAttrs)});
+  const slotOwners = _ObjCreate(null);
+  const slotElements = _ObjCreate(null);
+  const styleOwners = _ObjCreate(null);
+  const styleElements = _ObjCreate(null);
+  const disposers = _ObjCreate(null);
+  const pendingSpecs = _ObjCreate(null);
 
   function createScopedHandle(spec) {
-    const pluginId = String(spec.pluginId);
-    const allowedSlots = new Set(Array.isArray(spec.allowedSlotIds) ? spec.allowedSlotIds : []);
-    const storageNamespace = spec.storageNamespace || pluginId;
-    const ipcChannelPrefix = spec.ipcChannelPrefix || null;
+    const pluginId = _String(spec.pluginId);
+    const allowedSlots = _ObjCreate(null);
+    const rawSlots = _ArrayIsArray(spec.allowedSlotIds) ? spec.allowedSlotIds : [];
+    for (let i = 0; i < rawSlots.length; i++) {
+      allowedSlots[_String(rawSlots[i])] = true;
+    }
+    const storageNamespace = spec.storageNamespace ? _String(spec.storageNamespace) : pluginId;
+    const ipcChannelPrefix = spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null;
 
-    const handle = Object.freeze({
+    const handle = _ObjFreeze({
       pluginId,
       hostVersion: ${serializeSafeInlineJson(hostVersion)},
       hostProfileId: ${serializeSafeInlineJson(hostProfileId)},
@@ -124,25 +147,24 @@ function buildRendererHostApiBootstrapSource({
         return NO_TRANSLATE_SELECTOR;
       },
       mountSlot(slotId, parentEl) {
-        if (!slotId || typeof slotId !== 'string') throw new Error('ERR_INVALID_SLOT_ID');
-        if (!allowedSlots.has(slotId)) {
-          throw new Error('ERR_UNDECLARED_SLOT:' + slotId);
+        if (!slotId || typeof slotId !== 'string') throw new _Error('ERR_INVALID_SLOT_ID');
+        if (!_has(allowedSlots, slotId)) {
+          throw new _Error('ERR_UNDECLARED_SLOT:' + slotId);
         }
-        const existingOwner = slotOwners.get(slotId);
-        if (existingOwner && existingOwner !== pluginId) {
-          throw new Error('ERR_SLOT_OWNED_BY_ANOTHER_PLUGIN:' + slotId);
+        if (_has(slotOwners, slotId) && slotOwners[slotId] !== pluginId) {
+          throw new _Error('ERR_SLOT_OWNED_BY_ANOTHER_PLUGIN:' + slotId);
         }
-        let el = slotElements.get(slotId);
+        let el = _has(slotElements, slotId) ? slotElements[slotId] : null;
         if (!el) {
           el = document.createElement('div');
           el.setAttribute('translate', 'no');
-          for (const attr of EXTRA_NO_TRANSLATE_ATTRS) {
-            el.setAttribute(attr, 'true');
+          for (let i = 0; i < EXTRA_NO_TRANSLATE_ATTRS.length; i++) {
+            el.setAttribute(EXTRA_NO_TRANSLATE_ATTRS[i], 'true');
           }
           el.setAttribute('data-addon-host-owner', pluginId);
           el.setAttribute('data-addon-host-slot', slotId);
-          slotOwners.set(slotId, pluginId);
-          slotElements.set(slotId, el);
+          slotOwners[slotId] = pluginId;
+          slotElements[slotId] = el;
         }
         const hostParent = parentEl || document.body;
         if (hostParent && el.parentNode !== hostParent && typeof hostParent.appendChild === 'function') {
@@ -151,79 +173,80 @@ function buildRendererHostApiBootstrapSource({
         return el;
       },
       unmountSlot(slotId) {
-        const owner = slotOwners.get(slotId);
-        if (!owner) return false;
-        if (owner !== pluginId) throw new Error('ERR_FORBIDDEN_CROSS_PLUGIN_UNMOUNT:' + slotId);
-        const el = slotElements.get(slotId);
+        if (!_has(slotOwners, slotId)) return false;
+        if (slotOwners[slotId] !== pluginId) throw new _Error('ERR_FORBIDDEN_CROSS_PLUGIN_UNMOUNT:' + slotId);
+        const el = slotElements[slotId];
         if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
           el.parentNode.removeChild(el);
         }
-        slotOwners.delete(slotId);
-        slotElements.delete(slotId);
+        delete slotOwners[slotId];
+        delete slotElements[slotId];
         return true;
       },
       injectStyle(styleId, cssText) {
-        if (!styleId || typeof styleId !== 'string') throw new Error('ERR_INVALID_STYLE_ID');
+        if (!styleId || typeof styleId !== 'string') throw new _Error('ERR_INVALID_STYLE_ID');
         const scopedKey = pluginId + ':' + styleId;
-        const existingOwner = styleOwners.get(scopedKey);
-        if (existingOwner && existingOwner !== pluginId) {
-          throw new Error('ERR_STYLE_OWNED_BY_ANOTHER_PLUGIN:' + styleId);
+        if (_has(styleOwners, scopedKey) && styleOwners[scopedKey] !== pluginId) {
+          throw new _Error('ERR_STYLE_OWNED_BY_ANOTHER_PLUGIN:' + styleId);
         }
-        let styleEl = styleElements.get(scopedKey);
+        let styleEl = _has(styleElements, scopedKey) ? styleElements[scopedKey] : null;
         if (!styleEl) {
           styleEl = document.createElement('style');
           styleEl.setAttribute('data-addon-host-owner', pluginId);
           styleEl.setAttribute('data-addon-host-style', scopedKey);
-          styleOwners.set(scopedKey, pluginId);
-          styleElements.set(scopedKey, styleEl);
+          styleOwners[scopedKey] = pluginId;
+          styleElements[scopedKey] = styleEl;
           const head = document.head || document.documentElement || document.body;
           if (head && typeof head.appendChild === 'function') head.appendChild(styleEl);
         }
-        styleEl.textContent = String(cssText || '');
+        styleEl.textContent = _String(cssText || '');
         return styleEl;
       },
       removeStyle(styleId) {
         const scopedKey = pluginId + ':' + styleId;
-        const owner = styleOwners.get(scopedKey);
-        if (!owner) return false;
-        if (owner !== pluginId) throw new Error('ERR_FORBIDDEN_CROSS_PLUGIN_STYLE_REMOVE:' + styleId);
-        const el = styleElements.get(scopedKey);
+        if (!_has(styleOwners, scopedKey)) return false;
+        if (styleOwners[scopedKey] !== pluginId) throw new _Error('ERR_FORBIDDEN_CROSS_PLUGIN_STYLE_REMOVE:' + styleId);
+        const el = styleElements[scopedKey];
         if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
           el.parentNode.removeChild(el);
         }
-        styleOwners.delete(scopedKey);
-        styleElements.delete(scopedKey);
+        delete styleOwners[scopedKey];
+        delete styleElements[scopedKey];
         return true;
       },
       listOwnedSlots() {
         const out = [];
-        for (const [sid, owner] of slotOwners.entries()) {
-          if (owner === pluginId) out.push(sid);
+        const keys = _ObjKeys(slotOwners);
+        for (let i = 0; i < keys.length; i++) {
+          if (slotOwners[keys[i]] === pluginId) out.push(keys[i]);
         }
         return out;
       },
       onDispose(fn) {
         if (typeof fn !== 'function') return;
-        if (!disposers.has(pluginId)) disposers.set(pluginId, []);
-        disposers.get(pluginId).push(fn);
+        if (!_has(disposers, pluginId)) disposers[pluginId] = [];
+        disposers[pluginId].push(fn);
       },
       dispose() {
-        const fns = disposers.get(pluginId) || [];
-        disposers.delete(pluginId);
-        for (const fn of fns) {
-          try { fn(); } catch (_err) {}
+        const fns = _has(disposers, pluginId) ? disposers[pluginId] : [];
+        delete disposers[pluginId];
+        for (let i = 0; i < fns.length; i++) {
+          try { fns[i](); } catch (_err) {}
         }
-        for (const sid of handle.listOwnedSlots()) {
-          try { handle.unmountSlot(sid); } catch (_err) {}
+        const owned = handle.listOwnedSlots();
+        for (let i = 0; i < owned.length; i++) {
+          try { handle.unmountSlot(owned[i]); } catch (_err) {}
         }
-        for (const [stKey, owner] of Array.from(styleOwners.entries())) {
-          if (owner === pluginId) {
-            const el = styleElements.get(stKey);
+        const stKeys = _ObjKeys(styleOwners);
+        for (let i = 0; i < stKeys.length; i++) {
+          const stKey = stKeys[i];
+          if (styleOwners[stKey] === pluginId) {
+            const el = styleElements[stKey];
             if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
               el.parentNode.removeChild(el);
             }
-            styleOwners.delete(stKey);
-            styleElements.delete(stKey);
+            delete styleOwners[stKey];
+            delete styleElements[stKey];
           }
         }
       },
@@ -232,37 +255,57 @@ function buildRendererHostApiBootstrapSource({
   }
 
   // Public read-only surface (ZERO destructive cross-plugin methods)
-  const publicApi = Object.freeze({
+  const publicApi = _ObjFreeze({
     hostVersion: ${serializeSafeInlineJson(hostVersion)},
     hostProfileId: ${serializeSafeInlineJson(hostProfileId)},
     getNoTranslateSelector() {
       return NO_TRANSLATE_SELECTOR;
     },
   });
-  Object.defineProperty(window, '__ADDON_HOST_API__', {
+  _ObjDefineProperty(window, '__ADDON_HOST_API__', {
     value: publicApi,
     writable: false,
     configurable: false,
     enumerable: false,
   });
 
-  // One-time internal capability-token consumer used ONLY by host-injected plugin wrappers
-  Object.defineProperty(window, '__ADDON_HOST_CONSUME_CAP__', {
-    value: function(token, spec) {
-      if (!token || !pendingTokens.has(token)) {
-        throw new Error('ERR_INVALID_CAPABILITY_TOKEN');
-      }
-      pendingTokens.delete(token);
-      return createScopedHandle(spec);
+  // Non-spoofable liveness challenge bound to host-generated __INSTANCE_NONCE__
+  _ObjDefineProperty(window, '__ADDON_HOST_VERIFY__', {
+    value: function(nonce) {
+      return typeof nonce === 'string' && nonce === __INSTANCE_NONCE__;
     },
     writable: false,
     configurable: false,
     enumerable: false,
   });
-  Object.defineProperty(window, '__ADDON_HOST_REGISTER_CAP__', {
-    value: function(hostSecret, token) {
-      if (hostSecret !== __HOST_SECRET__) throw new Error('ERR_FORBIDDEN_CAP_REGISTRATION');
-      pendingTokens.set(token, true);
+
+  // Host binds immutable spec at registration time (caller of CONSUME_CAP cannot pass/forge spec)
+  _ObjDefineProperty(window, '__ADDON_HOST_REGISTER_CAP__', {
+    value: function(hostSecret, token, spec) {
+      if (hostSecret !== __HOST_SECRET__) throw new _Error('ERR_FORBIDDEN_CAP_REGISTRATION');
+      if (typeof token !== 'string' || !token || !spec || typeof spec !== 'object') {
+        throw new _Error('ERR_INVALID_CAP_REGISTRATION');
+      }
+      pendingSpecs[token] = _ObjFreeze({
+        pluginId: _String(spec.pluginId),
+        allowedSlotIds: _ObjFreeze(_ArrayIsArray(spec.allowedSlotIds) ? spec.allowedSlotIds.slice() : []),
+        storageNamespace: spec.storageNamespace ? _String(spec.storageNamespace) : _String(spec.pluginId),
+        ipcChannelPrefix: spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null,
+      });
+    },
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  });
+
+  _ObjDefineProperty(window, '__ADDON_HOST_CONSUME_CAP__', {
+    value: function(token) {
+      if (typeof token !== 'string' || !_has(pendingSpecs, token)) {
+        throw new _Error('ERR_INVALID_CAPABILITY_TOKEN');
+      }
+      const boundSpec = pendingSpecs[token];
+      delete pendingSpecs[token];
+      return createScopedHandle(boundSpec);
     },
     writable: false,
     configurable: false,
@@ -271,7 +314,7 @@ function buildRendererHostApiBootstrapSource({
 })();`;
 }
 
-function buildHostLoaderScriptSource(paths, profile, { hostVersion = '1.0.0' } = {}) {
+function buildHostLoaderScriptSource(paths, profile, { hostVersion = '1.0.1' } = {}) {
   assertValidHostProfile(profile);
   const extraAttrs = Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [];
   const allowedProtocols =
@@ -379,7 +422,6 @@ function syncMainHooks(electronApp) {
   const active = collectActiveAddons();
   const activeMainIds = new Set(active.filter((a) => a.mainHookPath).map((a) => a.pluginId));
 
-  // Deactivate any previously loaded mainHook that was disabled or unregistered
   for (const [pluginId, entry] of Array.from(loadedMainHooks.entries())) {
     if (!activeMainIds.has(pluginId)) {
       try {
@@ -433,27 +475,54 @@ function attachWebContents(contents, electronApp) {
     }
   }
 
-  let hostSecret = crypto.randomBytes(24).toString('hex');
+  let hostSecret = '';
+  let instanceNonce = '';
   const injectedIds = new Set();
   let injectQueue = Promise.resolve();
 
   const enqueueInject = () => {
     injectQueue = injectQueue.then(async () => {
       try {
+        // F4: Re-sync mainHooks on every reload/navigation so disabled hooks dispose even in a single-window session
+        syncMainHooks(electronApp);
+
         const url = typeof contents.getURL === 'function' ? contents.getURL() : '';
         if (!isAllowedRendererUrl(url)) return;
 
-        // Only re-bootstrap when the document was actually loaded/reloaded (SPA pushState preserves __ADDON_HOST_API__)
-        let hasApi = false;
-        try {
-          hasApi = Boolean(await contents.executeJavaScript('Boolean(window.__ADDON_HOST_API__)', true));
-        } catch (_e) { hasApi = false; }
+        // F3: Non-spoofable nonce challenge verifies that THIS host bootstrapped the current document
+        let verifiedLive = false;
+        if (instanceNonce) {
+          try {
+            verifiedLive = Boolean(
+              await contents.executeJavaScript(
+                'typeof window.__ADDON_HOST_VERIFY__ === "function" && window.__ADDON_HOST_VERIFY__(' +
+                  JSON.stringify(instanceNonce) + ')',
+                true
+              )
+            );
+          } catch (_e) { verifiedLive = false; }
+        }
 
-        if (!hasApi) {
+        if (!verifiedLive) {
           injectedIds.clear();
           hostSecret = crypto.randomBytes(24).toString('hex');
-          const bootstrapWithSecret = '(function(){ const __HOST_SECRET__ = ' + JSON.stringify(hostSecret) + ';\\n' + RENDERER_API_BOOTSTRAP_TEMPLATE + '\\n})();';
-          await contents.executeJavaScript(bootstrapWithSecret, true);
+          instanceNonce = crypto.randomBytes(24).toString('hex');
+          const bootstrapWithSecrets =
+            '(function(){ const __HOST_SECRET__ = ' + JSON.stringify(hostSecret) +
+            '; const __INSTANCE_NONCE__ = ' + JSON.stringify(instanceNonce) + ';\\n' +
+            RENDERER_API_BOOTSTRAP_TEMPLATE + '\\n})();';
+          await contents.executeJavaScript(bootstrapWithSecrets, true);
+          const postVerify = Boolean(
+            await contents.executeJavaScript(
+              'typeof window.__ADDON_HOST_VERIFY__ === "function" && window.__ADDON_HOST_VERIFY__(' +
+                JSON.stringify(instanceNonce) + ')',
+              true
+            )
+          );
+          if (!postVerify) {
+            recordDiag('error', 'ERR_HOST_BOOTSTRAP_SPOOFED', 'Renderer API verification failed after bootstrap');
+            return;
+          }
         }
 
         const addons = collectActiveAddons().filter((a) => a.rendererPath && !injectedIds.has(a.pluginId));
@@ -461,22 +530,25 @@ function attachWebContents(contents, electronApp) {
         for (const addon of addons) {
           try {
             const capToken = crypto.randomBytes(24).toString('hex');
-            await contents.executeJavaScript(
-              'window.__ADDON_HOST_REGISTER_CAP__(' + JSON.stringify(hostSecret) + ',' + JSON.stringify(capToken) + ');',
-              true
-            );
-            const rawCode = fs.readFileSync(addon.rendererPath, 'utf8');
             const spec = {
               pluginId: addon.pluginId,
               allowedSlotIds: addon.allowedSlotIds,
               storageNamespace: addon.storageNamespace,
               ipcChannelPrefix: addon.ipcChannelPrefix,
             };
+            await contents.executeJavaScript(
+              'window.__ADDON_HOST_REGISTER_CAP__(' +
+                JSON.stringify(hostSecret) + ',' +
+                JSON.stringify(capToken) + ',' +
+                JSON.stringify(spec) + ');',
+              true
+            );
+            const rawCode = fs.readFileSync(addon.rendererPath, 'utf8');
             const wrapped =
               '(function(addonHost){\\n' +
               rawCode +
               '\\n})(window.__ADDON_HOST_CONSUME_CAP__(' +
-              JSON.stringify(capToken) + ',' + JSON.stringify(spec) + '));';
+              JSON.stringify(capToken) + '));';
             await contents.executeJavaScript(wrapped, true);
             injectedIds.add(addon.pluginId);
           } catch (err) {

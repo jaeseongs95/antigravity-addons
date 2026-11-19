@@ -255,8 +255,10 @@ test('TC-011 & TC-012 (F5 & F7): real bin/addon-host.js CLI process executes --v
     );
 
     const runBin = (args) => execFileSync(process.execPath, [CLI_BIN, ...args], { encoding: 'utf8' });
+    const pkg = require('../../package.json');
 
-    assert.match(runBin(['--version']).trim(), /^\d+\.\d+\.\d+/);
+    // R2-F1: --version must match package.json version (1.0.1)
+    assert.equal(runBin(['--version']).trim(), pkg.version);
     assert.match(runBin(['--help']), /--profile/);
 
     const valOut = JSON.parse(runBin(['--profile', profileFile, '--validate', manifestFile]));
@@ -268,6 +270,7 @@ test('TC-011 & TC-012 (F5 & F7): real bin/addon-host.js CLI process executes --v
 
     const statusOut = JSON.parse(runBin(['--profile', profileFile, '--status']));
     assert.equal(statusOut.hostProfileId, 'acme-cli-profile');
+    assert.equal(statusOut.hostVersion, pkg.version);
     assert.equal(statusOut.activeAddons.length, 1);
     assert.equal(statusOut.activeAddons[0].pluginId, 'acme-bar');
 
@@ -276,16 +279,38 @@ test('TC-011 & TC-012 (F5 & F7): real bin/addon-host.js CLI process executes --v
     assert.equal(doctorOut.asar.hasLegacyConflict, true);
     assert.equal(doctorOut.asar.legacyMarkers.includes('AGY_STATUSBAR'), true);
 
+    // R2-F5: --install without --replace-legacy must exit non-zero on legacy patch
+    let installErr = null;
+    try {
+      runBin(['--profile', profileFile, '--install']);
+    } catch (e) {
+      installErr = e;
+    }
+    assert.ok(installErr && installErr.status === 1);
+    assert.equal(JSON.parse(installErr.stdout).asar.status, 'ERR_LEGACY_DIRECT_PATCH_DETECTED');
+
+    // Prepare pure .orig for --install --replace-legacy and --rollback --force via real CLI process
+    const pureOrigPath = `${asarPath}.v2.33.0.orig`;
+    const pureOrigBuf = buildSyntheticAsar(pureOrigPath);
+    const replaceInstOut = JSON.parse(runBin(['--profile', profileFile, '--install', '--replace-legacy']));
+    assert.equal(replaceInstOut.status, 'INSTALLED');
+    assert.equal(replaceInstOut.asar.status, 'INSTALLED');
+
+    const rbForceOut = JSON.parse(runBin(['--profile', profileFile, '--rollback', '--force']));
+    assert.equal(rbForceOut.status, 'ROLLED_BACK');
+    assert.deepEqual(fs.readFileSync(asarPath), pureOrigBuf);
+
     const unregOut = JSON.parse(runBin(['--profile', profileFile, '--unregister', 'acme-bar']));
     assert.equal(unregOut.ok, true);
     assert.equal(unregOut.removed, true);
 
-    // Direct diagnoseAsarState also matches
+    // After --rollback --force, direct diagnoseAsarState must report clean unpatched state
     const diag = diagnoseAsarState(
       { ASAR_PATH: asarPath, ASAR_LOCK_PATH: path.join(dir, 'asar.lock') },
       ANTIGRAVITY_HOST_PROFILE
     );
-    assert.equal(diag.hasLegacyConflict, true);
+    assert.equal(diag.hasLegacyConflict, false);
+    assert.equal(diag.hostInstalled, false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -324,6 +349,16 @@ test(
       const restoredHash = crypto.createHash('sha256').update(fs.readFileSync(asarPath)).digest('hex');
       assert.equal(restoredHash, origHash);
       readAsarArchive(asarPath);
+      console.log(
+        JSON.stringify({
+          realAsarVerified: true,
+          appVersion: inst.appVersion,
+          bytes: origBuf.length,
+          origSha256: origHash,
+          patchedSha256: inst.sha256,
+          restoredSha256: restoredHash,
+        })
+      );
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
