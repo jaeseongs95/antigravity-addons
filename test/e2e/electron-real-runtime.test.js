@@ -236,7 +236,7 @@ test(
       const env = { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' };
       delete env.ELECTRON_RUN_AS_NODE;
 
-      const stdout = execFileSync(ELECTRON_BIN, [appScript], {
+      const stdout = execFileSync(ELECTRON_BIN, ['--no-sandbox', '--disable-gpu', appScript], {
         encoding: 'utf8',
         env,
         timeout: 30000,
