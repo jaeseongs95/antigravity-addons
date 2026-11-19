@@ -1,0 +1,45 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
+
+function walkJsFiles(dir) {
+  const out = [];
+  if (!fs.existsSync(dir)) return out;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walkJsFiles(full));
+    else if (entry.name.endsWith('.js') || entry.name.endsWith('.mjs')) out.push(full);
+  }
+  return out;
+}
+
+test('TC-001: src/core/ has zero Antigravity, Electron, or app.asar vendor literals', () => {
+  const coreFiles = walkJsFiles(path.join(REPO_ROOT, 'src', 'core'));
+  assert.ok(coreFiles.length >= 4);
+  const forbidden = [/antigravity/i, /electron/i, /app\.asar/i, /AGY_/];
+  for (const file of coreFiles) {
+    const src = fs.readFileSync(file, 'utf8');
+    const rel = path.relative(REPO_ROOT, file);
+    for (const re of forbidden) {
+      assert.equal(re.test(src), false, `Vendor literal ${re} leaked into core module ${rel}`);
+    }
+  }
+});
+
+test('TC-001b: src/adapters/electron/ has zero hardcoded Antigravity profile literals', () => {
+  const adapterFiles = walkJsFiles(path.join(REPO_ROOT, 'src', 'adapters', 'electron'));
+  assert.ok(adapterFiles.length >= 3);
+  const forbidden = [/AGY_STATUSBAR/, /AGY_MCP/, /AGY_KO_THOUGHT/, /antigravity-desktop/];
+  for (const file of adapterFiles) {
+    const src = fs.readFileSync(file, 'utf8');
+    const rel = path.relative(REPO_ROOT, file);
+    for (const re of forbidden) {
+      assert.equal(re.test(src), false, `Hardcoded profile literal ${re} leaked into adapter ${rel}`);
+    }
+  }
+});

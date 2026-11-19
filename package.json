@@ -1,0 +1,27 @@
+{
+  "name": "antigravity-native-addon-host",
+  "version": "0.1.0",
+  "description": "Vendor-independent native desktop addon host and shared plugin isolation contract (AddonManifest.v1) for Electron apps, with Antigravity Desktop as the default profile.",
+  "license": "MIT",
+  "main": "src/index.js",
+  "bin": {
+    "addon-host": "bin/addon-host.js"
+  },
+  "scripts": {
+    "test": "node --test test/unit/*.test.js",
+    "status": "node ./bin/addon-host.js --status",
+    "doctor": "node ./bin/addon-host.js --doctor"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaeseongs95/antigravity-native-addon-host.git"
+  },
+  "dependencies": {
+    "@electron/asar": "^3.4.1",
+    "ajv": "^8.17.1",
+    "proper-lockfile": "^4.1.2"
+  }
+}
