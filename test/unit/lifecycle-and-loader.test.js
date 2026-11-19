@@ -714,3 +714,108 @@ test('TC-017 (R7-F3 & R7-F4): custom protocol origin comparison, null-origin fra
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('TC-018 (R8-F2): untrusted !trustedLocBeforeExec/catch never sends REVOKE_CAP secrets, and did-navigate during postVerify never commits credentials', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-r8-f2-'));
+  try {
+    const pluginsRoot = path.join(dir, 'plugins');
+    const addonsDir = path.join(dir, 'addons.d');
+    const configPath = path.join(dir, 'config.json');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'p-r8'), { recursive: true });
+    fs.writeFileSync(path.join(pluginsRoot, 'p-r8', 'entry.js'), 'window.__R8_RAN__ = true;\n', 'utf8');
+    fs.writeFileSync(
+      path.join(addonsDir, 'p-r8.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'p-r8',
+        displayName: 'R8 Plugin',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'p-r8' },
+        loadOrder: 10,
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+
+    const loaderSrc = buildHostLoaderScriptSource(
+      { ADDONS_DIR: addonsDir, PLUGINS_ROOT_DIR: pluginsRoot, CONFIG_JSON_PATH: configPath },
+      ANTIGRAVITY_HOST_PROFILE
+    );
+    const mod = { exports: {} };
+    vm.runInNewContext(loaderSrc, { require, module: mod, exports: mod.exports, URL, console });
+
+    // (a) !trustedLocBeforeExec: URL redirects to disallowed origin right after REGISTER_CAP
+    //     -> must NOT call __ADDON_HOST_REVOKE_CAP__ (0 hostSecret/instanceNonce/capToken sent to untrusted renderer)
+    {
+      const win = { location: { protocol: 'http:', host: '127.0.0.1:4173', origin: 'http://127.0.0.1:4173' } };
+      const ctx = vm.createContext({ window: win, document: {} });
+      let currentUrl = 'http://127.0.0.1:4173/app';
+      let revokeCalls = 0;
+      const listeners = {};
+      mod.exports.attachWebContents(
+        {
+          getType: () => 'window',
+          getURL: () => currentUrl,
+          on(evt, fn) { listeners[evt] = fn; },
+          async executeJavaScriptInIsolatedWorld(_id, sources) {
+            const code = sources[0].code;
+            if (code.includes('window.__ADDON_HOST_REVOKE_CAP__(')) revokeCalls++;
+            const res = vm.runInContext(code, ctx);
+            if (code.startsWith('window.__ADDON_HOST_REGISTER_CAP__(')) {
+              // Simulate renderer navigating to disallowed origin between REGISTER_CAP and execution
+              currentUrl = 'https://evil.example.com/hijack';
+            }
+            return res;
+          },
+        },
+        {}
+      );
+      listeners['dom-ready']();
+      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(revokeCalls, 0, 'R8-F2(a): must NEVER send REVOKE_CAP secrets to untrusted renderer');
+      assert.equal(win.__R8_RAN__, undefined, 'R8-F2(a): addon must NOT execute after origin switch');
+    }
+
+    // (b) postVerify race: did-navigate to disallowed origin occurs DURING await verifyLiveNonce(nextNonce)
+    //     -> must NOT commit hostSecret/instanceNonce and must call REGISTER_CAP 0 times
+    {
+      const win = { location: { protocol: 'http:', host: '127.0.0.1:4173', origin: 'http://127.0.0.1:4173' } };
+      const ctx = vm.createContext({ window: win, document: {} });
+      let currentUrl = 'http://127.0.0.1:4173/app';
+      let registerCapCalls = 0;
+      let verifyCalls = 0;
+      const listeners = {};
+      mod.exports.attachWebContents(
+        {
+          getType: () => 'window',
+          getURL: () => currentUrl,
+          on(evt, fn) { listeners[evt] = fn; },
+          async executeJavaScriptInIsolatedWorld(_id, sources) {
+            const code = sources[0].code;
+            if (code.startsWith('window.__ADDON_HOST_REGISTER_CAP__(')) registerCapCalls++;
+            const res = vm.runInContext(code, ctx);
+            if (code.includes('window.__ADDON_HOST_VERIFY__(')) {
+              verifyCalls++;
+              // During postVerify's await verifyLiveNonce(nextNonce), simulate committed navigation to evil origin
+              if (verifyCalls === 1) {
+                currentUrl = 'https://evil.example.com/post-verify-race';
+                listeners['did-navigate']();
+              }
+            }
+            return res;
+          },
+        },
+        {}
+      );
+      listeners['dom-ready']();
+      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(registerCapCalls, 0, 'R8-F2(b): postVerify race must NOT commit credentials or call REGISTER_CAP');
+      assert.equal(win.__R8_RAN__, undefined, 'R8-F2(b): addon must NOT execute after postVerify race');
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

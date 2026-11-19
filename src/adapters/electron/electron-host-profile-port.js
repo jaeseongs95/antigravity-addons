@@ -34,6 +34,9 @@ function validateElectronHostProfile(profile) {
       return { ok: false, reason: `MISSING_ELECTRON_PROFILE_FIELD:${key}` };
     }
   }
+  if (/[\r\n\u2028\u2029]/.test(profile.patchMarker)) {
+    return { ok: false, reason: 'INVALID_PATCH_MARKER_NEWLINE' };
+  }
   if (profile.legacyPatchMarkers !== undefined && !Array.isArray(profile.legacyPatchMarkers)) {
     return { ok: false, reason: 'INVALID_LEGACY_PATCH_MARKERS' };
   }

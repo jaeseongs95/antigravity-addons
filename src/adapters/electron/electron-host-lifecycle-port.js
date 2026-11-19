@@ -46,7 +46,7 @@ function resolveElectronPaths(profile, env = process.env, pathOverrides = null) 
   }
 
   assertValidResolvedElectronPaths(resolved, ELECTRON_REQUIRED_PATH_KEYS);
-  return { activeProfile, paths: resolved };
+  return { hostProfileId: activeProfile.id, activeProfile, paths: resolved };
 }
 
 function createElectronHostLifecyclePort() {

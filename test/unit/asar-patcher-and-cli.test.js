@@ -160,6 +160,27 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
     const badFs = acquireExclusiveLockDetailed(path.join(dir, 'bad\0path', 'x.lock'));
     assert.equal(badFs.ok, false);
     assert.equal(badFs.code, 'ERR_LOCK_FS_ERROR');
+
+    // 4) R8-F1: ESM file with // comments BEFORE and AFTER import/export where delta > sum(pre-import comments)
+    //    must NOT double-count pre-import comments on script->module fallback
+    const esmSource = [
+      '// pre-import-comment-one-aaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      '// pre-import-comment-two-bbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      "import fs from 'node:fs';",
+      '// post-import-comment-three-cccccccccccccccccccccccccccccccccccc',
+      '// post-import-comment-four-dddddddddddddddddddddddddddddddddddd',
+      'export const boot = () => {',
+      '  return fs.existsSync(".");',
+      '};',
+    ].join('\n');
+    const esmTarget = '  return fs.existsSync(".");';
+    // Replacement delta (~135 bytes) > sum of the two pre-import comments (~110 bytes)
+    const esmReplacement =
+      '  /* MARKER_ESM_R8 */ const __hooked = typeof process === "object" && Boolean(process.env.ESM_HOOK_TEST_LONG_VAR_NAME_1234567890); return __hooked && fs.existsSync(".");';
+    const esmOrigBuf = Buffer.from(esmSource, 'utf8');
+    const esmPatchedBuf = transformExactSize(esmOrigBuf, esmTarget, esmReplacement, 'MARKER_ESM_R8');
+    assert.equal(esmPatchedBuf.length, esmOrigBuf.length);
+    assert.equal(esmPatchedBuf.toString('utf8').includes('MARKER_ESM_R8'), true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -333,9 +354,13 @@ test('TC-014 (R5-F1, R6-F1, NB1-NB3): SOLID ISP/DIP segregated ports, non-Electr
   const minimalProfile = { id: 'minimal-non-electron', resolvePaths: () => ({}) };
   assert.equal(validateHostProfile(minimalProfile).ok, true);
 
-  // 2) Electron adapter port rejects missing Electron fields AND rejects resolvePaths: () => ({})
+  // 2) Electron adapter port rejects missing Electron fields, newline in patchMarker, AND resolvePaths: () => ({})
   assert.equal(validateElectronHostProfile(minimalProfile).ok, false);
   assert.equal(validateElectronHostProfile(minimalProfile).reason, 'MISSING_ELECTRON_PROFILE_FIELD:patchMarker');
+  assert.equal(
+    validateElectronHostProfile({ ...ANTIGRAVITY_HOST_PROFILE, patchMarker: 'BAD\nMARKER' }).reason,
+    'INVALID_PATCH_MARKER_NEWLINE'
+  );
 
   const brokenElectronProfile = {
     ...ANTIGRAVITY_HOST_PROFILE,

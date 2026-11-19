@@ -135,14 +135,27 @@ function isJsLineTerminator(ch) {
 
 function parseJavaScriptWithAcorn(sourceText, onComment = null) {
   const tryParse = (sourceType) => {
+    // R8-F1: Collect comments into an attempt-local buffer so a failed 'script' pass
+    // before falling back to 'module' never duplicates comment ranges into caller state.
+    const collected = onComment ? [] : null;
     const opts = {
       ecmaVersion: 'latest',
       sourceType,
       allowHashBang: true,
       allowReturnOutsideFunction: sourceType === 'script',
     };
-    if (onComment) opts.onComment = onComment;
-    return acorn.parse(sourceText, opts);
+    if (collected) {
+      opts.onComment = (block, text, start, end) => {
+        collected.push({ block, text, start, end });
+      };
+    }
+    const ast = acorn.parse(sourceText, opts);
+    if (collected) {
+      for (const c of collected) {
+        onComment(c.block, c.text, c.start, c.end);
+      }
+    }
+    return ast;
   };
   try {
     return tryParse('script');

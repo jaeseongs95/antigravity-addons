@@ -390,13 +390,13 @@ function buildRendererHostApiBootstrapSource({
     )
   );
 
-  // R6-F4: Purge any unconsumed capability token immediately on syntax/injection failure
+  // R6-F4 & R8-F2: Purge any unconsumed capability token with synchronous origin+nonce verification
   _ObjDefineProperty(
     window,
     '__ADDON_HOST_REVOKE_CAP__',
     makeDataDesc(
-      function(hostSecret, nonce, token) {
-        assertHostOriginAndAuth(hostSecret, nonce, '', 'ERR_FORBIDDEN_CAP_REVOKE');
+      function(hostSecret, nonce, expectedLoc, token) {
+        assertHostOriginAndAuth(hostSecret, nonce, expectedLoc, 'ERR_FORBIDDEN_CAP_REVOKE');
         if (typeof token === 'string' && _has(pendingSpecs, token)) {
           delete pendingSpecs[token];
           return true;
@@ -701,12 +701,18 @@ function attachWebContents(contents, electronApp) {
             '; const __INSTANCE_NONCE__ = ' + JSON.stringify(nextNonce) + ';\\n' +
             RENDERER_API_BOOTSTRAP_TEMPLATE + '\\n})();';
           await execInRenderer(bootstrapWithSecrets);
-          const postLoc = getAllowedLocation();
-          const postVerify =
+          const preVerifyLoc = getAllowedLocation();
+          const liveVerified =
             !pendingNav &&
             navGeneration === passGen &&
-            Boolean(postLoc) &&
+            Boolean(preVerifyLoc) &&
             (await verifyLiveNonce(nextNonce));
+          // R8-F2: Re-check pendingNav, navGeneration, and live allowed location AFTER await verifyLiveNonce
+          const postVerify =
+            liveVerified &&
+            !pendingNav &&
+            navGeneration === passGen &&
+            Boolean(getAllowedLocation());
           if (!postVerify) {
             recordDiag('error', 'ERR_HOST_BOOTSTRAP_SPOOFED', 'Renderer API verification failed after bootstrap');
             return;
@@ -778,19 +784,10 @@ function attachWebContents(contents, electronApp) {
                 JSON.stringify(capToken) + ',' +
                 JSON.stringify(spec) + ');'
             );
-            // R5-F2 & R6-F4: Re-verify before executing plugin wrapper
+            // R5-F2, R6-F4 & R8-F2: Re-verify before executing plugin wrapper.
+            // NEVER send hostSecret/instanceNonce/capToken to a renderer that just failed trust verification!
             const trustedLocBeforeExec = await verifyDocumentStillTrusted();
             if (!trustedLocBeforeExec) {
-              if (hostSecret && instanceNonce) {
-                try {
-                  await execInRenderer(
-                    'typeof window.__ADDON_HOST_REVOKE_CAP__ === "function" && window.__ADDON_HOST_REVOKE_CAP__(' +
-                      JSON.stringify(hostSecret) + ',' +
-                      JSON.stringify(instanceNonce) + ',' +
-                      JSON.stringify(capToken) + ');'
-                  );
-                } catch (_revErr) {}
-              }
               recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': origin/nonce/nav changed before execution');
               if (!pendingNav && navGeneration === passGen) resetCredentials();
               break;
@@ -816,18 +813,23 @@ function attachWebContents(contents, electronApp) {
             }
             injectedIds.add(addon.pluginId);
           } catch (err) {
-            // R6-F4 & R7-F4: Isolate failing plugin only for the current navigation generation, and purge unconsumed capToken
+            // R6-F4, R7-F4 & R8-F2: Isolate failing plugin only for current generation;
+            // ONLY call REVOKE_CAP if the renderer is STILL verified trusted (never leak secrets to untrusted doc).
             if (!pendingNav && navGeneration === passGen) {
               failedIds.add(addon.pluginId);
             }
             if (capToken && hostSecret && instanceNonce && !pendingNav && navGeneration === passGen) {
               try {
-                await execInRenderer(
-                  'typeof window.__ADDON_HOST_REVOKE_CAP__ === "function" && window.__ADDON_HOST_REVOKE_CAP__(' +
-                    JSON.stringify(hostSecret) + ',' +
-                    JSON.stringify(instanceNonce) + ',' +
-                    JSON.stringify(capToken) + ');'
-                );
+                const trustedLocForRevoke = await verifyDocumentStillTrusted();
+                if (trustedLocForRevoke) {
+                  await execInRenderer(
+                    'typeof window.__ADDON_HOST_REVOKE_CAP__ === "function" && window.__ADDON_HOST_REVOKE_CAP__(' +
+                      JSON.stringify(hostSecret) + ',' +
+                      JSON.stringify(instanceNonce) + ',' +
+                      JSON.stringify(trustedLocForRevoke) + ',' +
+                      JSON.stringify(capToken) + ');'
+                  );
+                }
               } catch (_revErr) {}
             }
             recordDiag('error', 'ERR_RENDERER_INJECT', addon.pluginId + ': ' + (err && err.message));
