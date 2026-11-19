@@ -361,6 +361,14 @@ test('TC-014 (R5-F1, R6-F1, NB1-NB3): SOLID ISP/DIP segregated ports, non-Electr
     validateElectronHostProfile({ ...ANTIGRAVITY_HOST_PROFILE, patchMarker: 'BAD\nMARKER' }).reason,
     'INVALID_PATCH_MARKER_NEWLINE'
   );
+  assert.equal(
+    validateElectronHostProfile({ ...ANTIGRAVITY_HOST_PROFILE, uiAnchors: 'bad' }).reason,
+    'INVALID_UI_ANCHORS'
+  );
+  assert.equal(
+    validateElectronHostProfile({ ...ANTIGRAVITY_HOST_PROFILE, uiAnchors: { sidebar: [] } }).reason,
+    'INVALID_UI_ANCHOR_ENTRY:sidebar'
+  );
 
   const brokenElectronProfile = {
     ...ANTIGRAVITY_HOST_PROFILE,

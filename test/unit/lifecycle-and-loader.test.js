@@ -1326,7 +1326,7 @@ test('TC-024 (R1-F1, R1-F2, R1-F3 & NB2/NB4): CSS bypass elimination, renderer e
       fs.mkdirSync(path.join(pluginsRoot, id), { recursive: true });
     }
 
-    // 1) R1-F1: CSS attacker attempting :not(), :is(), ~ sibling, hex @\69mport, @scope, @property, @starting-style, @\6d edia
+    // 1) R1-F1, R2-F1, R2-F2 & R2-F3: CSS attacker + total Promise prototype/constructor pollution
     fs.writeFileSync(
       path.join(pluginsRoot, 'css-attacker', 'entry.js'),
       `
@@ -1346,12 +1346,23 @@ test('TC-024 (R1-F1, R1-F2, R1-F3 & NB2/NB4): CSS bypass elimination, renderer e
         ['atStarting', '@starting-style { body { opacity: 0 } }'],
         ['atEscMedia', '@\\\\6d edia screen { .a { color: red } }'],
         ['atFontFace', '@font-face { font-family: evil; }'],
+        ['badStringBody', '.a { content: "\\n} body { background-color: rgb(255,0,0) !important; } }'],
+        ['badStringHeader', '.a[x="\\n] {} body { background-color: rgb(255,0,0) !important; } " {}'],
+        ['unclosedString', '.a { content: "unterminated }'],
+        ['unbalancedBrace', '.a { color: red'],
+        ['strayBrace', '} body { color: red }'],
+        ['nestingAmpSibling', '[data-addon-host-owner="css-attacker"] { & ~ * { color: red } }'],
+        ['nestingBodySibling', 'body { ~ * { color: red } }'],
+        ['nestingBodyHas', '[data-addon-host-owner="css-attacker"] { body:has(&) { color: red } }'],
+        ['nestingStartingStyle', '[data-addon-host-owner="css-attacker"] { @starting-style { opacity: 0 } }'],
       ];
       for (const [k, css] of payloads) {
         try { addonHost.injectStyle('b_' + k, css); blocked[k] = 'ALLOWED'; } catch (e) { blocked[k] = e.message; }
       }
       window.__TC024_CSS_BLOCKED__ = blocked;
-      // R1-F2: Also pollute Promise.prototype.catch and Promise.resolve to attack subsequent plugins
+      // R1-F2 & R2-F3: Pollute Promise.prototype.then=null, constructor, catch, AND Promise.resolve
+      Promise.prototype.then = null;
+      Promise.prototype.constructor = function PoisonCtor() { throw new Error('POISON_PROMISE_CTOR'); };
       Promise.prototype.catch = function() { throw new Error('HIJACKED_PROMISE_CATCH'); };
       Promise.resolve = function() { throw new Error('HIJACKED_PROMISE_RESOLVE'); };
       `,
@@ -1557,6 +1568,15 @@ test('TC-024 (R1-F1, R1-F2, R1-F3 & NB2/NB4): CSS bypass elimination, renderer e
     assert.equal(win.__TC024_CSS_BLOCKED__.atStarting, 'ERR_FORBIDDEN_CSS_AT_RULE');
     assert.equal(win.__TC024_CSS_BLOCKED__.atEscMedia, 'ERR_FORBIDDEN_CSS_AT_RULE');
     assert.equal(win.__TC024_CSS_BLOCKED__.atFontFace, 'ERR_FORBIDDEN_CSS_AT_RULE');
+    assert.equal(win.__TC024_CSS_BLOCKED__.badStringBody, 'ERR_FORBIDDEN_CSS_SYNTAX');
+    assert.equal(win.__TC024_CSS_BLOCKED__.badStringHeader, 'ERR_FORBIDDEN_CSS_SYNTAX');
+    assert.equal(win.__TC024_CSS_BLOCKED__.unclosedString, 'ERR_FORBIDDEN_CSS_SYNTAX');
+    assert.equal(win.__TC024_CSS_BLOCKED__.unbalancedBrace, 'ERR_FORBIDDEN_CSS_SYNTAX');
+    assert.equal(win.__TC024_CSS_BLOCKED__.strayBrace, 'ERR_FORBIDDEN_CSS_SYNTAX');
+    assert.equal(win.__TC024_CSS_BLOCKED__.nestingAmpSibling, 'ERR_FORBIDDEN_CSS_NESTING');
+    assert.equal(win.__TC024_CSS_BLOCKED__.nestingBodySibling, 'ERR_FORBIDDEN_CSS_NESTING');
+    assert.equal(win.__TC024_CSS_BLOCKED__.nestingBodyHas, 'ERR_FORBIDDEN_CSS_NESTING');
+    assert.equal(win.__TC024_CSS_BLOCKED__.nestingStartingStyle, 'ERR_FORBIDDEN_CSS_NESTING');
 
     // Verify R1-F2 polluted Promise immunity + hanging addon timeout + healthy peer survival
     const states = mod.exports.getAddonLifecycleStates();
@@ -1838,11 +1858,14 @@ test('TC-025 (Framework UI Standard): multi-region anchors with loadOrder orderi
     assert.equal(win.__KO_MODAL_API__.isModalOpen('ko-contributor.dialog'), false);
     assert.equal(win.__KO_MODAL_API__.isModalOpen('ko-contributor.popover'), true);
 
-    // Second ESC closes popover and restores focus to triggerBtn
+    // Second ESC closes popover and restores focus to triggerBtn; R2-NB3: z-index counter resets when stack empties
     triggerBtn.focused = false;
     win.dispatch('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} });
     assert.equal(popoverClosedCount, 1);
     assert.equal(triggerBtn.focused, true, 'Closing modal/popover restores focus to previousFocusEl');
+    const reopened = win.__KO_MODAL_API__.openModal('ko-contributor.dialog', { title: 'Reset Z' });
+    assert.equal(reopened.zIndex, 2147483002, 'R2-NB3: modalZCounter resets when modal stack empties');
+    reopened.close();
 
     // Disable ko-contributor -> action automatically removed & surface-bar notified
     fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'ko-contributor': { enabled: false } } }), 'utf8');

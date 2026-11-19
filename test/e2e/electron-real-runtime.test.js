@@ -43,7 +43,7 @@ test(
       fs.mkdirSync(path.join(pluginsRoot, 'e2e-first'), { recursive: true });
       fs.mkdirSync(path.join(pluginsRoot, 'e2e-second'), { recursive: true });
 
-      // Plugin 1: pollutes Object.prototype.get inside isolated world, mounts slot, tests R1-F1 CSS bypass defenses & host modal
+      // Plugin 1: pollutes Object.prototype.get inside isolated world, mounts slot + automation anchor, tests R1-F1/R2-F1/R2-F2 CSS bypass defenses, Action Port & host modal/popover
       fs.writeFileSync(
         path.join(pluginsRoot, 'e2e-first', 'renderer.js'),
         `
@@ -54,8 +54,10 @@ test(
         });
         const el = addonHost.mountSlot('e2e-first.bar');
         el.textContent = 'E2E_FIRST_READY';
+        const autoSlot = addonHost.mountSlot('e2e-first.automation');
+        if (autoSlot) autoSlot.textContent = 'E2E_AUTO_SLOT';
         addonHost.injectStyle('s1', '.e2e-first{color:green}');
-        // R1-F1 real Chromium Blink verification: :not()/:is() must NEVER escape to body or sibling e2e-second
+        // R1-F1, R2-F1 & R2-F2 real Chromium Blink verification
         addonHost.injectStyle('bypass-not', ':not([data-addon-host-owner="e2e-first"]) { background-color: rgb(255, 0, 0) !important; }');
         addonHost.injectStyle('bypass-is', ':is([data-addon-host-owner="e2e-first"], body) { color: rgb(255, 0, 0) !important; }');
         const blockedErrors = [];
@@ -63,10 +65,31 @@ test(
           '[data-addon-host-owner="e2e-first"] ~ * { background-color: rgb(255, 0, 0) !important; }',
           '@\\\\69mport url("https://evil.example/x.css");',
           '@scope (body) { body { background-color: rgb(255, 0, 0) !important; } }',
+          '.a { content: "\\n} body { background-color: rgb(255, 0, 0) !important; } }',
+          '.a[x="\\n] {} body { background-color: rgb(255, 0, 0) !important; } " {}',
+          '[data-addon-host-owner="e2e-first"] { & ~ * { background-color: rgb(255, 0, 0) !important; } }',
+          'body { ~ * { background-color: rgb(255, 0, 0) !important; } }',
+          '[data-addon-host-owner="e2e-first"] { body:has(&) { background-color: rgb(255, 0, 0) !important; } }',
         ]) {
           try { addonHost.injectStyle('bad', badCss); } catch (e) { blockedErrors.push(e.message); }
         }
         document.documentElement.setAttribute('data-e2e-f1-blocked', String(blockedErrors.length));
+        addonHost.registerAction({
+          surface: 'status-bar',
+          id: 'e2e-act',
+          label: 'E2E_ACT',
+          order: 10,
+          onClick() {
+            document.documentElement.setAttribute('data-e2e-action-fired', 'yes');
+          },
+        });
+        const pop = addonHost.openModal('e2e-first.popover', {
+          mode: 'popover',
+          anchorEl: el,
+          placement: 'top-end',
+          ignoreOutsideClickEls: [el],
+        });
+        pop.bodyEl.textContent = 'POPOVER_OK';
         const modal = addonHost.openModal('e2e-first.modal', { title: 'E2E Modal', badge: 'v1.1.0' });
         modal.bodyEl.textContent = 'MODAL_BODY_OK';
         `,
@@ -83,6 +106,8 @@ test(
           entry: { rendererScript: 'renderer.js', mainHookScript: null },
           uiSlots: [
             { slot: 'status-bar', slotId: 'e2e-first.bar', exclusive: true },
+            { slot: 'page-section', slotId: 'e2e-first.automation', anchor: 'automation-page' },
+            { slot: 'modal', slotId: 'e2e-first.popover' },
             { slot: 'modal', slotId: 'e2e-first.modal' },
           ],
           isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'e2e-first' },
@@ -91,13 +116,17 @@ test(
         'utf8'
       );
 
-      // Plugin 2: mounts slot + style + mainHook, then gets disabled on reload
+      // Plugin 2: mounts slot + style + mainHook, invokes e2e-first's contributed action, then gets disabled on reload
       fs.writeFileSync(
         path.join(pluginsRoot, 'e2e-second', 'renderer.js'),
         `
         const el = addonHost.mountSlot('e2e-second.overlay');
         el.textContent = 'E2E_SECOND_READY';
         addonHost.injectStyle('s2', '.e2e-second{color:blue}');
+        const actions = addonHost.listActions('status-bar');
+        if (actions.length === 1 && actions[0].label === 'E2E_ACT') {
+          actions[0].invoke({ sessionId: 'e2e' });
+        }
         addonHost.onDispose(() => {
           document.documentElement.setAttribute('data-e2e-second-disposed', 'yes');
         });
@@ -184,7 +213,7 @@ test(
         app.whenReady().then(async () => {
           const server = http.createServer((_req, res) => {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<!doctype html><html><head><title>E2E</title></head><body><div id="app">Host</div></body></html>');
+            res.end('<!doctype html><html><head><title>E2E</title></head><body><div id="app">Host</div><div data-testid="automation-view"></div></body></html>');
           });
           await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
           const port = server.address().port;
@@ -205,12 +234,17 @@ test(
                 const s2 = document.querySelector('[data-addon-host-owner="e2e-second"][data-addon-host-slot="e2e-second.overlay"]');
                 if (!s1 || !s2) return null;
                 const s1Style = document.querySelector('style[data-addon-host-owner="e2e-first"][data-addon-host-style="e2e-first:s1"]');
+                const autoSlot = document.querySelector('[data-testid="automation-view"] > [data-addon-host-owner="e2e-first"][data-addon-host-slot="e2e-first.automation"]');
+                const popoverEl = document.querySelector('[data-addon-host-popover="1"][data-addon-host-owner="e2e-first"]');
                 const modalDialog = document.querySelector('[data-addon-host-modal-dialog="1"][data-addon-host-owner="e2e-first"]');
                 const bodyBg = getComputedStyle(document.body).backgroundColor;
                 const s2Bg = getComputedStyle(s2).backgroundColor;
-                // Trigger Escape to verify host modal closes cleanly in real Chromium
+                // First Escape closes ONLY top-most dialog (popover stays open); second Escape closes popover
                 window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
                 const modalClosedByEsc = !document.querySelector('[data-addon-host-modal-dialog="1"][data-addon-host-owner="e2e-first"]');
+                const popoverStayedAfterFirstEsc = Boolean(document.querySelector('[data-addon-host-popover="1"][data-addon-host-owner="e2e-first"]'));
+                window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+                const popoverClosedBySecondEsc = !document.querySelector('[data-addon-host-popover="1"][data-addon-host-owner="e2e-first"]');
                 return {
                   firstText: s1.textContent,
                   firstTranslate: s1.getAttribute('translate'),
@@ -218,10 +252,15 @@ test(
                   firstStyleScope: s1Style ? s1Style.getAttribute('data-addon-host-style-scope') : null,
                   firstStyleText: s1Style ? s1Style.textContent : '',
                   f1BlockedCount: document.documentElement.getAttribute('data-e2e-f1-blocked'),
+                  autoSlotMounted: Boolean(autoSlot && autoSlot.textContent === 'E2E_AUTO_SLOT'),
+                  actionFired: document.documentElement.getAttribute('data-e2e-action-fired'),
                   bodyBgNotRed: bodyBg !== 'rgb(255, 0, 0)',
                   siblingBgNotRed: s2Bg !== 'rgb(255, 0, 0)',
+                  popoverOpened: Boolean(popoverEl && popoverEl.getAttribute('role') === 'dialog'),
                   modalOpened: Boolean(modalDialog && modalDialog.getAttribute('role') === 'dialog' && modalDialog.getAttribute('aria-modal') === 'true'),
                   modalClosedByEsc,
+                  popoverStayedAfterFirstEsc,
+                  popoverClosedBySecondEsc,
                   secondText: s2.textContent,
                   mainWorldObjectProtoGet: typeof Object.prototype.get,
                   mainWorldHostApiExposed: typeof window.__ADDON_HOST_API__,
@@ -320,20 +359,25 @@ test(
       assert.equal(res.initial.firstAgyAttr, 'true');
       assert.equal(res.initial.firstStyleScope, 'owner');
       assert.match(res.initial.firstStyleText, /\[data-addon-host-owner="e2e-first"\]\s+\.e2e-first/);
-      assert.equal(res.initial.f1BlockedCount, '3', 'R1-F1: all 3 dangerous/sibling CSS payloads must throw in real Electron');
+      assert.equal(res.initial.f1BlockedCount, '8', 'R1-F1/R2-F1/R2-F2: all 8 dangerous/newline/nesting CSS payloads must throw in real Electron');
+      assert.equal(res.initial.autoSlotMounted, true, 'R2-NB2: uiAnchors automation-page slot must mount in real Chromium');
+      assert.equal(res.initial.actionFired, 'yes', 'R2-NB2: cross-plugin Action Contribution Port must fire in real Electron');
       assert.equal(res.initial.bodyBgNotRed, true, 'R1-F1: :not()/:is() bypass must NOT paint document.body red in real Blink');
       assert.equal(res.initial.siblingBgNotRed, true, 'R1-F1: :not()/:is() bypass must NOT paint sibling e2e-second red in real Blink');
+      assert.equal(res.initial.popoverOpened, true, 'R2-NB2: Host popover must open in real Chromium');
       assert.equal(res.initial.modalOpened, true, 'Host standard modal must open with role=dialog & aria-modal=true');
-      assert.equal(res.initial.modalClosedByEsc, true, 'Host standard modal must close on Escape in real Chromium');
+      assert.equal(res.initial.modalClosedByEsc, true, 'Host standard modal must close on first Escape in real Chromium');
+      assert.equal(res.initial.popoverStayedAfterFirstEsc, true, 'Nested popover must remain open after top-most dialog closes');
+      assert.equal(res.initial.popoverClosedBySecondEsc, true, 'Popover must close on second Escape in real Chromium');
       assert.equal(res.initial.secondText, 'E2E_SECOND_READY');
       assert.equal(res.initial.styleCount, 4);
       assert.equal(res.initial.mainWorldObjectProtoGet, 'undefined', 'Isolated world must protect main-world Object.prototype');
       assert.equal(res.initial.mainWorldHostApiExposed, 'undefined', 'Isolated world must not expose host globals in main world');
       assert.equal(res.afterDisable.disposedAttr, 'yes');
       assert.equal(res.afterDisable.secondRemainingEls, 0);
-      assert.equal(res.afterDisable.firstRemainingEls, 4);
-      // After reload, e2e-first re-opens its modal (backdrop + dialog = +2 elements) alongside bar slot + 3 styles = 6
-      assert.equal(res.afterReload.firstRemainingEls, 6);
+      assert.equal(res.afterDisable.firstRemainingEls, 5);
+      // After reload, e2e-first re-opens popover (+1) and modal (backdrop + dialog = +2) alongside bar slot + automation slot + 3 styles = 8
+      assert.equal(res.afterReload.firstRemainingEls, 8);
       assert.equal(res.afterReload.secondRemainingEls, 0);
       assert.equal(res.mainHookDisposed, 1);
       assert.deepEqual(res.mainHookBroker, {

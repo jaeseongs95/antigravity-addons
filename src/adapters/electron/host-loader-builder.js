@@ -121,6 +121,9 @@ function buildRendererHostApiBootstrapSource({
   const _ObjCreate = Object.create;
   const _ObjFreeze = Object.freeze;
   const _ObjDefineProperty = Object.defineProperty;
+  const _ObjGetProto = Object.getPrototypeOf;
+  const _ObjGetOwnPropDesc = Object.getOwnPropertyDescriptor;
+  const _ObjProtoToString = Object.prototype.toString;
   const _ObjKeys = Object.keys;
   const _has = typeof Object.hasOwn === 'function'
     ? Object.hasOwn
@@ -143,8 +146,9 @@ function buildRendererHostApiBootstrapSource({
   const _RegExpTest = RegExp.prototype.test;
   const _Error = Error;
   const _Promise = Promise;
-  const _PromiseResolve = _Promise.resolve.bind(_Promise);
+  const _PromiseProto = _Promise.prototype;
   const _PromiseProtoThen = _Promise.prototype.then;
+  const _SymbolSpecies = typeof Symbol === 'function' ? Symbol.species : null;
   const _ReflectApply = Reflect.apply;
 
   function toLowerSafe(v) {
@@ -172,9 +176,6 @@ function buildRendererHostApiBootstrapSource({
   function testSafe(re, v) {
     return _ReflectApply(_RegExpTest, re, [_String(v || '')]);
   }
-  function promiseThenSafe(promiseLike, onFulfilled, onRejected) {
-    return _ReflectApply(_PromiseProtoThen, _PromiseResolve(promiseLike), [onFulfilled, onRejected]);
-  }
 
   // R5-F3: Null-prototype property descriptors prevent Object.prototype.get/set pollution
   // from causing TypeError: Invalid property descriptor during defineProperty calls.
@@ -187,19 +188,184 @@ function buildRendererHostApiBootstrapSource({
     return d;
   }
 
-  // P1 & R1-F1: Bulletproof CSS escape decoding, danger filter, strict @-rule allowlist, and owner selector scoping
+  // R2-F3: Pristine species carrier & host-awaitable Promise wrapper immune to
+  // Promise.prototype.then = null / throwing getter / Promise.prototype.constructor pollution.
+  const CLEAN_PROMISE_SPECIES = _ObjCreate(null);
+  if (_SymbolSpecies) {
+    _ObjDefineProperty(CLEAN_PROMISE_SPECIES, _SymbolSpecies, makeDataDesc(_Promise, false, false, false));
+  }
+
+  function hardenPromiseInstance(p) {
+    try {
+      _ObjDefineProperty(p, 'then', makeDataDesc(_PromiseProtoThen, false, false, false));
+      _ObjDefineProperty(p, 'constructor', makeDataDesc(CLEAN_PROMISE_SPECIES, false, false, false));
+    } catch (_e) {}
+    return p;
+  }
+
+  function makeResolvedPromise(val) {
+    return hardenPromiseInstance(new _Promise(function(resolve) { resolve(val); }));
+  }
+
+  function makeRejectedPromise(err) {
+    return hardenPromiseInstance(new _Promise(function(_resolve, reject) { reject(err); }));
+  }
+
+  function isNativePromise(val) {
+    if (!val || typeof val !== 'object') return false;
+    try {
+      return _ObjGetProto(val) === _PromiseProto || _ReflectApply(_ObjProtoToString, val, []) === '[object Promise]';
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function attachNativePromiseHandlers(nativePromise, onFulfilled, onRejected) {
+    return hardenPromiseInstance(
+      new _Promise(function(resolve, reject) {
+        let hadOwnCtor = false;
+        let prevCtorDesc = null;
+        let patchedCtor = false;
+        try {
+          hadOwnCtor = _has(nativePromise, 'constructor');
+          if (hadOwnCtor) prevCtorDesc = _ObjGetOwnPropDesc(nativePromise, 'constructor');
+          _ObjDefineProperty(nativePromise, 'constructor', makeDataDesc(CLEAN_PROMISE_SPECIES, true, false, true));
+          patchedCtor = true;
+        } catch (_e) {}
+        try {
+          _ReflectApply(_PromiseProtoThen, nativePromise, [
+            function(v) {
+              try {
+                resolve(typeof onFulfilled === 'function' ? onFulfilled(v) : v);
+              } catch (cbErr) {
+                reject(cbErr);
+              }
+            },
+            function(err) {
+              if (typeof onRejected === 'function') {
+                try {
+                  resolve(onRejected(err));
+                } catch (cbErr) {
+                  reject(cbErr);
+                }
+              } else {
+                reject(err);
+              }
+            },
+          ]);
+        } catch (attachErr) {
+          if (typeof onRejected === 'function') {
+            try {
+              resolve(onRejected(attachErr));
+            } catch (cbErr) {
+              reject(cbErr);
+            }
+          } else {
+            reject(attachErr);
+          }
+        } finally {
+          if (patchedCtor) {
+            try {
+              if (hadOwnCtor && prevCtorDesc) {
+                _ObjDefineProperty(nativePromise, 'constructor', prevCtorDesc);
+              } else {
+                delete nativePromise.constructor;
+              }
+            } catch (_e) {}
+          }
+        }
+      })
+    );
+  }
+
+  function observeAsyncValue(val, onFulfilled, onRejected) {
+    if (isNativePromise(val)) {
+      return { isAsync: true, promise: attachNativePromiseHandlers(val, onFulfilled, onRejected) };
+    }
+    if (val !== null && (typeof val === 'object' || typeof val === 'function')) {
+      let thenFn = null;
+      try {
+        thenFn = val.then;
+      } catch (getterErr) {
+        if (typeof onRejected === 'function') {
+          try {
+            return { isAsync: true, promise: makeResolvedPromise(onRejected(getterErr)) };
+          } catch (cbErr) {
+            return { isAsync: true, promise: makeRejectedPromise(cbErr) };
+          }
+        }
+        return { isAsync: true, promise: makeRejectedPromise(getterErr) };
+      }
+      if (typeof thenFn === 'function') {
+        const wrappedThenable = hardenPromiseInstance(
+          new _Promise(function(resolve, reject) {
+            let settled = false;
+            try {
+              _ReflectApply(thenFn, val, [
+                function(v) {
+                  if (settled) return;
+                  settled = true;
+                  try {
+                    resolve(typeof onFulfilled === 'function' ? onFulfilled(v) : v);
+                  } catch (cbErr) {
+                    reject(cbErr);
+                  }
+                },
+                function(err) {
+                  if (settled) return;
+                  settled = true;
+                  if (typeof onRejected === 'function') {
+                    try {
+                      resolve(onRejected(err));
+                    } catch (cbErr) {
+                      reject(cbErr);
+                    }
+                  } else {
+                    reject(err);
+                  }
+                },
+              ]);
+            } catch (thenErr) {
+              if (settled) return;
+              settled = true;
+              if (typeof onRejected === 'function') {
+                try {
+                  resolve(onRejected(thenErr));
+                } catch (cbErr) {
+                  reject(cbErr);
+                }
+              } else {
+                reject(thenErr);
+              }
+            }
+          })
+        );
+        return { isAsync: true, promise: wrappedThenable };
+      }
+    }
+    return { isAsync: false, value: val };
+  }
+
+  // P1, R1-F1, R2-F1 & R2-F2: Bulletproof CSS escape decoding, <bad-string-token> newline & EOF checks,
+  // CSS Nesting rejection, danger filter, strict @-rule allowlist, and owner selector scoping
   const FORBIDDEN_CSS_RE = /@import\\b|javascript\\s*:|expression\\s*\\(|behavior\\s*:|-moz-binding\\s*:/i;
+  const CSS_CRLF_RE = /\\r\\n/g;
   const CSS_COMMENT_RE = /\\/\\*[\\s\\S]*?\\*\\//g;
-  const CSS_NEWLINE_ESCAPE_RE = /\\\\(?:\\r\\n|[\\r\\n\\f])/g;
-  const CSS_HEX_ESCAPE_RE = /\\\\([0-9a-fA-F]{1,6})[ \\t\\r\\n\\f]?/g;
-  const CSS_CHAR_ESCAPE_RE = /\\\\([^\\r\\n\\f0-9a-fA-F])/g;
+  const CSS_NEWLINE_ESCAPE_RE = /\\\\[\\n\\r\\f]/g;
+  const CSS_HEX_ESCAPE_RE = /\\\\([0-9a-fA-F]{1,6})[ \\t\\n\\r\\f]?/g;
+  const CSS_CHAR_ESCAPE_RE = /\\\\([^\\n\\r\\f0-9a-fA-F])/g;
   const AT_KEYFRAMES_RE = /^@(?:(?:-webkit-)?keyframes)\\b/i;
   const AT_NESTED_RE = /^@(?:media|supports|container|layer)\\b/i;
   const ROOT_TAG_ONLY_RE = /^(?::root|html|body)$/i;
   const ROOT_TAG_PREFIX_RE = /^(?::root|html|body)(?=[\\s>.#\\[:~+])/i;
 
+  function isCssNewline(ch) {
+    return ch === '\\n' || ch === '\\r' || ch === '\\f';
+  }
+
   function decodeCssEscapes(cssStr) {
-    let out = replaceSafe(cssStr, CSS_NEWLINE_ESCAPE_RE, '');
+    let out = replaceSafe(cssStr, CSS_CRLF_RE, '\\n');
+    out = replaceSafe(out, CSS_NEWLINE_ESCAPE_RE, '');
     out = replaceSafe(out, CSS_HEX_ESCAPE_RE, function(_m, hex) {
       const cp = _ParseInt(hex, 16);
       if (!_IsFinite(cp) || cp <= 0 || cp > 0x10ffff) return '\\uFFFD';
@@ -214,12 +380,36 @@ function buildRendererHostApiBootstrapSource({
   }
 
   function assertSafeCssConstructs(rawCss) {
-    const withoutComments = replaceSafe(rawCss, CSS_COMMENT_RE, '');
+    const normNewlines = replaceSafe(rawCss, CSS_CRLF_RE, '\\n');
+    const withoutComments = replaceSafe(normNewlines, CSS_COMMENT_RE, '');
     const decoded = decodeCssEscapes(withoutComments);
     if (testSafe(FORBIDDEN_CSS_RE, withoutComments) || testSafe(FORBIDDEN_CSS_RE, decoded)) {
       throw new _Error('ERR_FORBIDDEN_CSS_CONSTRUCT');
     }
     return withoutComments;
+  }
+
+  // R2-F1 & R2-F2: Validate declaration body of normal rules — reject unescaped string newlines,
+  // unclosed strings, and any unquoted '{' / '}' (blocks CSS Nesting Level 1 & nested @-rules).
+  function assertFlatDeclarationBody(bodyText) {
+    const len = bodyText.length;
+    let quote = '';
+    for (let i = 0; i < len; i++) {
+      const ch = bodyText[i];
+      if (quote) {
+        if (ch === '\\\\') { i++; continue; }
+        if (isCssNewline(ch)) throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
+        if (ch === quote) quote = '';
+        continue;
+      }
+      if (ch === '"' || ch === "'") { quote = ch; continue; }
+      if (ch === '{' || ch === '}') {
+        throw new _Error('ERR_FORBIDDEN_CSS_NESTING');
+      }
+    }
+    if (quote !== '') {
+      throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
+    }
   }
 
   // R1-F1: Reject top-level sibling combinators (~ or +) applied directly to the owner/root element
@@ -234,6 +424,7 @@ function buildRendererHostApiBootstrapSource({
       const ch = rest[i];
       if (quote) {
         if (ch === '\\\\') { i += 2; continue; }
+        if (isCssNewline(ch)) throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
         if (ch === quote) quote = '';
         i++;
         continue;
@@ -257,6 +448,9 @@ function buildRendererHostApiBootstrapSource({
         }
       }
       i++;
+    }
+    if (quote !== '' || parenDepth !== 0 || bracketDepth !== 0) {
+      throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
     }
     return false;
   }
@@ -297,18 +491,30 @@ function buildRendererHostApiBootstrapSource({
       const ch = selectorList[i];
       if (quote) {
         if (ch === '\\\\') { i++; continue; }
+        if (isCssNewline(ch)) throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
         if (ch === quote) quote = '';
         continue;
       }
       if (ch === '"' || ch === "'") { quote = ch; continue; }
       if (ch === '(') { parenDepth++; continue; }
-      if (ch === ')' && parenDepth > 0) { parenDepth--; continue; }
+      if (ch === ')') {
+        if (parenDepth === 0) throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
+        parenDepth--;
+        continue;
+      }
       if (ch === '[') { bracketDepth++; continue; }
-      if (ch === ']' && bracketDepth > 0) { bracketDepth--; continue; }
+      if (ch === ']') {
+        if (bracketDepth === 0) throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
+        bracketDepth--;
+        continue;
+      }
       if (ch === ',' && parenDepth === 0 && bracketDepth === 0) {
         appendScoped(sliceSafe(selectorList, start, i));
         start = i + 1;
       }
+    }
+    if (quote !== '' || parenDepth !== 0 || bracketDepth !== 0) {
+      throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
     }
     appendScoped(sliceSafe(selectorList, start));
     return out;
@@ -328,12 +534,17 @@ function buildRendererHostApiBootstrapSource({
         const ch = cssText[j];
         if (quote) {
           if (ch === '\\\\') { j++; continue; }
+          if (isCssNewline(ch)) throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
           if (ch === quote) quote = '';
           continue;
         }
         if (ch === '"' || ch === "'") { quote = ch; continue; }
+        if (ch === '}') { throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX'); }
         if (ch === ';') { semiPos = j; break; }
         if (ch === '{') { bracePos = j; break; }
+      }
+      if (quote !== '') {
+        throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
       }
       if (semiPos !== -1 && (bracePos === -1 || semiPos < bracePos)) {
         const stmt = trimSafe(sliceSafe(cssText, headerStart, semiPos + 1));
@@ -348,6 +559,8 @@ function buildRendererHostApiBootstrapSource({
         continue;
       }
       if (bracePos === -1) {
+        const tail = trimSafe(sliceSafe(cssText, headerStart));
+        if (tail) throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
         break;
       }
       let depth = 1;
@@ -357,6 +570,7 @@ function buildRendererHostApiBootstrapSource({
         const ch = cssText[k];
         if (quote) {
           if (ch === '\\\\') { k += 2; continue; }
+          if (isCssNewline(ch)) throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
           if (ch === quote) quote = '';
           k++;
           continue;
@@ -365,6 +579,9 @@ function buildRendererHostApiBootstrapSource({
         if (ch === '{') depth++;
         else if (ch === '}') depth--;
         k++;
+      }
+      if (quote !== '' || depth !== 0) {
+        throw new _Error('ERR_FORBIDDEN_CSS_SYNTAX');
       }
       const header = trimSafe(sliceSafe(cssText, headerStart, bracePos));
       const body = sliceSafe(cssText, bracePos + 1, _MathMax(bracePos + 1, k - 1));
@@ -382,6 +599,8 @@ function buildRendererHostApiBootstrapSource({
             throw new _Error('ERR_FORBIDDEN_CSS_AT_RULE');
           }
         } else {
+          // R2-F2: Disallow CSS Nesting & nested @-rules inside normal declaration blocks
+          assertFlatDeclarationBody(body);
           const scopedHeader = scopeSelectorList(header, ownerPrefix);
           if (scopedHeader) {
             out += scopedHeader + ' {' + body + '}\\n';
@@ -608,6 +827,10 @@ function buildRendererHostApiBootstrapSource({
     const entry = modalEntries[slotId];
     delete modalEntries[slotId];
     removeModalFromStack(slotId);
+    // R2-NB3: Reset z-index counter when stack empties to prevent 32-bit int overflow in long-running sessions
+    if (modalStack.count === 0) {
+      modalZCounter = 2147483000;
+    }
     if (entry.portalEl && entry.portalEl.parentNode && typeof entry.portalEl.parentNode.removeChild === 'function') {
       try { entry.portalEl.parentNode.removeChild(entry.portalEl); } catch (_e) {}
     }
@@ -725,13 +948,11 @@ function buildRendererHostApiBootstrapSource({
               });
               try {
                 const ret = _ReflectApply(a.onClick, undefined, [payload]);
-                if (ret && typeof ret.then === 'function') {
-                  return promiseThenSafe(ret, undefined, function(asyncErr) {
-                    recordPluginError(a.pluginId, asyncErr);
-                    return undefined;
-                  });
-                }
-                return ret;
+                const obs = observeAsyncValue(ret, undefined, function(asyncErr) {
+                  recordPluginError(a.pluginId, asyncErr);
+                  return undefined;
+                });
+                return obs.isAsync ? obs.promise : obs.value;
               } catch (syncErr) {
                 recordPluginError(a.pluginId, syncErr);
                 return undefined;
@@ -1175,19 +1396,17 @@ function buildRendererHostApiBootstrapSource({
         recordPluginError(pluginId, err);
       },
       runSafe(fn) {
-        if (disposed || typeof fn !== 'function') return _PromiseResolve(undefined);
+        if (disposed || typeof fn !== 'function') return makeResolvedPromise(undefined);
         try {
           const res = _ReflectApply(fn, undefined, []);
-          if (res && typeof res.then === 'function') {
-            return promiseThenSafe(res, undefined, function(asyncErr) {
-              recordPluginError(pluginId, asyncErr);
-              return undefined;
-            });
-          }
-          return _PromiseResolve(res);
+          const obs = observeAsyncValue(res, undefined, function(asyncErr) {
+            recordPluginError(pluginId, asyncErr);
+            return undefined;
+          });
+          return obs.isAsync ? obs.promise : makeResolvedPromise(obs.value);
         } catch (syncErr) {
           recordPluginError(pluginId, syncErr);
-          return _PromiseResolve(undefined);
+          return makeResolvedPromise(undefined);
         }
       },
       addManagedListener(target, eventType, handler, opts) {
@@ -1199,11 +1418,10 @@ function buildRendererHostApiBootstrapSource({
           if (disposed) return;
           try {
             const ret = _ReflectApply(handler, this, arguments);
-            if (ret && typeof ret.then === 'function') {
-              promiseThenSafe(ret, undefined, function(asyncErr) {
-                recordPluginError(pluginId, asyncErr);
-              });
-            }
+            observeAsyncValue(ret, undefined, function(asyncErr) {
+              recordPluginError(pluginId, asyncErr);
+              return undefined;
+            });
           } catch (syncErr) {
             recordPluginError(pluginId, syncErr);
           }
@@ -1441,7 +1659,7 @@ function buildRendererHostApiBootstrapSource({
     makeDataDesc(consumeCapabilityInternal, false, false, false)
   );
 
-  // R1-F2: Prototype-pollution-immune addon runner using captured _Promise/_PromiseResolve/_PromiseProtoThen
+  // R1-F2 & R2-F3: Prototype-pollution-immune addon runner using captured _PromiseProto/_PromiseProtoThen + CLEAN_PROMISE_SPECIES
   _ObjDefineProperty(
     window,
     '__ADDON_HOST_RUN_ADDON__',
@@ -1450,16 +1668,17 @@ function buildRendererHostApiBootstrapSource({
         const scoped = consumeCapabilityInternal(token);
         try {
           const ret = _ReflectApply(runnerFn, undefined, [scoped]);
-          if (ret && typeof ret.then === 'function') {
-            return promiseThenSafe(
-              ret,
-              function() { return true; },
-              function(asyncErr) {
-                try { scoped.reportError(asyncErr); } catch (_r) {}
-                try { scoped.dispose(); } catch (_d) {}
-                throw asyncErr;
-              }
-            );
+          const obs = observeAsyncValue(
+            ret,
+            function() { return true; },
+            function(asyncErr) {
+              try { scoped.reportError(asyncErr); } catch (_r) {}
+              try { scoped.dispose(); } catch (_d) {}
+              throw asyncErr;
+            }
+          );
+          if (obs.isAsync) {
+            return obs.promise;
           }
           return true;
         } catch (syncErr) {
@@ -2116,19 +2335,26 @@ function attachWebContents(contents, electronApp) {
     }
   };
 
-  // NB4: Host-authenticated reader consuming window.__ADDON_HOST_GET_ERRORS__
+  // NB4: Host-authenticated reader consuming window.__ADDON_HOST_GET_ERRORS__ with post-await TOCTOU re-verification
   contentsErrorReaders.set(contents, async (pluginId) => {
     if (!hostSecret || !instanceNonce || pendingNav) return [];
-    const liveLoc = getAllowedLocation();
-    if (!liveLoc) return [];
-    const liveOk = await verifyLiveNonce(instanceNonce);
-    if (!liveOk || pendingNav) return [];
+    const readGen = navGeneration;
+    const preLoc = getAllowedLocation();
+    if (!preLoc) return [];
+    const snapSecret = hostSecret;
+    const snapNonce = instanceNonce;
+    const liveOk = await verifyLiveNonce(snapNonce);
+    if (!liveOk || pendingNav || navGeneration !== readGen || hostSecret !== snapSecret || instanceNonce !== snapNonce) {
+      return [];
+    }
+    const postLoc = getAllowedLocation();
+    if (!postLoc) return [];
     try {
       const res = await execInRenderer(
         'typeof window.__ADDON_HOST_GET_ERRORS__ === "function" ? window.__ADDON_HOST_GET_ERRORS__(' +
-          JSON.stringify(hostSecret) + ',' +
-          JSON.stringify(instanceNonce) + ',' +
-          JSON.stringify(liveLoc) + ',' +
+          JSON.stringify(snapSecret) + ',' +
+          JSON.stringify(snapNonce) + ',' +
+          JSON.stringify(postLoc) + ',' +
           JSON.stringify(String(pluginId || '')) + ') : []'
       );
       return Array.isArray(res) ? res : [];

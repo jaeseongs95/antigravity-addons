@@ -73,6 +73,22 @@ function validateElectronHostProfile(profile) {
       return { ok: false, reason: 'INVALID_ALLOWED_URL_PROTOCOLS' };
     }
   }
+  if (profile.uiAnchors !== undefined) {
+    if (!profile.uiAnchors || typeof profile.uiAnchors !== 'object' || Array.isArray(profile.uiAnchors)) {
+      return { ok: false, reason: 'INVALID_UI_ANCHORS' };
+    }
+    for (const [anchorKey, selectors] of Object.entries(profile.uiAnchors)) {
+      if (
+        typeof anchorKey !== 'string' ||
+        !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(anchorKey) ||
+        !Array.isArray(selectors) ||
+        selectors.length === 0 ||
+        selectors.some((s) => typeof s !== 'string' || !s.trim())
+      ) {
+        return { ok: false, reason: `INVALID_UI_ANCHOR_ENTRY:${anchorKey}` };
+      }
+    }
+  }
   return { ok: true };
 }
 
