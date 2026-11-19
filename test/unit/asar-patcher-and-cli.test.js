@@ -13,7 +13,11 @@ const CLI_BIN = path.join(REPO_ROOT, 'bin', 'addon-host.js');
 
 const { validateHostProfile } = require('../../src/core/host-profile-port');
 const { validateElectronHostProfile } = require('../../src/adapters/electron/electron-host-profile-port');
-const { createElectronHostAdapter } = require('../../src/adapters/electron/electron-host-adapter');
+const {
+  resolveElectronPaths,
+  createElectronHostLifecyclePort,
+} = require('../../src/adapters/electron/electron-host-lifecycle-port');
+const { createElectronAddonStorePort } = require('../../src/adapters/electron/electron-addon-store-port');
 const { createCliApp } = require('../../src/cli/main');
 const { ANTIGRAVITY_HOST_PROFILE } = require('../../src/profiles/antigravity');
 const {
@@ -83,17 +87,16 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
   assert.equal(sanitizeVersionForFilename('../../evil/1.0'), 'evil_1.0');
   assert.equal(sanitizeVersionForFilename('2.33.0'), '2.33.0');
 
-  // F6 & R5-F4: regex literals & nested template `${...}` containing `//` on its own line must NOT be stripped; CRLF supported
+  // F6, R5-F4, R6-F2: regex literals, nested template `${...}`, CR-only (\r), \u2028/\u2029, and ESM+Hashbang
   const templateSrc = [
+    '#!/usr/bin/env node',
     "const re = /foo\\/bar\\`/g;",
-    "const tpl = `line1 ${`nested",
-    "  // keep this inside nested template literal",
-    "inner`}",
-    "  // keep this inside outer template literal",
+    "const tpl = `line1 ${`nested\r  // keep inside CR-separated nested template\rinner`}",
+    "  // keep this inside outer template literal\u2028  // keep after LS inside template",
     "line3`;",
     "// top level removable comment line 1 for exact size padding",
     "// top level removable comment line 2 for exact size padding",
-    "TARGET_ANCHOR();",
+    "export const anchorResult = TARGET_ANCHOR();",
   ].join('\r\n');
   const transformed = transformExactSize(
     Buffer.from(templateSrc, 'utf8'),
@@ -101,8 +104,9 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
     'TARGET_ANCHOR();/*MARK*/void 0;',
     'MARK'
   ).toString('utf8');
-  assert.equal(transformed.includes('// keep this inside nested template literal'), true);
+  assert.equal(transformed.includes('// keep inside CR-separated nested template'), true);
   assert.equal(transformed.includes('// keep this inside outer template literal'), true);
+  assert.equal(transformed.includes('// keep after LS inside template'), true);
   assert.equal(transformed.includes('/*MARK*/'), true);
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-asar-'));
@@ -284,8 +288,8 @@ test('TC-011 & TC-012 (F5 & F7): real bin/addon-host.js CLI process executes --v
 
     const doctorOut = JSON.parse(runBin(['--profile', profileFile, '--doctor']));
     assert.equal(doctorOut.healthy, false);
-    assert.equal(doctorOut.asar.hasLegacyConflict, true);
-    assert.equal(doctorOut.asar.legacyMarkers.includes('AGY_STATUSBAR'), true);
+    assert.equal(doctorOut.host.hasLegacyConflict, true);
+    assert.equal(doctorOut.host.legacyMarkers.includes('AGY_STATUSBAR'), true);
 
     // R2-F5: --install without --replace-legacy must exit non-zero on legacy patch
     let installErr = null;
@@ -324,7 +328,7 @@ test('TC-011 & TC-012 (F5 & F7): real bin/addon-host.js CLI process executes --v
   }
 });
 
-test('TC-014 (R5-F1 & NB3): SOLID DIP/ISP port separation, resolved-path validation, mock non-Electron CLI injection, and doctor origBackupValid health check', async () => {
+test('TC-014 (R5-F1, R6-F1, NB1-NB3): SOLID ISP/DIP segregated ports, non-Electron CLI mock with zero ASAR fields, ADDONS_LOCK_PATH re-derivation, and non-canonical unregister', async () => {
   // 1) Core HostProfile port accepts minimal non-Electron profile without Electron/ASAR fields
   const minimalProfile = { id: 'minimal-non-electron', resolvePaths: () => ({}) };
   assert.equal(validateHostProfile(minimalProfile).ok, true);
@@ -337,53 +341,80 @@ test('TC-014 (R5-F1 & NB3): SOLID DIP/ISP port separation, resolved-path validat
     ...ANTIGRAVITY_HOST_PROFILE,
     resolvePaths: () => ({}),
   };
-  const electronAdapter = createElectronHostAdapter();
-  assert.throws(() => electronAdapter.resolvePaths(brokenElectronProfile), /MISSING_RESOLVED_PATH:ADDONS_DIR/);
+  const electronLifecycle = createElectronHostLifecyclePort();
+  assert.throws(() => electronLifecycle.resolveContext(brokenElectronProfile), /MISSING_RESOLVED_PATH:ADDONS_DIR/);
 
-  // 3) CLI factory works with a completely non-Electron injected hostAdapter (DIP)
-  const fakeNonElectronAdapter = {
+  // NB2: Overriding ADDONS_DIR alone must re-derive ADDONS_LOCK_PATH co-located with overridden ADDONS_DIR
+  const customAddonsDir = path.join(os.tmpdir(), 'override-dir-test', 'addons.d');
+  const resolvedOverride = resolveElectronPaths(ANTIGRAVITY_HOST_PROFILE, process.env, {
+    ADDONS_DIR: customAddonsDir,
+  });
+  assert.equal(
+    resolvedOverride.paths.ADDONS_LOCK_PATH,
+    path.join(path.dirname(customAddonsDir), 'addon-host-addons.lock')
+  );
+
+  // 3) CLI factory works with segregated non-Electron ports returning ZERO fake ASAR fields (R6-F1)
+  const fakeNonElectronLifecycle = {
     validateProfile: (p) => {
       if (!p || !p.id) throw new Error('BAD_PROFILE');
       return p;
     },
-    resolvePaths: (p) => ({
-      activeProfile: p,
-      paths: { ADDONS_DIR: '/virtual/addons', PLUGINS_ROOT_DIR: '/virtual/plugins', LOADER_SCRIPT_PATH: '' },
-    }),
-    isHostInstalled: () => true,
-    diagnoseHostState: () => ({
-      asarExists: true,
-      hostInstalled: true,
-      hasLegacyConflict: false,
-      origBackupValid: false,
-      origBackupStatus: 'ERR_ORIG_META_MISMATCH',
-    }),
-    installHost: () => ({ status: 'INSTALLED' }),
-    rollbackHost: () => ({ status: 'ROLLED_BACK' }),
-    collectExecutableAddons: () => ({ active: [], disabled: [], rejected: [], slots: {} }),
-    loadRawManifestsFromDir: () => [],
-    buildLoaderSource: () => '// mock',
-    acquireLock: () => ({ ok: true, token: 'tok' }),
-    releaseLock: () => {},
-    writeAtomicSync: () => {},
+    resolveContext: (p) => ({ activeProfile: p, paths: { PLUGINS_ROOT_DIR: '/virtual/plugins' } }),
+    getHostStatus: () => ({ installed: true, engine: 'virtual-host' }),
+    diagnoseHost: () => ({ healthy: false, reason: 'VIRTUAL_UNHEALTHY' }),
+    installHost: () => ({ ok: true, status: 'INSTALLED' }),
+    rollbackHost: () => ({ ok: true, status: 'ROLLED_BACK' }),
+  };
+  const fakeNonElectronStore = {
+    planAddons: () => ({ active: [], disabled: [], rejected: [], slots: {} }),
+    registerManifest: () => ({ ok: true, pluginId: 'mock-plugin' }),
+    unregisterManifest: () => ({ ok: true, removed: true, pluginId: 'mock-plugin' }),
   };
   const cli = createCliApp({
-    hostAdapter: fakeNonElectronAdapter,
+    hostLifecycle: fakeNonElectronLifecycle,
+    addonStore: fakeNonElectronStore,
     defaultProfile: minimalProfile,
     hostVersion: '1.0.1',
   });
   const status = cli.buildStatusReport();
   assert.equal(status.hostProfileId, 'minimal-non-electron');
-  assert.equal(status.asarHostInstalled, true);
+  assert.equal(status.hostInstalled, true);
+  assert.equal(status.hostStatus.engine, 'virtual-host');
 
-  // NB3: Doctor report marks healthy=false when hostInstalled=true and origBackupValid=false
   const doctor = cli.buildDoctorReport();
   assert.equal(doctor.healthy, false);
-  assert.equal(doctor.asar.origBackupValid, false);
+  assert.equal(doctor.host.reason, 'VIRTUAL_UNHEALTHY');
 
   // NB3: --register/-flag and --unregister/-flag fail closed
   assert.equal(cli.registerAddonManifestFile('--bad-flag').reason, 'ERR_MANIFEST_FILE_NOT_FOUND');
   assert.equal(cli.unregisterAddonManifest('--bad-flag').reason, 'ERR_INVALID_PLUGIN_ID');
+
+  // NB1: Electron AddonStorePort unregisters non-canonical filename holding the same pluginId
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-noncanon-'));
+  try {
+    const addonsDir = path.join(dir, 'addons.d');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    const nonCanon = path.join(addonsDir, '99-alias-name.json');
+    fs.writeFileSync(nonCanon, JSON.stringify({ pluginId: 'dup-plugin' }), 'utf8');
+    const store = createElectronAddonStorePort();
+    const res = store.unregisterManifest(
+      {
+        activeProfile: ANTIGRAVITY_HOST_PROFILE,
+        paths: {
+          ADDONS_DIR: addonsDir,
+          ADDONS_LOCK_PATH: path.join(dir, 'addons.lock'),
+          LOADER_SCRIPT_PATH: path.join(dir, 'loader.js'),
+        },
+      },
+      'dup-plugin'
+    );
+    assert.equal(res.ok, true);
+    assert.equal(res.removed, true);
+    assert.equal(fs.existsSync(nonCanon), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 const defaultLocalOrig = process.env.LOCALAPPDATA

@@ -2,16 +2,18 @@
 'use strict';
 
 /**
- * CLI Composition Root: binds the Electron host adapter and default Antigravity profile
- * into the host-agnostic CLI factory (`src/cli/main.js`).
+ * CLI Composition Root: wires segregated Electron ports (`HostLifecyclePort`, `AddonStorePort`)
+ * and the default Antigravity profile into the host-agnostic CLI factory (`src/cli/main.js`).
  */
 
 const { createCliApp } = require('../src/cli/main');
-const { createElectronHostAdapter } = require('../src/adapters/electron/electron-host-adapter');
+const { createElectronHostLifecyclePort } = require('../src/adapters/electron/electron-host-lifecycle-port');
+const { createElectronAddonStorePort } = require('../src/adapters/electron/electron-addon-store-port');
 const { ANTIGRAVITY_HOST_PROFILE } = require('../src/profiles/antigravity');
 
 const cliApp = createCliApp({
-  hostAdapter: createElectronHostAdapter(),
+  hostLifecycle: createElectronHostLifecyclePort(),
+  addonStore: createElectronAddonStorePort(),
   defaultProfile: ANTIGRAVITY_HOST_PROFILE,
 });
 

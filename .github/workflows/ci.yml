@@ -26,5 +26,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run full test suite
+      - name: Run full test suite (Linux headless Electron via xvfb-run)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm test
+
+      - name: Run full test suite (Windows native Electron)
+        if: runner.os == 'Windows'
         run: npm test

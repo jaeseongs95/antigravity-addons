@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { validateAddonManifest } = require('../../src/core/manifest-validator');
+const { compareSemver, validateAddonManifest } = require('../../src/core/manifest-validator');
 const { detectSlotConflicts } = require('../../src/core/slot-registry');
 
 const KO_TRANSLATOR_MANIFEST = {
@@ -85,6 +85,24 @@ test('TC-003 (F4 & NB3): invalid schema, duplicate slotId in manifest, compatibi
     validateAddonManifest(
       { ...KO_TRANSLATOR_MANIFEST, compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '2.5.0' } },
       { hostProfileId: 'antigravity-desktop', hostVersion: '1.0.0' }
+    ).reason,
+    'ERR_INCOMPATIBLE_HOST_VERSION'
+  );
+  // NB2: Strict SemVer 2.0.0 prerelease precedence & fail-closed on unparseable versions
+  assert.ok(compareSemver('1.0.1-alpha.1', '1.0.1-beta.1') < 0);
+  assert.ok(compareSemver('1.0.1-beta.1', '1.0.1') < 0);
+  assert.equal(compareSemver('not-a-semver', '1.0.0'), null);
+  assert.equal(
+    validateAddonManifest(
+      { ...KO_TRANSLATOR_MANIFEST, compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '1.0.1' } },
+      { hostProfileId: 'antigravity-desktop', hostVersion: '1.0.1-rc.1' }
+    ).reason,
+    'ERR_INCOMPATIBLE_HOST_VERSION'
+  );
+  assert.equal(
+    validateAddonManifest(
+      { ...KO_TRANSLATOR_MANIFEST, compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '1.0.0' } },
+      { hostProfileId: 'antigravity-desktop', hostVersion: 'invalid-ver' }
     ).reason,
     'ERR_INCOMPATIBLE_HOST_VERSION'
   );

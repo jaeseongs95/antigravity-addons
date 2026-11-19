@@ -143,7 +143,11 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
         return origSet.call(this, k, v);
       };
       const origCall = Function.prototype.call;
+      window.__FN_CALL_DURING_DISPOSE__ = 0;
       Function.prototype.call = function(thisArg, ...args) {
+        if (window.__WATCH_DISPOSE_CALL__) {
+          window.__FN_CALL_DURING_DISPOSE__++;
+        }
         for (const a of args) {
           if (typeof a === 'string' && /^[a-f0-9]{48}$/.test(a)) {
             window.__STOLEN_TOKENS__.push(a);
@@ -213,10 +217,19 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       'utf8'
     );
 
-    // Plugin 2 (loadOrder 20): throws (must not block Plugin 3)
+    // Plugin 2 (loadOrder 20): mounts slot + style BEFORE throwing (R6-F4: must be cleaned up immediately & never re-run!)
     const p2Dir = path.join(pluginsRoot, 'plugin-boom');
     fs.mkdirSync(p2Dir, { recursive: true });
-    fs.writeFileSync(path.join(p2Dir, 'entry.js'), 'throw new Error("BOOM_PEER");\n', 'utf8');
+    fs.writeFileSync(
+      path.join(p2Dir, 'entry.js'),
+      `
+      window.__BOOM_RUN_COUNT__ = (window.__BOOM_RUN_COUNT__ || 0) + 1;
+      addonHost.mountSlot('plugin-boom.partial');
+      addonHost.injectStyle('partial-css', '.boom{display:none}');
+      throw new Error("BOOM_PEER");
+      `,
+      'utf8'
+    );
     fs.writeFileSync(
       path.join(addonsDir, 'plugin-boom.json'),
       JSON.stringify({
@@ -226,6 +239,7 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
         version: '1.0.0',
         capabilities: ['renderer'],
         entry: { rendererScript: 'entry.js', mainHookScript: null },
+        uiSlots: [{ slot: 'overlay', slotId: 'plugin-boom.partial' }],
         isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'plugin-boom' },
         loadOrder: 20,
       }),
@@ -245,6 +259,7 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       s2.textContent = 'SECOND';
       addonHost.injectStyle('overlay-css', '.p2{color:red}');
       window.__SECOND_SLOTS__ = addonHost.listOwnedSlots();
+      window.__SECOND_HANDLE__ = addonHost;
       addonHost.onDispose(function() {
         'use strict';
         window.__SECOND_DISPOSE_THIS_IS_UNDEFINED__ = this === undefined;
@@ -348,6 +363,12 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
 
     assert.equal(rendererWindow.__EVIL_RAN__, undefined, 'F1: traversal pluginId must never execute');
     assert.deepEqual(Array.from(rendererWindow.__ORDER__), ['first', 'second'], 'F3: must execute once in strict loadOrder');
+    assert.equal(rendererWindow.__BOOM_RUN_COUNT__, 1, 'R6-F4: throwing plugin runs once and is isolated');
+    assert.equal(
+      body.children.some((c) => c.getAttribute('data-addon-host-owner') === 'plugin-boom'),
+      false,
+      'R6-F4: partial slots/styles mounted before throw must be cleaned up immediately'
+    );
     assert.equal(rendererWindow.__STOLEN_TOKENS__.length, 0, 'R2-F3/R3-F2: prototype hooks must steal 0 capability tokens');
     assert.equal(rendererWindow.__SLICE_HOOKED_BY_HOST__, undefined, 'R3-F2: host must not invoke Array.prototype.slice');
     assert.equal(rendererWindow.__SETTER0_HIJACKED__.length, 0, 'R4-F2: Array.prototype["0"] setter must hijack 0 values');
@@ -377,13 +398,18 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
     await new Promise((r) => setTimeout(r, 30));
     assert.deepEqual(Array.from(rendererWindow.__ORDER__), ['first', 'second'], 'F3: SPA URL change must not re-inject');
 
-    // R2-F4 & R5-F5: Disabling plugin-second via config.json must dispose BOTH its mainHook AND its renderer handle (despite Object.prototype.get pollution!)
+    // R2-F4, R5-F5, R6-F3, R6-F4, NB3: Disabling plugin-second via config.json must dispose BOTH its mainHook AND renderer handle
+    // with 0 calls to polluted Function.prototype.call (Reflect.apply), must NOT re-run plugin-boom, and handle becomes unusable after dispose
     assert.equal(fakeApp.__hookState.wcCount, 1);
     assert.equal(fakeApp.__hookState.disposed, 0);
     assert.equal(rendererWindow.__SECOND_DISPOSED__, undefined);
+    rendererWindow.__WATCH_DISPOSE_CALL__ = true;
     fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'plugin-second': { enabled: false } } }), 'utf8');
     listeners['did-finish-load']();
     await new Promise((r) => setTimeout(r, 30));
+    rendererWindow.__WATCH_DISPOSE_CALL__ = false;
+    assert.equal(rendererWindow.__FN_CALL_DURING_DISPOSE__, 0, 'R6-F3: dispose() must invoke Function.prototype.call 0 times (Reflect.apply)');
+    assert.equal(rendererWindow.__BOOM_RUN_COUNT__, 1, 'R6-F4: failed plugin must NOT re-execute on subsequent did-finish-load');
     assert.equal(fakeApp.__hookState.disposed, 1, 'R2-F4: disabled mainHook must be disposed on single-window reload');
     assert.equal(rendererWindow.__SECOND_DISPOSED__, true, 'R5-F5/R5-F3: disabled renderer addon must be disposed even under Object.prototype.get pollution');
     assert.equal(rendererWindow.__SECOND_DISPOSE_THIS_IS_UNDEFINED__, true, 'NB2: onDispose callback must not receive internal bucket as `this`');
@@ -391,6 +417,11 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       body.children.some((c) => c.getAttribute('data-addon-host-owner') === 'plugin-second'),
       false,
       'R5-F5/R5-F3: disabled renderer addon slots & styles must be removed from DOM'
+    );
+    assert.throws(
+      () => rendererWindow.__SECOND_HANDLE__.mountSlot('plugin-second.overlay'),
+      /ERR_HANDLE_DISPOSED/,
+      'NB3: disposed handle must reject subsequent mountSlot calls'
     );
     mod.exports.attachWebContents({ getType: () => 'window', getURL: () => currentUrl, on() {} }, fakeApp);
     assert.equal(fakeApp.__hookState.wcCount, 1, 'F3: disabled mainHook must not receive onWebContentsCreated');
@@ -503,9 +534,12 @@ test('TC-015 (R5-F2): mid-loop async executeJavaScript redirect to disallowed or
             registerCapCount++;
           }
           const res = vm.runInContext(code, rendererCtx);
-          // Simulate mid-loop redirect to a disallowed external origin right after p-one executes
+          // Simulate mid-loop did-start-navigation + redirect to disallowed external origin right after p-one executes
           if (code.includes('window.__P1_RAN__')) {
             currentUrl = 'https://evil.example.com/phish';
+            if (typeof listeners['did-start-navigation'] === 'function') {
+              listeners['did-start-navigation']({}, currentUrl, false, true);
+            }
           }
           return res;
         },

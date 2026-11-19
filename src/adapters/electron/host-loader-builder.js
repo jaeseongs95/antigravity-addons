@@ -102,6 +102,7 @@ function buildRendererHostApiBootstrapSource({
   const noTranslateSelector = noTranslateParts.join(', ');
 
   return `(function(){
+  'use strict';
   const _ObjCreate = Object.create;
   const _ObjFreeze = Object.freeze;
   const _ObjDefineProperty = Object.defineProperty;
@@ -112,7 +113,7 @@ function buildRendererHostApiBootstrapSource({
   const _ArrayIsArray = Array.isArray;
   const _String = String;
   const _Error = Error;
-  const _FnCall = Function.prototype.call;
+  const _ReflectApply = Reflect.apply;
 
   // R5-F3: Null-prototype property descriptors prevent Object.prototype.get/set pollution
   // from causing TypeError: Invalid property descriptor during defineProperty calls.
@@ -123,6 +124,22 @@ function buildRendererHostApiBootstrapSource({
     d.enumerable = enumerable;
     d.configurable = configurable;
     return d;
+  }
+
+  function assertHostOriginAndAuth(hostSecret, nonce, expectedOrigin, errCode) {
+    if (hostSecret !== __HOST_SECRET__ || typeof nonce !== 'string' || nonce !== __INSTANCE_NONCE__) {
+      throw new _Error(errCode);
+    }
+    if (
+      expectedOrigin &&
+      typeof window === 'object' &&
+      window &&
+      window.location &&
+      typeof window.location.origin === 'string' &&
+      window.location.origin !== expectedOrigin
+    ) {
+      throw new _Error('ERR_FORBIDDEN_ORIGIN_MISMATCH');
+    }
   }
 
   // R3-F1: Never trust a pre-existing window.__ADDON_HOST_VERIFY__ before defining our own
@@ -143,6 +160,11 @@ function buildRendererHostApiBootstrapSource({
     const allowedSlots = spec.allowedSlotsMap || _ObjCreate(null);
     const storageNamespace = spec.storageNamespace ? _String(spec.storageNamespace) : pluginId;
     const ipcChannelPrefix = spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null;
+    let disposed = false;
+
+    function assertNotDisposed() {
+      if (disposed) throw new _Error('ERR_HANDLE_DISPOSED:' + pluginId);
+    }
 
     const handle = _ObjFreeze({
       pluginId,
@@ -154,6 +176,7 @@ function buildRendererHostApiBootstrapSource({
         return NO_TRANSLATE_SELECTOR;
       },
       mountSlot(slotId, parentEl) {
+        assertNotDisposed();
         if (!slotId || typeof slotId !== 'string') throw new _Error('ERR_INVALID_SLOT_ID');
         if (!_has(allowedSlots, slotId)) {
           throw new _Error('ERR_UNDECLARED_SLOT:' + slotId);
@@ -180,6 +203,7 @@ function buildRendererHostApiBootstrapSource({
         return el;
       },
       unmountSlot(slotId) {
+        assertNotDisposed();
         if (!_has(slotOwners, slotId)) return false;
         if (slotOwners[slotId] !== pluginId) throw new _Error('ERR_FORBIDDEN_CROSS_PLUGIN_UNMOUNT:' + slotId);
         const el = slotElements[slotId];
@@ -191,6 +215,7 @@ function buildRendererHostApiBootstrapSource({
         return true;
       },
       injectStyle(styleId, cssText) {
+        assertNotDisposed();
         if (!styleId || typeof styleId !== 'string') throw new _Error('ERR_INVALID_STYLE_ID');
         const scopedKey = pluginId + ':' + styleId;
         if (_has(styleOwners, scopedKey) && styleOwners[scopedKey] !== pluginId) {
@@ -210,6 +235,7 @@ function buildRendererHostApiBootstrapSource({
         return styleEl;
       },
       removeStyle(styleId) {
+        assertNotDisposed();
         const scopedKey = pluginId + ':' + styleId;
         if (!_has(styleOwners, scopedKey)) return false;
         if (styleOwners[scopedKey] !== pluginId) throw new _Error('ERR_FORBIDDEN_CROSS_PLUGIN_STYLE_REMOVE:' + styleId);
@@ -233,6 +259,7 @@ function buildRendererHostApiBootstrapSource({
         return out;
       },
       onDispose(fn) {
+        assertNotDisposed();
         if (typeof fn !== 'function') return;
         if (!_has(disposers, pluginId)) {
           disposers[pluginId] = { count: 0, items: _ObjCreate(null) };
@@ -241,20 +268,33 @@ function buildRendererHostApiBootstrapSource({
         bucket.items[bucket.count++] = fn;
       },
       dispose() {
-        // R5-F3 & NB2: Isolate every cleanup phase independently and invoke disposers with undefined this
+        if (disposed) return;
+        disposed = true;
+        delete activeHandles[pluginId];
+        // R6-F3: Invoke disposers via captured Reflect.apply (immune to Function.prototype.call pollution)
         try {
           const bucket = _has(disposers, pluginId) ? disposers[pluginId] : null;
           delete disposers[pluginId];
           if (bucket) {
             for (let i = 0; i < bucket.count; i++) {
-              try { _FnCall.call(bucket.items[i], undefined); } catch (_err) {}
+              try { _ReflectApply(bucket.items[i], undefined, []); } catch (_err) {}
             }
           }
         } catch (_err) {}
         try {
           const owned = handle.listOwnedSlots();
           for (let i = 0; i < owned.length; i++) {
-            try { handle.unmountSlot(owned[i]); } catch (_err) {}
+            const sId = owned[i];
+            try {
+              if (_has(slotOwners, sId) && slotOwners[sId] === pluginId) {
+                const el = slotElements[sId];
+                if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
+                  el.parentNode.removeChild(el);
+                }
+                delete slotOwners[sId];
+                delete slotElements[sId];
+              }
+            } catch (_err) {}
           }
         } catch (_err) {}
         try {
@@ -302,13 +342,13 @@ function buildRendererHostApiBootstrapSource({
     )
   );
 
-  // Host binds immutable spec at registration time (caller of CONSUME_CAP cannot pass/forge spec)
+  // R6-F4: Host binds immutable spec + verifies secret, nonce, and live window.location.origin synchronously
   _ObjDefineProperty(
     window,
     '__ADDON_HOST_REGISTER_CAP__',
     makeDataDesc(
-      function(hostSecret, token, spec) {
-        if (hostSecret !== __HOST_SECRET__) throw new _Error('ERR_FORBIDDEN_CAP_REGISTRATION');
+      function(hostSecret, nonce, expectedOrigin, token, spec) {
+        assertHostOriginAndAuth(hostSecret, nonce, expectedOrigin, 'ERR_FORBIDDEN_CAP_REGISTRATION');
         if (typeof token !== 'string' || !token || !spec || typeof spec !== 'object') {
           throw new _Error('ERR_INVALID_CAP_REGISTRATION');
         }
@@ -325,6 +365,25 @@ function buildRendererHostApiBootstrapSource({
           storageNamespace: spec.storageNamespace ? _String(spec.storageNamespace) : _String(spec.pluginId),
           ipcChannelPrefix: spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null,
         });
+      },
+      false,
+      false,
+      false
+    )
+  );
+
+  // R6-F4: Purge any unconsumed capability token immediately on syntax/injection failure
+  _ObjDefineProperty(
+    window,
+    '__ADDON_HOST_REVOKE_CAP__',
+    makeDataDesc(
+      function(hostSecret, nonce, token) {
+        assertHostOriginAndAuth(hostSecret, nonce, '', 'ERR_FORBIDDEN_CAP_REVOKE');
+        if (typeof token === 'string' && _has(pendingSpecs, token)) {
+          delete pendingSpecs[token];
+          return true;
+        }
+        return false;
       },
       false,
       false,
@@ -352,13 +411,13 @@ function buildRendererHostApiBootstrapSource({
     )
   );
 
-  // R5-F5: Host-authenticated renderer disposal when a plugin is disabled/unregistered on reload
+  // R5-F5 & R6-F4: Host-authenticated renderer disposal with synchronous origin+nonce verification
   _ObjDefineProperty(
     window,
     '__ADDON_HOST_DISPOSE__',
     makeDataDesc(
-      function(hostSecret, pluginId) {
-        if (hostSecret !== __HOST_SECRET__) throw new _Error('ERR_FORBIDDEN_HOST_DISPOSE');
+      function(hostSecret, nonce, expectedOrigin, pluginId) {
+        assertHostOriginAndAuth(hostSecret, nonce, expectedOrigin, 'ERR_FORBIDDEN_HOST_DISPOSE');
         const id = _String(pluginId || '');
         if (!_has(activeHandles, id)) return false;
         const h = activeHandles[id];
@@ -402,6 +461,10 @@ function buildHostLoaderScriptSource(paths, profile, { hostVersion = '1.0.1' } =
     hostVersion,
     allowedProtocols,
     allowedHosts,
+    isolatedWorldId:
+      typeof profile.isolatedWorldId === 'number' && Number.isInteger(profile.isolatedWorldId) && profile.isolatedWorldId > 0
+        ? profile.isolatedWorldId
+        : 999,
     coreLifecyclePath: path.resolve(__dirname, '..', '..', 'core', 'lifecycle-coordinator.js'),
     configReaderPath: path.resolve(__dirname, 'config-reader.js'),
   };
@@ -539,8 +602,34 @@ function attachWebContents(contents, electronApp) {
 
   let hostSecret = '';
   let instanceNonce = '';
+  let navGeneration = 0;
   const injectedIds = new Set();
+  const failedIds = new Set();
   let injectQueue = Promise.resolve();
+
+  const execInRenderer = (code) => {
+    if (typeof contents.executeJavaScriptInIsolatedWorld === 'function') {
+      return contents.executeJavaScriptInIsolatedWorld(HOST_CFG.isolatedWorldId || 999, [{ code }], true);
+    }
+    return contents.executeJavaScript(code, true);
+  };
+
+  const resetCredentials = () => {
+    injectedIds.clear();
+    failedIds.clear();
+    hostSecret = '';
+    instanceNonce = '';
+  };
+
+  const getAllowedOrigin = () => {
+    const liveUrl = typeof contents.getURL === 'function' ? contents.getURL() : '';
+    if (!isAllowedRendererUrl(liveUrl)) return null;
+    try {
+      return new URL(liveUrl).origin;
+    } catch (_e) {
+      return null;
+    }
+  };
 
   const enqueueInject = () => {
     injectQueue = injectQueue.then(async () => {
@@ -548,17 +637,17 @@ function attachWebContents(contents, electronApp) {
         // F4: Re-sync mainHooks on every reload/navigation so disabled hooks dispose even in a single-window session
         syncMainHooks(electronApp);
 
-        const url = typeof contents.getURL === 'function' ? contents.getURL() : '';
-        if (!isAllowedRendererUrl(url)) return;
+        const passGen = navGeneration;
+        const initialOrigin = getAllowedOrigin();
+        if (!initialOrigin) return;
 
         const verifyLiveNonce = async (nonceToCheck) => {
           if (!nonceToCheck) return false;
           try {
             return Boolean(
-              await contents.executeJavaScript(
+              await execInRenderer(
                 'typeof window.__ADDON_HOST_VERIFY__ === "function" && window.__ADDON_HOST_VERIFY__(' +
-                  JSON.stringify(nonceToCheck) + ')',
-                true
+                  JSON.stringify(nonceToCheck) + ')'
               )
             );
           } catch (_e) {
@@ -567,31 +656,31 @@ function attachWebContents(contents, electronApp) {
         };
 
         const verifyDocumentStillTrusted = async () => {
-          const liveUrl = typeof contents.getURL === 'function' ? contents.getURL() : '';
-          if (!isAllowedRendererUrl(liveUrl)) return false;
-          return verifyLiveNonce(instanceNonce);
-        };
-
-        const resetCredentials = () => {
-          injectedIds.clear();
-          hostSecret = '';
-          instanceNonce = '';
+          if (navGeneration !== passGen) return null;
+          const liveOrigin = getAllowedOrigin();
+          if (!liveOrigin) return null;
+          const liveOk = await verifyLiveNonce(instanceNonce);
+          if (!liveOk || navGeneration !== passGen) return null;
+          return liveOrigin;
         };
 
         // F3: Non-spoofable nonce challenge verifies that THIS host bootstrapped the current document
-        const verifiedLive = await verifyLiveNonce(instanceNonce);
+        const verifiedLive = navGeneration === passGen && (await verifyLiveNonce(instanceNonce));
 
         if (!verifiedLive) {
           resetCredentials();
           const nextSecret = crypto.randomBytes(24).toString('hex');
           const nextNonce = crypto.randomBytes(24).toString('hex');
           const bootstrapWithSecrets =
-            '(function(){ const __HOST_SECRET__ = ' + JSON.stringify(nextSecret) +
+            '(function(){ "use strict"; const __HOST_SECRET__ = ' + JSON.stringify(nextSecret) +
             '; const __INSTANCE_NONCE__ = ' + JSON.stringify(nextNonce) + ';\\n' +
             RENDERER_API_BOOTSTRAP_TEMPLATE + '\\n})();';
-          await contents.executeJavaScript(bootstrapWithSecrets, true);
-          const postUrl = typeof contents.getURL === 'function' ? contents.getURL() : '';
-          const postVerify = isAllowedRendererUrl(postUrl) && (await verifyLiveNonce(nextNonce));
+          await execInRenderer(bootstrapWithSecrets);
+          const postOrigin = getAllowedOrigin();
+          const postVerify =
+            navGeneration === passGen &&
+            Boolean(postOrigin) &&
+            (await verifyLiveNonce(nextNonce));
           if (!postVerify) {
             recordDiag('error', 'ERR_HOST_BOOTSTRAP_SPOOFED', 'Renderer API verification failed after bootstrap');
             return;
@@ -608,17 +697,19 @@ function attachWebContents(contents, electronApp) {
         if (verifiedLive && injectedIds.size > 0) {
           for (const prevId of Array.from(injectedIds)) {
             if (!activeRendererIds.has(prevId)) {
-              if (!(await verifyDocumentStillTrusted())) {
+              const trustedOrigin = await verifyDocumentStillTrusted();
+              if (!trustedOrigin) {
                 recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', 'Document origin/nonce changed before dispose');
                 resetCredentials();
                 return;
               }
               try {
-                await contents.executeJavaScript(
+                await execInRenderer(
                   'typeof window.__ADDON_HOST_DISPOSE__ === "function" && window.__ADDON_HOST_DISPOSE__(' +
                     JSON.stringify(hostSecret) + ',' +
-                    JSON.stringify(prevId) + ');',
-                  true
+                    JSON.stringify(instanceNonce) + ',' +
+                    JSON.stringify(trustedOrigin) + ',' +
+                    JSON.stringify(prevId) + ');'
                 );
               } catch (err) {
                 recordDiag('error', 'ERR_RENDERER_DISPOSE', prevId + ': ' + (err && err.message));
@@ -628,46 +719,80 @@ function attachWebContents(contents, electronApp) {
           }
         }
 
-        const addons = activeRendererAddons.filter((a) => !injectedIds.has(a.pluginId));
+        const addons = activeRendererAddons.filter(
+          (a) => !injectedIds.has(a.pluginId) && !failedIds.has(a.pluginId)
+        );
         // Deterministic sequential execution preserves loadOrder while isolating each plugin's faults
         for (const addon of addons) {
+          let capToken = '';
           try {
             // NB2: Read renderer script BEFORE registering capability token so missing/unreadable files leak no token
             const rawCode = fs.readFileSync(addon.rendererPath, 'utf8');
-            // R5-F2: Re-verify URL + instanceNonce immediately before REGISTER_CAP (prevents async redirect TOCTOU)
-            if (!(await verifyDocumentStillTrusted())) {
-              recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': origin/nonce changed before cap registration');
+            // R5-F2 & R6-F4: Re-verify navigation generation, URL origin, and instanceNonce before REGISTER_CAP
+            const trustedOriginBeforeReg = await verifyDocumentStillTrusted();
+            if (!trustedOriginBeforeReg) {
+              recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': origin/nonce/nav changed before cap registration');
               resetCredentials();
               break;
             }
-            const capToken = crypto.randomBytes(24).toString('hex');
+            capToken = crypto.randomBytes(24).toString('hex');
             const spec = {
               pluginId: addon.pluginId,
               allowedSlotIds: addon.allowedSlotIds,
               storageNamespace: addon.storageNamespace,
               ipcChannelPrefix: addon.ipcChannelPrefix,
             };
-            await contents.executeJavaScript(
+            await execInRenderer(
               'window.__ADDON_HOST_REGISTER_CAP__(' +
                 JSON.stringify(hostSecret) + ',' +
+                JSON.stringify(instanceNonce) + ',' +
+                JSON.stringify(trustedOriginBeforeReg) + ',' +
                 JSON.stringify(capToken) + ',' +
-                JSON.stringify(spec) + ');',
-              true
+                JSON.stringify(spec) + ');'
             );
-            // R5-F2: Re-verify URL + instanceNonce immediately before executing plugin wrapper
-            if (!(await verifyDocumentStillTrusted())) {
-              recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': origin/nonce changed before execution');
+            // R5-F2 & R6-F4: Re-verify before executing plugin wrapper
+            const trustedOriginBeforeExec = await verifyDocumentStillTrusted();
+            if (!trustedOriginBeforeExec) {
+              try {
+                await execInRenderer(
+                  'typeof window.__ADDON_HOST_REVOKE_CAP__ === "function" && window.__ADDON_HOST_REVOKE_CAP__(' +
+                    JSON.stringify(hostSecret) + ',' +
+                    JSON.stringify(instanceNonce) + ',' +
+                    JSON.stringify(capToken) + ');'
+                );
+              } catch (_revErr) {}
+              recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': origin/nonce/nav changed before execution');
               resetCredentials();
               break;
             }
+            // R6-F4: On partial execution throw, immediately dispose partial slots/styles before rethrowing
             const wrapped =
-              '(function(addonHost){\\n' +
+              '(function(){\\n' +
+              '  const __addonHandle = window.__ADDON_HOST_CONSUME_CAP__(' + JSON.stringify(capToken) + ');\\n' +
+              '  try {\\n' +
+              '    (function(addonHost){\\n' +
               rawCode +
-              '\\n})(window.__ADDON_HOST_CONSUME_CAP__(' +
-              JSON.stringify(capToken) + '));';
-            await contents.executeJavaScript(wrapped, true);
+              '\\n    })(__addonHandle);\\n' +
+              '  } catch (__addonErr) {\\n' +
+              '    try { __addonHandle.dispose(); } catch (_d) {}\\n' +
+              '    throw __addonErr;\\n' +
+              '  }\\n' +
+              '})();';
+            await execInRenderer(wrapped);
             injectedIds.add(addon.pluginId);
           } catch (err) {
+            // R6-F4: Isolate failing plugin (prevent duplicate re-execution) and purge any unconsumed capToken
+            failedIds.add(addon.pluginId);
+            if (capToken && hostSecret && instanceNonce) {
+              try {
+                await execInRenderer(
+                  'typeof window.__ADDON_HOST_REVOKE_CAP__ === "function" && window.__ADDON_HOST_REVOKE_CAP__(' +
+                    JSON.stringify(hostSecret) + ',' +
+                    JSON.stringify(instanceNonce) + ',' +
+                    JSON.stringify(capToken) + ');'
+                );
+              } catch (_revErr) {}
+            }
             recordDiag('error', 'ERR_RENDERER_INJECT', addon.pluginId + ': ' + (err && err.message));
           }
         }
@@ -679,6 +804,16 @@ function attachWebContents(contents, electronApp) {
   };
 
   if (typeof contents.on === 'function') {
+    // R6-F4: Immediately invalidate host credentials on any main-frame navigation
+    contents.on('did-start-navigation', (_evt, _url, isInPlace, isMainFrame) => {
+      if (isInPlace === true || isMainFrame === false) return;
+      navGeneration++;
+      resetCredentials();
+    });
+    contents.on('did-navigate', () => {
+      navGeneration++;
+      resetCredentials();
+    });
     contents.on('dom-ready', () => { void enqueueInject(); });
     contents.on('did-finish-load', () => { void enqueueInject(); });
   }

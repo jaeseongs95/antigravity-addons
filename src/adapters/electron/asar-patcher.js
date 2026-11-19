@@ -10,7 +10,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const vm = require('node:vm');
 const asar = require('@electron/asar');
 const lockfile = require('proper-lockfile');
 const acorn = require('acorn');
@@ -201,54 +200,73 @@ function isAsarHostInstalled(asarPath, profile) {
   }
 }
 
-/**
- * Finds 0-based line indices whose entire content is a standalone `//` line comment
- * using the standard ECMAScript parser (`acorn`), safely ignoring `//` inside strings,
- * regex literals, nested template `${...}` expressions, and block comments (CRLF & LF safe).
- */
-function findSafeStandaloneCommentLines(sourceText) {
-  const safeLineIndices = new Set();
-  const lineStarts = [0];
-  for (let i = 0; i < sourceText.length; i++) {
-    if (sourceText[i] === '\n') {
-      lineStarts.push(i + 1);
-    }
-  }
+function isJsLineTerminator(ch) {
+  return ch === '\n' || ch === '\r' || ch === '\u2028' || ch === '\u2029';
+}
 
-  const collectComments = (sourceType) => {
-    const collected = [];
-    acorn.parse(sourceText, {
+function parseJavaScriptWithAcorn(sourceText, onComment = null) {
+  const tryParse = (sourceType) => {
+    const opts = {
       ecmaVersion: 'latest',
       sourceType,
       allowHashBang: true,
       allowReturnOutsideFunction: sourceType === 'script',
-      locations: true,
-      onComment(block, _text, start, _end, startLoc, endLoc) {
-        if (!block && startLoc && endLoc && startLoc.line === endLoc.line) {
-          collected.push({ lineIdx: startLoc.line - 1, start });
-        }
-      },
-    });
-    return collected;
+    };
+    if (onComment) opts.onComment = onComment;
+    return acorn.parse(sourceText, opts);
   };
-
-  let comments;
   try {
-    comments = collectComments('script');
+    return tryParse('script');
   } catch (_scriptErr) {
-    comments = collectComments('module');
+    return tryParse('module');
   }
+}
 
-  for (const c of comments) {
-    const lineStart = lineStarts[c.lineIdx];
-    if (lineStart === undefined) continue;
-    const prefix = sourceText.slice(lineStart, c.start);
-    if (/^[ \t]*$/.test(prefix)) {
-      safeLineIndices.add(c.lineIdx);
+/**
+ * Finds exact character-offset ranges `[lineStart, lineEnd]` of standalone `//` line comments
+ * using Acorn's `onComment(block, text, start, end)` offsets directly.
+ * Immune to `\r`, `\u2028`, `\u2029`, regex literals, nested template `${...}`, and strings.
+ */
+function findSafeStandaloneCommentRanges(sourceText) {
+  const rawComments = [];
+  parseJavaScriptWithAcorn(sourceText, (block, _text, start, end) => {
+    if (!block) {
+      rawComments.push({ start, end });
     }
-  }
+  });
 
-  return safeLineIndices;
+  const ranges = [];
+  const len = sourceText.length;
+  for (const c of rawComments) {
+    // Walk backward to the nearest ECMAScript line terminator (\n, \r, \u2028, \u2029) or start of file
+    let lineStart = c.start;
+    while (lineStart > 0 && !isJsLineTerminator(sourceText[lineStart - 1])) {
+      lineStart--;
+    }
+    const prefix = sourceText.slice(lineStart, c.start);
+    if (!/^[ \t]*$/.test(prefix)) continue;
+
+    // Verify the comment reaches end-of-line (or EOF) and consume its trailing line terminator
+    let lineEnd = c.end;
+    if (lineEnd < len) {
+      const ch = sourceText[lineEnd];
+      if (ch === '\r' && lineEnd + 1 < len && sourceText[lineEnd + 1] === '\n') {
+        lineEnd += 2;
+      } else if (isJsLineTerminator(ch)) {
+        lineEnd += 1;
+      } else {
+        continue;
+      }
+    }
+    ranges.push({
+      lineStart,
+      lineEnd,
+      commentStart: c.start,
+      commentEnd: c.end,
+      text: sourceText.slice(lineStart, c.end),
+    });
+  }
+  return ranges;
 }
 
 function transformExactSize(origBuf, targetStr, replacementStr, marker) {
@@ -261,24 +279,28 @@ function transformExactSize(origBuf, targetStr, replacementStr, marker) {
   let delta = Buffer.byteLength(nextText, 'utf8') - origBuf.length;
 
   if (delta > 0) {
-    const safeLines = findSafeStandaloneCommentLines(nextText);
-    const rawLines = nextText.split('\n');
-    const kept = [];
-    for (let idx = 0; idx < rawLines.length; idx++) {
-      const line = rawLines[idx];
-      const trimmedCr = line.endsWith('\r') ? line.slice(0, -1) : line;
-      if (
-        delta > 0 &&
-        safeLines.has(idx) &&
-        (!marker || !trimmedCr.includes(marker)) &&
-        /^\s*\/\/\s*[A-Za-z0-9#*\-_=.,:;()[\]{}@/'" ]*$/.test(trimmedCr)
-      ) {
-        delta -= Buffer.byteLength(line, 'utf8') + (idx < rawLines.length - 1 ? 1 : 0);
-        continue;
-      }
-      kept.push(line);
+    const safeRanges = findSafeStandaloneCommentRanges(nextText);
+    const toRemove = [];
+    for (const r of safeRanges) {
+      if (delta <= 0) break;
+      if (marker && r.text.includes(marker)) continue;
+      if (!/^[ \t]*\/\/[ \t]*[A-Za-z0-9#*\-_=.,:;()[\]{}@/'" ]*$/.test(r.text)) continue;
+      const sliceBytes = Buffer.byteLength(nextText.slice(r.lineStart, r.lineEnd), 'utf8');
+      if (sliceBytes <= 0) continue;
+      toRemove.push(r);
+      delta -= sliceBytes;
     }
-    nextText = kept.join('\n');
+    if (toRemove.length > 0) {
+      const parts = [];
+      let cursor = 0;
+      for (const r of toRemove) {
+        if (r.lineStart < cursor) continue;
+        parts.push(nextText.slice(cursor, r.lineStart));
+        cursor = r.lineEnd;
+      }
+      parts.push(nextText.slice(cursor));
+      nextText = parts.join('');
+    }
   }
 
   const finalDiff = origBuf.length - Buffer.byteLength(nextText, 'utf8');
@@ -288,7 +310,8 @@ function transformExactSize(origBuf, targetStr, replacementStr, marker) {
   if (finalDiff > 0) {
     nextText = nextText + ' '.repeat(finalDiff);
   }
-  new vm.Script(nextText);
+  // R6-F2: Validate syntax with Acorn (supports CJS, ESM, and Hashbang uniformly)
+  parseJavaScriptWithAcorn(nextText);
   const outBuf = Buffer.from(nextText, 'utf8');
   if (outBuf.length !== origBuf.length) {
     throw new Error('EXACT_SIZE_MISMATCH');
@@ -480,6 +503,14 @@ function rollbackAsarAddonHost(paths, profile, { force = false } = {}) {
 
   const lockRes = acquireExclusiveLockDetailed(paths.ASAR_LOCK_PATH, 60000);
   if (!lockRes.ok) return { status: lockRes.code, error: lockRes.error, fsCode: lockRes.fsCode };
+  // NB1: Also acquire ADDONS_LOCK_PATH (when provided) to serialize rollback against concurrent --register
+  const addonsLockRes = paths.ADDONS_LOCK_PATH
+    ? acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000)
+    : { ok: true, token: null };
+  if (!addonsLockRes.ok) {
+    releaseExclusiveLock(paths.ASAR_LOCK_PATH, lockRes.token);
+    return { status: addonsLockRes.code, error: addonsLockRes.error, fsCode: addonsLockRes.fsCode };
+  }
   try {
     const remainingManifests = fs.existsSync(paths.ADDONS_DIR)
       ? fs.readdirSync(paths.ADDONS_DIR).filter((f) => f.endsWith('.json'))
@@ -512,6 +543,7 @@ function rollbackAsarAddonHost(paths, profile, { force = false } = {}) {
       sha256: check.sha256,
     };
   } finally {
+    if (addonsLockRes.token) releaseExclusiveLock(paths.ADDONS_LOCK_PATH, addonsLockRes.token);
     releaseExclusiveLock(paths.ASAR_LOCK_PATH, lockRes.token);
   }
 }
@@ -555,7 +587,8 @@ module.exports = {
   detectArchiveMarkers,
   isPureUnpatchedArchive,
   isAsarHostInstalled,
-  findSafeStandaloneCommentLines,
+  parseJavaScriptWithAcorn,
+  findSafeStandaloneCommentRanges,
   transformExactSize,
   verifyOrigBackupStrict,
   installAsarAddonHost,

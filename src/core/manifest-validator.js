@@ -18,18 +18,53 @@ const validateSchema = ajv.compile(MANIFEST_SCHEMA);
 
 const FORBIDDEN_IDS = new Set(['__proto__', 'constructor', 'prototype']);
 
-function parseSemverCore(ver) {
-  const m = String(ver || '').match(/^(\d+)\.(\d+)\.(\d+)/);
+const SEMVER_RE =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+function parseSemver(ver) {
+  if (typeof ver !== 'string') return null;
+  const m = ver.trim().match(SEMVER_RE);
   if (!m) return null;
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
+  const prerelease = m[4] ? m[4].split('.') : null;
+  if (prerelease && prerelease.some((id) => /^\d+$/.test(id) && id.length > 1 && id.startsWith('0'))) {
+    return null;
+  }
+  return {
+    major: Number(m[1]),
+    minor: Number(m[2]),
+    patch: Number(m[3]),
+    prerelease,
+  };
 }
 
+/**
+ * Strict SemVer 2.0.0 comparator (fail-closed: returns `null` when either input is invalid).
+ */
 function compareSemver(a, b) {
-  const pa = parseSemverCore(a);
-  const pb = parseSemverCore(b);
-  if (!pa || !pb) return 0;
-  for (let i = 0; i < 3; i++) {
-    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return null;
+  if (pa.major !== pb.major) return pa.major - pb.major;
+  if (pa.minor !== pb.minor) return pa.minor - pb.minor;
+  if (pa.patch !== pb.patch) return pa.patch - pb.patch;
+
+  if (!pa.prerelease && !pb.prerelease) return 0;
+  if (!pa.prerelease) return 1;
+  if (!pb.prerelease) return -1;
+
+  const len = Math.max(pa.prerelease.length, pb.prerelease.length);
+  for (let i = 0; i < len; i++) {
+    const ia = pa.prerelease[i];
+    const ib = pb.prerelease[i];
+    if (ia === undefined) return -1;
+    if (ib === undefined) return 1;
+    if (ia === ib) continue;
+    const na = /^\d+$/.test(ia);
+    const nb = /^\d+$/.test(ib);
+    if (na && nb) return Number(ia) - Number(ib);
+    if (na) return -1;
+    if (nb) return 1;
+    return ia < ib ? -1 : 1;
   }
   return 0;
 }
@@ -114,16 +149,15 @@ function validateAddonManifest(
         errors: [`Requires hostProfile "${manifest.compatibility.hostProfile}", current is "${hostProfileId}"`],
       };
     }
-    if (
-      hostVersion &&
-      manifest.compatibility.minHostVersion &&
-      compareSemver(hostVersion, manifest.compatibility.minHostVersion) < 0
-    ) {
-      return {
-        ok: false,
-        reason: 'ERR_INCOMPATIBLE_HOST_VERSION',
-        errors: [`Requires hostVersion >= ${manifest.compatibility.minHostVersion}, current is ${hostVersion}`],
-      };
+    if (hostVersion && manifest.compatibility.minHostVersion) {
+      const cmp = compareSemver(hostVersion, manifest.compatibility.minHostVersion);
+      if (cmp === null || cmp < 0) {
+        return {
+          ok: false,
+          reason: 'ERR_INCOMPATIBLE_HOST_VERSION',
+          errors: [`Requires hostVersion >= ${manifest.compatibility.minHostVersion}, current is ${hostVersion}`],
+        };
+      }
     }
   }
 
