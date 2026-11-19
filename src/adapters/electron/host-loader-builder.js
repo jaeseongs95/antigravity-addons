@@ -24,7 +24,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { assertValidHostProfile } = require('../../core/host-profile-port');
+const { assertValidElectronHostProfile } = require('./electron-host-profile-port');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
 const { isPluginEnabledInConfig } = require('./config-reader');
 
@@ -112,6 +112,18 @@ function buildRendererHostApiBootstrapSource({
   const _ArrayIsArray = Array.isArray;
   const _String = String;
   const _Error = Error;
+  const _FnCall = Function.prototype.call;
+
+  // R5-F3: Null-prototype property descriptors prevent Object.prototype.get/set pollution
+  // from causing TypeError: Invalid property descriptor during defineProperty calls.
+  function makeDataDesc(value, writable, enumerable, configurable) {
+    const d = _ObjCreate(null);
+    d.value = value;
+    d.writable = writable;
+    d.enumerable = enumerable;
+    d.configurable = configurable;
+    return d;
+  }
 
   // R3-F1: Never trust a pre-existing window.__ADDON_HOST_VERIFY__ before defining our own
   // non-configurable properties. If a page pre-spoofed them as non-configurable, _ObjDefineProperty
@@ -124,6 +136,7 @@ function buildRendererHostApiBootstrapSource({
   const styleElements = _ObjCreate(null);
   const disposers = _ObjCreate(null);
   const pendingSpecs = _ObjCreate(null);
+  const activeHandles = _ObjCreate(null);
 
   function createScopedHandle(spec) {
     const pluginId = _String(spec.pluginId);
@@ -214,12 +227,7 @@ function buildRendererHostApiBootstrapSource({
         const keys = _ObjKeys(slotOwners);
         for (let i = 0; i < keys.length; i++) {
           if (slotOwners[keys[i]] === pluginId) {
-            _ObjDefineProperty(out, outLen++, {
-              value: keys[i],
-              writable: true,
-              enumerable: true,
-              configurable: true,
-            });
+            _ObjDefineProperty(out, outLen++, makeDataDesc(keys[i], true, true, true));
           }
         }
         return out;
@@ -233,29 +241,38 @@ function buildRendererHostApiBootstrapSource({
         bucket.items[bucket.count++] = fn;
       },
       dispose() {
-        const bucket = _has(disposers, pluginId) ? disposers[pluginId] : null;
-        delete disposers[pluginId];
-        if (bucket) {
-          for (let i = 0; i < bucket.count; i++) {
-            try { bucket.items[i](); } catch (_err) {}
-          }
-        }
-        const owned = handle.listOwnedSlots();
-        for (let i = 0; i < owned.length; i++) {
-          try { handle.unmountSlot(owned[i]); } catch (_err) {}
-        }
-        const stKeys = _ObjKeys(styleOwners);
-        for (let i = 0; i < stKeys.length; i++) {
-          const stKey = stKeys[i];
-          if (styleOwners[stKey] === pluginId) {
-            const el = styleElements[stKey];
-            if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
-              el.parentNode.removeChild(el);
+        // R5-F3 & NB2: Isolate every cleanup phase independently and invoke disposers with undefined this
+        try {
+          const bucket = _has(disposers, pluginId) ? disposers[pluginId] : null;
+          delete disposers[pluginId];
+          if (bucket) {
+            for (let i = 0; i < bucket.count; i++) {
+              try { _FnCall.call(bucket.items[i], undefined); } catch (_err) {}
             }
-            delete styleOwners[stKey];
-            delete styleElements[stKey];
           }
-        }
+        } catch (_err) {}
+        try {
+          const owned = handle.listOwnedSlots();
+          for (let i = 0; i < owned.length; i++) {
+            try { handle.unmountSlot(owned[i]); } catch (_err) {}
+          }
+        } catch (_err) {}
+        try {
+          const stKeys = _ObjKeys(styleOwners);
+          for (let i = 0; i < stKeys.length; i++) {
+            const stKey = stKeys[i];
+            if (styleOwners[stKey] === pluginId) {
+              try {
+                const el = styleElements[stKey];
+                if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
+                  el.parentNode.removeChild(el);
+                }
+              } catch (_err) {}
+              delete styleOwners[stKey];
+              delete styleElements[stKey];
+            }
+          }
+        } catch (_err) {}
       },
     });
     return handle;
@@ -269,67 +286,98 @@ function buildRendererHostApiBootstrapSource({
       return NO_TRANSLATE_SELECTOR;
     },
   });
-  _ObjDefineProperty(window, '__ADDON_HOST_API__', {
-    value: publicApi,
-    writable: false,
-    configurable: false,
-    enumerable: false,
-  });
+  _ObjDefineProperty(window, '__ADDON_HOST_API__', makeDataDesc(publicApi, false, false, false));
 
   // Non-spoofable liveness challenge bound to host-generated __INSTANCE_NONCE__
-  _ObjDefineProperty(window, '__ADDON_HOST_VERIFY__', {
-    value: function(nonce) {
-      return typeof nonce === 'string' && nonce === __INSTANCE_NONCE__;
-    },
-    writable: false,
-    configurable: false,
-    enumerable: false,
-  });
+  _ObjDefineProperty(
+    window,
+    '__ADDON_HOST_VERIFY__',
+    makeDataDesc(
+      function(nonce) {
+        return typeof nonce === 'string' && nonce === __INSTANCE_NONCE__;
+      },
+      false,
+      false,
+      false
+    )
+  );
 
   // Host binds immutable spec at registration time (caller of CONSUME_CAP cannot pass/forge spec)
-  _ObjDefineProperty(window, '__ADDON_HOST_REGISTER_CAP__', {
-    value: function(hostSecret, token, spec) {
-      if (hostSecret !== __HOST_SECRET__) throw new _Error('ERR_FORBIDDEN_CAP_REGISTRATION');
-      if (typeof token !== 'string' || !token || !spec || typeof spec !== 'object') {
-        throw new _Error('ERR_INVALID_CAP_REGISTRATION');
-      }
-      const rawSlots = _ArrayIsArray(spec.allowedSlotIds) ? spec.allowedSlotIds : [];
-      const allowedSlotsMap = _ObjCreate(null);
-      for (let i = 0; i < rawSlots.length; i++) {
-        if (_has(rawSlots, i)) {
-          allowedSlotsMap[_String(rawSlots[i])] = true;
+  _ObjDefineProperty(
+    window,
+    '__ADDON_HOST_REGISTER_CAP__',
+    makeDataDesc(
+      function(hostSecret, token, spec) {
+        if (hostSecret !== __HOST_SECRET__) throw new _Error('ERR_FORBIDDEN_CAP_REGISTRATION');
+        if (typeof token !== 'string' || !token || !spec || typeof spec !== 'object') {
+          throw new _Error('ERR_INVALID_CAP_REGISTRATION');
         }
-      }
-      pendingSpecs[token] = _ObjFreeze({
-        pluginId: _String(spec.pluginId),
-        allowedSlotsMap: _ObjFreeze(allowedSlotsMap),
-        storageNamespace: spec.storageNamespace ? _String(spec.storageNamespace) : _String(spec.pluginId),
-        ipcChannelPrefix: spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null,
-      });
-    },
-    writable: false,
-    configurable: false,
-    enumerable: false,
-  });
+        const rawSlots = _ArrayIsArray(spec.allowedSlotIds) ? spec.allowedSlotIds : [];
+        const allowedSlotsMap = _ObjCreate(null);
+        for (let i = 0; i < rawSlots.length; i++) {
+          if (_has(rawSlots, i)) {
+            allowedSlotsMap[_String(rawSlots[i])] = true;
+          }
+        }
+        pendingSpecs[token] = _ObjFreeze({
+          pluginId: _String(spec.pluginId),
+          allowedSlotsMap: _ObjFreeze(allowedSlotsMap),
+          storageNamespace: spec.storageNamespace ? _String(spec.storageNamespace) : _String(spec.pluginId),
+          ipcChannelPrefix: spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null,
+        });
+      },
+      false,
+      false,
+      false
+    )
+  );
 
-  _ObjDefineProperty(window, '__ADDON_HOST_CONSUME_CAP__', {
-    value: function(token) {
-      if (typeof token !== 'string' || !_has(pendingSpecs, token)) {
-        throw new _Error('ERR_INVALID_CAPABILITY_TOKEN');
-      }
-      const boundSpec = pendingSpecs[token];
-      delete pendingSpecs[token];
-      return createScopedHandle(boundSpec);
-    },
-    writable: false,
-    configurable: false,
-    enumerable: false,
-  });
+  _ObjDefineProperty(
+    window,
+    '__ADDON_HOST_CONSUME_CAP__',
+    makeDataDesc(
+      function(token) {
+        if (typeof token !== 'string' || !_has(pendingSpecs, token)) {
+          throw new _Error('ERR_INVALID_CAPABILITY_TOKEN');
+        }
+        const boundSpec = pendingSpecs[token];
+        delete pendingSpecs[token];
+        const scoped = createScopedHandle(boundSpec);
+        activeHandles[boundSpec.pluginId] = scoped;
+        return scoped;
+      },
+      false,
+      false,
+      false
+    )
+  );
+
+  // R5-F5: Host-authenticated renderer disposal when a plugin is disabled/unregistered on reload
+  _ObjDefineProperty(
+    window,
+    '__ADDON_HOST_DISPOSE__',
+    makeDataDesc(
+      function(hostSecret, pluginId) {
+        if (hostSecret !== __HOST_SECRET__) throw new _Error('ERR_FORBIDDEN_HOST_DISPOSE');
+        const id = _String(pluginId || '');
+        if (!_has(activeHandles, id)) return false;
+        const h = activeHandles[id];
+        delete activeHandles[id];
+        if (h && typeof h.dispose === 'function') {
+          h.dispose();
+        }
+        return true;
+      },
+      false,
+      false,
+      false
+    )
+  );
 })();`;
 }
 
 function buildHostLoaderScriptSource(paths, profile, { hostVersion = '1.0.1' } = {}) {
-  assertValidHostProfile(profile);
+  assertValidElectronHostProfile(profile);
   const extraAttrs = Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [];
   const allowedProtocols =
     Array.isArray(profile.allowedUrlProtocols) && profile.allowedUrlProtocols.length > 0
@@ -503,24 +551,38 @@ function attachWebContents(contents, electronApp) {
         const url = typeof contents.getURL === 'function' ? contents.getURL() : '';
         if (!isAllowedRendererUrl(url)) return;
 
-        // F3: Non-spoofable nonce challenge verifies that THIS host bootstrapped the current document
-        let verifiedLive = false;
-        if (instanceNonce) {
+        const verifyLiveNonce = async (nonceToCheck) => {
+          if (!nonceToCheck) return false;
           try {
-            verifiedLive = Boolean(
+            return Boolean(
               await contents.executeJavaScript(
                 'typeof window.__ADDON_HOST_VERIFY__ === "function" && window.__ADDON_HOST_VERIFY__(' +
-                  JSON.stringify(instanceNonce) + ')',
+                  JSON.stringify(nonceToCheck) + ')',
                 true
               )
             );
-          } catch (_e) { verifiedLive = false; }
-        }
+          } catch (_e) {
+            return false;
+          }
+        };
 
-        if (!verifiedLive) {
+        const verifyDocumentStillTrusted = async () => {
+          const liveUrl = typeof contents.getURL === 'function' ? contents.getURL() : '';
+          if (!isAllowedRendererUrl(liveUrl)) return false;
+          return verifyLiveNonce(instanceNonce);
+        };
+
+        const resetCredentials = () => {
           injectedIds.clear();
           hostSecret = '';
           instanceNonce = '';
+        };
+
+        // F3: Non-spoofable nonce challenge verifies that THIS host bootstrapped the current document
+        const verifiedLive = await verifyLiveNonce(instanceNonce);
+
+        if (!verifiedLive) {
+          resetCredentials();
           const nextSecret = crypto.randomBytes(24).toString('hex');
           const nextNonce = crypto.randomBytes(24).toString('hex');
           const bootstrapWithSecrets =
@@ -528,13 +590,8 @@ function attachWebContents(contents, electronApp) {
             '; const __INSTANCE_NONCE__ = ' + JSON.stringify(nextNonce) + ';\\n' +
             RENDERER_API_BOOTSTRAP_TEMPLATE + '\\n})();';
           await contents.executeJavaScript(bootstrapWithSecrets, true);
-          const postVerify = Boolean(
-            await contents.executeJavaScript(
-              'typeof window.__ADDON_HOST_VERIFY__ === "function" && window.__ADDON_HOST_VERIFY__(' +
-                JSON.stringify(nextNonce) + ')',
-              true
-            )
-          );
+          const postUrl = typeof contents.getURL === 'function' ? contents.getURL() : '';
+          const postVerify = isAllowedRendererUrl(postUrl) && (await verifyLiveNonce(nextNonce));
           if (!postVerify) {
             recordDiag('error', 'ERR_HOST_BOOTSTRAP_SPOOFED', 'Renderer API verification failed after bootstrap');
             return;
@@ -544,10 +601,45 @@ function attachWebContents(contents, electronApp) {
           instanceNonce = nextNonce;
         }
 
-        const addons = collectActiveAddons().filter((a) => a.rendererPath && !injectedIds.has(a.pluginId));
+        const activeRendererAddons = collectActiveAddons().filter((a) => a.rendererPath);
+        const activeRendererIds = new Set(activeRendererAddons.map((a) => a.pluginId));
+
+        // R5-F5: Dispose any previously injected renderer addon that is now disabled/unregistered
+        if (verifiedLive && injectedIds.size > 0) {
+          for (const prevId of Array.from(injectedIds)) {
+            if (!activeRendererIds.has(prevId)) {
+              if (!(await verifyDocumentStillTrusted())) {
+                recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', 'Document origin/nonce changed before dispose');
+                resetCredentials();
+                return;
+              }
+              try {
+                await contents.executeJavaScript(
+                  'typeof window.__ADDON_HOST_DISPOSE__ === "function" && window.__ADDON_HOST_DISPOSE__(' +
+                    JSON.stringify(hostSecret) + ',' +
+                    JSON.stringify(prevId) + ');',
+                  true
+                );
+              } catch (err) {
+                recordDiag('error', 'ERR_RENDERER_DISPOSE', prevId + ': ' + (err && err.message));
+              }
+              injectedIds.delete(prevId);
+            }
+          }
+        }
+
+        const addons = activeRendererAddons.filter((a) => !injectedIds.has(a.pluginId));
         // Deterministic sequential execution preserves loadOrder while isolating each plugin's faults
         for (const addon of addons) {
           try {
+            // NB2: Read renderer script BEFORE registering capability token so missing/unreadable files leak no token
+            const rawCode = fs.readFileSync(addon.rendererPath, 'utf8');
+            // R5-F2: Re-verify URL + instanceNonce immediately before REGISTER_CAP (prevents async redirect TOCTOU)
+            if (!(await verifyDocumentStillTrusted())) {
+              recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': origin/nonce changed before cap registration');
+              resetCredentials();
+              break;
+            }
             const capToken = crypto.randomBytes(24).toString('hex');
             const spec = {
               pluginId: addon.pluginId,
@@ -562,7 +654,12 @@ function attachWebContents(contents, electronApp) {
                 JSON.stringify(spec) + ');',
               true
             );
-            const rawCode = fs.readFileSync(addon.rendererPath, 'utf8');
+            // R5-F2: Re-verify URL + instanceNonce immediately before executing plugin wrapper
+            if (!(await verifyDocumentStillTrusted())) {
+              recordDiag('warn', 'ERR_RENDERER_TOCTOU_ABORT', addon.pluginId + ': origin/nonce changed before execution');
+              resetCredentials();
+              break;
+            }
             const wrapped =
               '(function(addonHost){\\n' +
               rawCode +

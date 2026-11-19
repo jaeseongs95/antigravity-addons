@@ -168,10 +168,25 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
         set(v) { window.__SETTER0_HIJACKED__.push(v); },
         get() { return undefined; },
       });
+      // R5-F3 attack: pollute Object.prototype.get to trigger TypeError on non-null-proto descriptors
+      Object.defineProperty(Object.prototype, 'get', {
+        configurable: true,
+        writable: true,
+        value: function() { return 'polluted-getter'; },
+      });
       const el = addonHost.mountSlot('plugin-first.bar');
       el.textContent = 'FIRST';
       addonHost.injectStyle('theme', '.p1{color:green}');
-      addonHost.onDispose(() => { window.__FIRST_DISPOSED__ = true; });
+      // R5-F5: exercise unmountSlot and removeStyle directly, then re-mount for subsequent checks
+      window.__STYLE_REMOVED__ = addonHost.removeStyle('theme');
+      window.__SLOT_UNMOUNTED__ = addonHost.unmountSlot('plugin-first.bar');
+      const el2 = addonHost.mountSlot('plugin-first.bar');
+      el2.textContent = 'FIRST_REMOUNTED';
+      addonHost.injectStyle('theme', '.p1{color:blue}');
+      addonHost.onDispose(function() {
+        window.__FIRST_DISPOSE_THIS_TYPE__ = typeof this;
+        window.__FIRST_DISPOSED__ = true;
+      });
       window.__FIRST_SLOTS__ = addonHost.listOwnedSlots();
       try {
         addonHost.mountSlot('undeclared.slot');
@@ -225,11 +240,16 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       `
       window.__ORDER__ = window.__ORDER__ || [];
       window.__ORDER__.push('second');
-      // R4-F2: mounting plugin-second's declared slot must still succeed despite plugin-first's Array.prototype['0'] setter
+      // R4-F2 & R5-F3: mounting plugin-second's declared slot + style must succeed despite Array.prototype['0'] and Object.prototype.get
       const s2 = addonHost.mountSlot('plugin-second.overlay');
       s2.textContent = 'SECOND';
+      addonHost.injectStyle('overlay-css', '.p2{color:red}');
       window.__SECOND_SLOTS__ = addonHost.listOwnedSlots();
-      addonHost.onDispose(() => { window.__SECOND_DISPOSED__ = true; });
+      addonHost.onDispose(function() {
+        'use strict';
+        window.__SECOND_DISPOSE_THIS_IS_UNDEFINED__ = this === undefined;
+        window.__SECOND_DISPOSED__ = true;
+      });
       try {
         addonHost.unmountSlot('plugin-first.bar');
         window.__CROSS_UNMOUNT_ALLOWED__ = true;
@@ -331,7 +351,10 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
     assert.equal(rendererWindow.__STOLEN_TOKENS__.length, 0, 'R2-F3/R3-F2: prototype hooks must steal 0 capability tokens');
     assert.equal(rendererWindow.__SLICE_HOOKED_BY_HOST__, undefined, 'R3-F2: host must not invoke Array.prototype.slice');
     assert.equal(rendererWindow.__SETTER0_HIJACKED__.length, 0, 'R4-F2: Array.prototype["0"] setter must hijack 0 values');
-    assert.deepEqual(Array.from(rendererWindow.__SECOND_SLOTS__), ['plugin-second.overlay'], 'R4-F2: listOwnedSlots intact despite setter');
+    assert.equal(rendererWindow.__STYLE_REMOVED__, true, 'R5-F5: removeStyle must succeed');
+    assert.equal(rendererWindow.__SLOT_UNMOUNTED__, true, 'R5-F5: unmountSlot must succeed');
+    assert.deepEqual(Array.from(rendererWindow.__FIRST_SLOTS__), ['plugin-first.bar'], 'R5-F3: listOwnedSlots intact despite Object.prototype.get');
+    assert.deepEqual(Array.from(rendererWindow.__SECOND_SLOTS__), ['plugin-second.overlay'], 'R4-F2/R5-F3: listOwnedSlots intact despite setter & Object.prototype.get');
     // Note: plugin-second calls window.__ORDER__.push('second') once; host itself invokes Array.prototype.push 0 times
     assert.equal(rendererWindow.__PUSH_HOOKED_BY_HOST__, 1, 'R3-F2: host must not invoke Array.prototype.push');
     assert.equal(rendererWindow.__UNDECLARED_ALLOWED__, undefined, 'F2: undeclared slot must be rejected');
@@ -354,13 +377,21 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
     await new Promise((r) => setTimeout(r, 30));
     assert.deepEqual(Array.from(rendererWindow.__ORDER__), ['first', 'second'], 'F3: SPA URL change must not re-inject');
 
-    // R2-F4: Disabling plugin-second via config.json must dispose its mainHook on SINGLE-WINDOW reload (did-finish-load)
+    // R2-F4 & R5-F5: Disabling plugin-second via config.json must dispose BOTH its mainHook AND its renderer handle (despite Object.prototype.get pollution!)
     assert.equal(fakeApp.__hookState.wcCount, 1);
     assert.equal(fakeApp.__hookState.disposed, 0);
+    assert.equal(rendererWindow.__SECOND_DISPOSED__, undefined);
     fs.writeFileSync(configPath, JSON.stringify({ plugins: { 'plugin-second': { enabled: false } } }), 'utf8');
     listeners['did-finish-load']();
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(fakeApp.__hookState.disposed, 1, 'R2-F4: disabled mainHook must be disposed on single-window reload');
+    assert.equal(rendererWindow.__SECOND_DISPOSED__, true, 'R5-F5/R5-F3: disabled renderer addon must be disposed even under Object.prototype.get pollution');
+    assert.equal(rendererWindow.__SECOND_DISPOSE_THIS_IS_UNDEFINED__, true, 'NB2: onDispose callback must not receive internal bucket as `this`');
+    assert.equal(
+      body.children.some((c) => c.getAttribute('data-addon-host-owner') === 'plugin-second'),
+      false,
+      'R5-F5/R5-F3: disabled renderer addon slots & styles must be removed from DOM'
+    );
     mod.exports.attachWebContents({ getType: () => 'window', getURL: () => currentUrl, on() {} }, fakeApp);
     assert.equal(fakeApp.__hookState.wcCount, 1, 'F3: disabled mainHook must not receive onWebContentsCreated');
 
@@ -402,6 +433,96 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       await new Promise((r) => setTimeout(r, 25));
       assert.equal(spoofedSecrets.length, 0, `R4-F1 (${mode}): must leak 0 hostSecret/capToken across 2 events`);
     }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TC-015 (R5-F2): mid-loop async executeJavaScript redirect to disallowed origin aborts immediately without leaking hostSecret/capToken to subsequent addons', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-toctou-'));
+  try {
+    const pluginsRoot = path.join(dir, 'plugins');
+    const addonsDir = path.join(dir, 'addons.d');
+    const configPath = path.join(dir, 'config.json');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'p-one'), { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'p-two'), { recursive: true });
+
+    fs.writeFileSync(path.join(pluginsRoot, 'p-one', 'entry.js'), 'window.__P1_RAN__ = true;\n', 'utf8');
+    fs.writeFileSync(path.join(pluginsRoot, 'p-two', 'entry.js'), 'window.__P2_RAN__ = true;\n', 'utf8');
+    fs.writeFileSync(
+      path.join(addonsDir, 'p-one.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'p-one',
+        displayName: 'P1',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'p-one' },
+        loadOrder: 10,
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(addonsDir, 'p-two.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pluginId: 'p-two',
+        displayName: 'P2',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'entry.js', mainHookScript: null },
+        isolation: { noTranslate: true, i18nSelfManaged: true, storageNamespace: 'p-two' },
+        loadOrder: 20,
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+
+    const loaderSrc = buildHostLoaderScriptSource(
+      { ADDONS_DIR: addonsDir, PLUGINS_ROOT_DIR: pluginsRoot, CONFIG_JSON_PATH: configPath },
+      ANTIGRAVITY_HOST_PROFILE
+    );
+    const mod = { exports: {} };
+    vm.runInNewContext(loaderSrc, { require, module: mod, exports: mod.exports, URL, console });
+
+    const rendererWindow = {};
+    const rendererCtx = vm.createContext({ window: rendererWindow, document: {} });
+    let currentUrl = 'http://127.0.0.1:4173/app';
+    let registerCapCount = 0;
+    const listeners = {};
+
+    mod.exports.attachWebContents(
+      {
+        getType: () => 'window',
+        getURL: () => currentUrl,
+        on(evt, fn) { listeners[evt] = fn; },
+        async executeJavaScript(code) {
+          if (code.startsWith('window.__ADDON_HOST_REGISTER_CAP__(')) {
+            registerCapCount++;
+          }
+          const res = vm.runInContext(code, rendererCtx);
+          // Simulate mid-loop redirect to a disallowed external origin right after p-one executes
+          if (code.includes('window.__P1_RAN__')) {
+            currentUrl = 'https://evil.example.com/phish';
+          }
+          return res;
+        },
+      },
+      {}
+    );
+
+    listeners['dom-ready']();
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.equal(rendererWindow.__P1_RAN__, true, 'p-one executes while origin is allowed');
+    assert.equal(rendererWindow.__P2_RAN__, undefined, 'R5-F2: p-two must NOT execute after redirect');
+    assert.equal(registerCapCount, 1, 'R5-F2: REGISTER_CAP must NOT be called for p-two after redirect');
+    assert.ok(
+      mod.exports.getDiagnostics().some((d) => d.code === 'ERR_RENDERER_TOCTOU_ABORT'),
+      'R5-F2: diagnostics must record ERR_RENDERER_TOCTOU_ABORT'
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

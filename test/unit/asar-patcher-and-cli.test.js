@@ -11,6 +11,10 @@ const { execFileSync } = require('node:child_process');
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const CLI_BIN = path.join(REPO_ROOT, 'bin', 'addon-host.js');
 
+const { validateHostProfile } = require('../../src/core/host-profile-port');
+const { validateElectronHostProfile } = require('../../src/adapters/electron/electron-host-profile-port');
+const { createElectronHostAdapter } = require('../../src/adapters/electron/electron-host-adapter');
+const { createCliApp } = require('../../src/cli/main');
 const { ANTIGRAVITY_HOST_PROFILE } = require('../../src/profiles/antigravity');
 const {
   sanitizeVersionForFilename,
@@ -79,10 +83,13 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
   assert.equal(sanitizeVersionForFilename('../../evil/1.0'), 'evil_1.0');
   assert.equal(sanitizeVersionForFilename('2.33.0'), '2.33.0');
 
-  // F6: template literal containing `//` on its own line must NOT be stripped; CRLF supported
+  // F6 & R5-F4: regex literals & nested template `${...}` containing `//` on its own line must NOT be stripped; CRLF supported
   const templateSrc = [
-    "const tpl = `line1",
-    "  // keep this inside template literal",
+    "const re = /foo\\/bar\\`/g;",
+    "const tpl = `line1 ${`nested",
+    "  // keep this inside nested template literal",
+    "inner`}",
+    "  // keep this inside outer template literal",
     "line3`;",
     "// top level removable comment line 1 for exact size padding",
     "// top level removable comment line 2 for exact size padding",
@@ -94,7 +101,8 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
     'TARGET_ANCHOR();/*MARK*/void 0;',
     'MARK'
   ).toString('utf8');
-  assert.equal(transformed.includes('// keep this inside template literal'), true);
+  assert.equal(transformed.includes('// keep this inside nested template literal'), true);
+  assert.equal(transformed.includes('// keep this inside outer template literal'), true);
   assert.equal(transformed.includes('/*MARK*/'), true);
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-asar-'));
@@ -314,6 +322,68 @@ test('TC-011 & TC-012 (F5 & F7): real bin/addon-host.js CLI process executes --v
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('TC-014 (R5-F1 & NB3): SOLID DIP/ISP port separation, resolved-path validation, mock non-Electron CLI injection, and doctor origBackupValid health check', async () => {
+  // 1) Core HostProfile port accepts minimal non-Electron profile without Electron/ASAR fields
+  const minimalProfile = { id: 'minimal-non-electron', resolvePaths: () => ({}) };
+  assert.equal(validateHostProfile(minimalProfile).ok, true);
+
+  // 2) Electron adapter port rejects missing Electron fields AND rejects resolvePaths: () => ({})
+  assert.equal(validateElectronHostProfile(minimalProfile).ok, false);
+  assert.equal(validateElectronHostProfile(minimalProfile).reason, 'MISSING_ELECTRON_PROFILE_FIELD:patchMarker');
+
+  const brokenElectronProfile = {
+    ...ANTIGRAVITY_HOST_PROFILE,
+    resolvePaths: () => ({}),
+  };
+  const electronAdapter = createElectronHostAdapter();
+  assert.throws(() => electronAdapter.resolvePaths(brokenElectronProfile), /MISSING_RESOLVED_PATH:ADDONS_DIR/);
+
+  // 3) CLI factory works with a completely non-Electron injected hostAdapter (DIP)
+  const fakeNonElectronAdapter = {
+    validateProfile: (p) => {
+      if (!p || !p.id) throw new Error('BAD_PROFILE');
+      return p;
+    },
+    resolvePaths: (p) => ({
+      activeProfile: p,
+      paths: { ADDONS_DIR: '/virtual/addons', PLUGINS_ROOT_DIR: '/virtual/plugins', LOADER_SCRIPT_PATH: '' },
+    }),
+    isHostInstalled: () => true,
+    diagnoseHostState: () => ({
+      asarExists: true,
+      hostInstalled: true,
+      hasLegacyConflict: false,
+      origBackupValid: false,
+      origBackupStatus: 'ERR_ORIG_META_MISMATCH',
+    }),
+    installHost: () => ({ status: 'INSTALLED' }),
+    rollbackHost: () => ({ status: 'ROLLED_BACK' }),
+    collectExecutableAddons: () => ({ active: [], disabled: [], rejected: [], slots: {} }),
+    loadRawManifestsFromDir: () => [],
+    buildLoaderSource: () => '// mock',
+    acquireLock: () => ({ ok: true, token: 'tok' }),
+    releaseLock: () => {},
+    writeAtomicSync: () => {},
+  };
+  const cli = createCliApp({
+    hostAdapter: fakeNonElectronAdapter,
+    defaultProfile: minimalProfile,
+    hostVersion: '1.0.1',
+  });
+  const status = cli.buildStatusReport();
+  assert.equal(status.hostProfileId, 'minimal-non-electron');
+  assert.equal(status.asarHostInstalled, true);
+
+  // NB3: Doctor report marks healthy=false when hostInstalled=true and origBackupValid=false
+  const doctor = cli.buildDoctorReport();
+  assert.equal(doctor.healthy, false);
+  assert.equal(doctor.asar.origBackupValid, false);
+
+  // NB3: --register/-flag and --unregister/-flag fail closed
+  assert.equal(cli.registerAddonManifestFile('--bad-flag').reason, 'ERR_MANIFEST_FILE_NOT_FOUND');
+  assert.equal(cli.unregisterAddonManifest('--bad-flag').reason, 'ERR_INVALID_PLUGIN_ID');
 });
 
 const defaultLocalOrig = process.env.LOCALAPPDATA

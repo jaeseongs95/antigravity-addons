@@ -13,8 +13,9 @@ const crypto = require('node:crypto');
 const vm = require('node:vm');
 const asar = require('@electron/asar');
 const lockfile = require('proper-lockfile');
+const acorn = require('acorn');
 
-const { assertValidHostProfile } = require('../../core/host-profile-port');
+const { assertValidElectronHostProfile } = require('./electron-host-profile-port');
 
 const activeLockReleases = new Map();
 
@@ -174,7 +175,7 @@ function verifyAllAsarIntegrity(archive) {
 }
 
 function detectArchiveMarkers(archive, profile) {
-  assertValidHostProfile(profile);
+  assertValidElectronHostProfile(profile);
   const mainBuf = archive.fileMap.get(profile.mainEntry);
   if (!mainBuf) return { mainPresent: false, hostInstalled: false, legacyMarkers: [] };
   const text = mainBuf.toString('utf8');
@@ -190,7 +191,7 @@ function isPureUnpatchedArchive(archive, profile) {
 }
 
 function isAsarHostInstalled(asarPath, profile) {
-  assertValidHostProfile(profile);
+  assertValidElectronHostProfile(profile);
   try {
     if (!asarPath || !fs.existsSync(asarPath)) return false;
     const archive = readAsarArchive(asarPath);
@@ -201,58 +202,49 @@ function isAsarHostInstalled(asarPath, profile) {
 }
 
 /**
- * Finds line indices whose entire content is a top-level standalone `//` comment line
- * outside any string literal, template literal, or block comment (CRLF & LF safe).
+ * Finds 0-based line indices whose entire content is a standalone `//` line comment
+ * using the standard ECMAScript parser (`acorn`), safely ignoring `//` inside strings,
+ * regex literals, nested template `${...}` expressions, and block comments (CRLF & LF safe).
  */
 function findSafeStandaloneCommentLines(sourceText) {
   const safeLineIndices = new Set();
-  let state = 'code'; // code | single | double | template | blockComment
-  let lineIdx = 0;
-  let lineStart = 0;
-  const len = sourceText.length;
-
-  for (let i = 0; i < len; i++) {
-    const ch = sourceText[i];
-    const next = i + 1 < len ? sourceText[i + 1] : '';
-
-    if (ch === '\n') {
-      lineIdx++;
-      lineStart = i + 1;
-      continue;
+  const lineStarts = [0];
+  for (let i = 0; i < sourceText.length; i++) {
+    if (sourceText[i] === '\n') {
+      lineStarts.push(i + 1);
     }
+  }
 
-    if (state === 'code') {
-      if (ch === "'") {
-        state = 'single';
-      } else if (ch === '"') {
-        state = 'double';
-      } else if (ch === '`') {
-        state = 'template';
-      } else if (ch === '/' && next === '*') {
-        state = 'blockComment';
-        i++;
-      } else if (ch === '/' && next === '/') {
-        const prefix = sourceText.slice(lineStart, i);
-        if (/^[ \t]*$/.test(prefix)) {
-          safeLineIndices.add(lineIdx);
+  const collectComments = (sourceType) => {
+    const collected = [];
+    acorn.parse(sourceText, {
+      ecmaVersion: 'latest',
+      sourceType,
+      allowHashBang: true,
+      allowReturnOutsideFunction: sourceType === 'script',
+      locations: true,
+      onComment(block, _text, start, _end, startLoc, endLoc) {
+        if (!block && startLoc && endLoc && startLoc.line === endLoc.line) {
+          collected.push({ lineIdx: startLoc.line - 1, start });
         }
-        // Skip to end of line
-        while (i + 1 < len && sourceText[i + 1] !== '\n') i++;
-      }
-    } else if (state === 'single') {
-      if (ch === '\\') i++;
-      else if (ch === "'") state = 'code';
-    } else if (state === 'double') {
-      if (ch === '\\') i++;
-      else if (ch === '"') state = 'code';
-    } else if (state === 'template') {
-      if (ch === '\\') i++;
-      else if (ch === '`') state = 'code';
-    } else if (state === 'blockComment') {
-      if (ch === '*' && next === '/') {
-        state = 'code';
-        i++;
-      }
+      },
+    });
+    return collected;
+  };
+
+  let comments;
+  try {
+    comments = collectComments('script');
+  } catch (_scriptErr) {
+    comments = collectComments('module');
+  }
+
+  for (const c of comments) {
+    const lineStart = lineStarts[c.lineIdx];
+    if (lineStart === undefined) continue;
+    const prefix = sourceText.slice(lineStart, c.start);
+    if (/^[ \t]*$/.test(prefix)) {
+      safeLineIndices.add(c.lineIdx);
     }
   }
 
@@ -305,7 +297,7 @@ function transformExactSize(origBuf, targetStr, replacementStr, marker) {
 }
 
 function verifyOrigBackupStrict(backupPath, metaPath, expectedVersion, profile, { backfillMeta = false } = {}) {
-  assertValidHostProfile(profile);
+  assertValidElectronHostProfile(profile);
   if (!fs.existsSync(backupPath)) return { ok: false, status: 'ERR_ORIG_MISSING' };
   let archive;
   try {
@@ -354,7 +346,7 @@ function verifyOrigBackupStrict(backupPath, metaPath, expectedVersion, profile, 
 }
 
 function installAsarAddonHost(paths, profile) {
-  assertValidHostProfile(profile);
+  assertValidElectronHostProfile(profile);
   if (!fs.existsSync(paths.ASAR_PATH)) {
     return { status: 'SKIPPED_NO_ASAR' };
   }
@@ -481,7 +473,7 @@ function installAsarAddonHost(paths, profile) {
 }
 
 function rollbackAsarAddonHost(paths, profile, { force = false } = {}) {
-  assertValidHostProfile(profile);
+  assertValidElectronHostProfile(profile);
   if (!fs.existsSync(paths.ASAR_PATH)) {
     return { status: 'SKIPPED_NO_ASAR' };
   }
@@ -525,7 +517,7 @@ function rollbackAsarAddonHost(paths, profile, { force = false } = {}) {
 }
 
 function diagnoseAsarState(paths, profile) {
-  assertValidHostProfile(profile);
+  assertValidElectronHostProfile(profile);
   if (!fs.existsSync(paths.ASAR_PATH)) {
     return { asarExists: false, status: 'NO_ASAR', legacyMarkers: [], origBackupValid: false };
   }

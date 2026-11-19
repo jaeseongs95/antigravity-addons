@@ -134,13 +134,13 @@ function createSlotRegistry() {
   }
 
   function snapshot() {
-    const bySlotId = {};
+    const bySlotId = Object.create(null);
     for (const [k, v] of ownersBySlotId.entries()) bySlotId[k] = v;
-    const bySlot = {};
+    const bySlot = Object.create(null);
     for (const [k, v] of entriesBySlotKind.entries()) bySlot[k] = v.map((x) => ({ ...x }));
-    const storageNamespaces = {};
+    const storageNamespaces = Object.create(null);
     for (const [k, v] of ownersByStorageNs.entries()) storageNamespaces[k] = v;
-    const ipcPrefixes = {};
+    const ipcPrefixes = Object.create(null);
     for (const [k, v] of ownersByIpcPrefix.entries()) ipcPrefixes[k] = v;
     return { bySlotId, bySlot, storageNamespaces, ipcPrefixes };
   }

@@ -14,7 +14,7 @@ const LOADER_ENV_VAR = 'AGY_ADDON_HOST_LOADER_PATH';
 const MAIN_ANCHOR_TARGET = "electron_1.app.on('web-contents-created', (_event, contents) => {";
 const MAIN_ANCHOR_REPLACEMENT =
   "electron_1.app.on('web-contents-created', (_event, contents) => {" +
-  "/*ADDON_HOST_LOADER_V1*/try{const _p=process.env.AGY_ADDON_HOST_LOADER_PATH||require('path').join(process.env.USERPROFILE||process.env.HOME||'','.gemini','antigravity','addon-host-loader.js');if(require('fs').existsSync(_p))require(_p).attachWebContents(contents,electron_1.app);}catch(_e){}";
+  "/*ADDON_HOST_LOADER_V1*/try{const _p=process.env.AGY_ADDON_HOST_LOADER_PATH||require('path').join(process.env.USERPROFILE||process.env.HOME||'','.gemini','antigravity','addon-host-loader.js');if(require('fs').existsSync(_p))require(_p).attachWebContents(contents,electron_1.app);}catch(_e){try{process.stderr.write('[addon-host] '+(_e&&_e.message||_e)+'\\n');}catch(_i){}}";
 
 function resolveAntigravityPaths(env = process.env) {
   const home = env.USERPROFILE || env.HOME || os.homedir();
