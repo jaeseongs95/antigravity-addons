@@ -106,18 +106,16 @@ function buildRendererHostApiBootstrapSource({
   const _ObjFreeze = Object.freeze;
   const _ObjDefineProperty = Object.defineProperty;
   const _ObjKeys = Object.keys;
-  const _ObjHasOwn = Object.prototype.hasOwnProperty;
+  const _has = typeof Object.hasOwn === 'function'
+    ? Object.hasOwn
+    : Function.prototype.call.bind(Object.prototype.hasOwnProperty);
   const _ArrayIsArray = Array.isArray;
   const _String = String;
   const _Error = Error;
-  const _has = (dict, key) => _ObjHasOwn.call(dict, key);
 
-  if (typeof window.__ADDON_HOST_VERIFY__ === 'function') {
-    try {
-      if (window.__ADDON_HOST_VERIFY__(__INSTANCE_NONCE__)) return;
-    } catch (_e) {}
-  }
-
+  // R3-F1: Never trust a pre-existing window.__ADDON_HOST_VERIFY__ before defining our own
+  // non-configurable properties. If a page pre-spoofed them as non-configurable, _ObjDefineProperty
+  // throws and the host fails closed without leaking hostSecret or capToken.
   const NO_TRANSLATE_SELECTOR = ${serializeSafeInlineJson(noTranslateSelector)};
   const EXTRA_NO_TRANSLATE_ATTRS = _ObjFreeze(${serializeSafeInlineJson(extraAttrs)});
   const slotOwners = _ObjCreate(null);
@@ -218,14 +216,15 @@ function buildRendererHostApiBootstrapSource({
         const out = [];
         const keys = _ObjKeys(slotOwners);
         for (let i = 0; i < keys.length; i++) {
-          if (slotOwners[keys[i]] === pluginId) out.push(keys[i]);
+          if (slotOwners[keys[i]] === pluginId) out[out.length] = keys[i];
         }
         return out;
       },
       onDispose(fn) {
         if (typeof fn !== 'function') return;
         if (!_has(disposers, pluginId)) disposers[pluginId] = [];
-        disposers[pluginId].push(fn);
+        const list = disposers[pluginId];
+        list[list.length] = fn;
       },
       dispose() {
         const fns = _has(disposers, pluginId) ? disposers[pluginId] : [];
@@ -286,9 +285,14 @@ function buildRendererHostApiBootstrapSource({
       if (typeof token !== 'string' || !token || !spec || typeof spec !== 'object') {
         throw new _Error('ERR_INVALID_CAP_REGISTRATION');
       }
+      const rawSlots = _ArrayIsArray(spec.allowedSlotIds) ? spec.allowedSlotIds : [];
+      const copiedSlots = [];
+      for (let i = 0; i < rawSlots.length; i++) {
+        copiedSlots[i] = _String(rawSlots[i]);
+      }
       pendingSpecs[token] = _ObjFreeze({
         pluginId: _String(spec.pluginId),
-        allowedSlotIds: _ObjFreeze(_ArrayIsArray(spec.allowedSlotIds) ? spec.allowedSlotIds.slice() : []),
+        allowedSlotIds: _ObjFreeze(copiedSlots),
         storageNamespace: spec.storageNamespace ? _String(spec.storageNamespace) : _String(spec.pluginId),
         ipcChannelPrefix: spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null,
       });

@@ -38,7 +38,7 @@ function resolveConfinedScriptPath(relScript, pluginDir, { pluginsRootDir = null
   if (typeof relScript !== 'string' || !relScript.trim()) {
     return { ok: false, reason: 'EMPTY_ENTRY_SCRIPT' };
   }
-  if (path.isAbsolute(relScript) || relScript.includes('\0')) {
+  if (path.isAbsolute(relScript) || /^[A-Za-z]:/.test(relScript) || relScript.includes('\0')) {
     return { ok: false, reason: 'ERR_ENTRY_ESCAPES_PLUGIN_DIR' };
   }
   const normalized = path.normalize(relScript);

@@ -135,16 +135,37 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
       `
       window.__ORDER__ = window.__ORDER__ || [];
       window.__ORDER__.push('first');
-      // R2-F3 attack: attempt to hijack Map.prototype.set to steal subsequent plugin capability tokens
+      // R2-F3 & R3-F2 attacks: hook Map.prototype.set, Function.prototype.call, Array.prototype.slice/push
       window.__STOLEN_TOKENS__ = [];
       const origSet = Map.prototype.set;
       Map.prototype.set = function(k, v) {
         window.__STOLEN_TOKENS__.push(k);
         return origSet.call(this, k, v);
       };
+      const origCall = Function.prototype.call;
+      Function.prototype.call = function(thisArg, ...args) {
+        for (const a of args) {
+          if (typeof a === 'string' && /^[a-f0-9]{48}$/.test(a)) {
+            window.__STOLEN_TOKENS__.push(a);
+          }
+        }
+        return origCall.apply(this, [thisArg, ...args]);
+      };
+      const origSlice = Array.prototype.slice;
+      Array.prototype.slice = function(...args) {
+        window.__SLICE_HOOKED_BY_HOST__ = (window.__SLICE_HOOKED_BY_HOST__ || 0) + 1;
+        return origSlice.apply(this, args);
+      };
+      const origPush = Array.prototype.push;
+      Array.prototype.push = function(...args) {
+        window.__PUSH_HOOKED_BY_HOST__ = (window.__PUSH_HOOKED_BY_HOST__ || 0) + 1;
+        return origPush.apply(this, args);
+      };
       const el = addonHost.mountSlot('plugin-first.bar');
       el.textContent = 'FIRST';
       addonHost.injectStyle('theme', '.p1{color:green}');
+      addonHost.onDispose(() => {});
+      void addonHost.listOwnedSlots();
       try {
         addonHost.mountSlot('undeclared.slot');
         window.__UNDECLARED_ALLOWED__ = true;
@@ -295,7 +316,10 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
 
     assert.equal(rendererWindow.__EVIL_RAN__, undefined, 'F1: traversal pluginId must never execute');
     assert.deepEqual(Array.from(rendererWindow.__ORDER__), ['first', 'second'], 'F3: must execute once in strict loadOrder');
-    assert.equal(rendererWindow.__STOLEN_TOKENS__.length, 0, 'R2-F3: Map.prototype.set hook must steal 0 capability tokens');
+    assert.equal(rendererWindow.__STOLEN_TOKENS__.length, 0, 'R2-F3/R3-F2: prototype hooks must steal 0 capability tokens');
+    assert.equal(rendererWindow.__SLICE_HOOKED_BY_HOST__, undefined, 'R3-F2: host must not invoke Array.prototype.slice');
+    // Note: plugin-second calls window.__ORDER__.push('second') once; host itself invokes Array.prototype.push 0 times
+    assert.equal(rendererWindow.__PUSH_HOOKED_BY_HOST__, 1, 'R3-F2: host must not invoke Array.prototype.push');
     assert.equal(rendererWindow.__UNDECLARED_ALLOWED__, undefined, 'F2: undeclared slot must be rejected');
     assert.match(String(rendererWindow.__UNDECLARED_ERR__), /ERR_UNDECLARED_SLOT/);
     assert.equal(rendererWindow.__CROSS_UNMOUNT_ALLOWED__, undefined, 'F2: cross-plugin unmount must be rejected');
@@ -329,6 +353,34 @@ test('TC-008 (F1, F2, F3, NB2): generated loader blocks traversal pluginId, enfo
     // NB2: Diagnostics buffer must capture rejected traversal + throwing peer
     const diags = mod.exports.getDiagnostics();
     assert.ok(diags.some((d) => d.code === 'ERR_RENDERER_INJECT' && d.detail.includes('plugin-boom')));
+
+    // R3-F1: Pre-spoofed non-configurable __ADDON_HOST_VERIFY__ + fake __ADDON_HOST_REGISTER_CAP__ must fail closed with 0 secret leak
+    const spoofedSecrets = [];
+    const spoofWindow = { document: fakeDocument };
+    Object.defineProperty(spoofWindow, '__ADDON_HOST_VERIFY__', {
+      value: () => true,
+      writable: false,
+      configurable: false,
+    });
+    Object.defineProperty(spoofWindow, '__ADDON_HOST_REGISTER_CAP__', {
+      value: (secret, token) => { spoofedSecrets.push({ secret, token }); },
+      writable: false,
+      configurable: false,
+    });
+    const spoofCtx = vm.createContext({ window: spoofWindow, document: fakeDocument });
+    const spoofListeners = {};
+    mod.exports.attachWebContents(
+      {
+        getType: () => 'window',
+        getURL: () => 'http://127.0.0.1:4173/spoof',
+        on(evt, fn) { spoofListeners[evt] = fn; },
+        async executeJavaScript(code) { return vm.runInContext(code, spoofCtx); },
+      },
+      fakeApp
+    );
+    spoofListeners['dom-ready']();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(spoofedSecrets.length, 0, 'R3-F1: pre-spoofed __ADDON_HOST_VERIFY__ must never leak hostSecret/capToken');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
