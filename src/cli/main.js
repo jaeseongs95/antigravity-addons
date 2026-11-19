@@ -242,7 +242,7 @@ async function runCli(argv = process.argv.slice(2), pathOverrides = null, profil
   if (valIdx !== -1) {
     const file = args[valIdx + 1];
     let out;
-    if (!file || !fs.existsSync(file)) {
+    if (!file || file.startsWith('-') || !fs.existsSync(file)) {
       out = { ok: false, reason: 'ERR_MANIFEST_FILE_NOT_FOUND' };
     } else {
       try {

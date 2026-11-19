@@ -64,7 +64,7 @@ function resolveConfinedScriptPath(relScript, pluginDir, { pluginsRootDir = null
     return { ok: true, resolvedPath: resolvedTarget };
   }
 
-  if (!fs.existsSync(resolvedTarget)) {
+  if (!fs.existsSync(resolvedTarget) || !fs.statSync(resolvedTarget).isFile()) {
     return { ok: false, reason: 'ERR_ENTRY_SCRIPT_NOT_FOUND', resolvedPath: resolvedTarget };
   }
 

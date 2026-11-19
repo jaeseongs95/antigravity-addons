@@ -127,11 +127,7 @@ function buildRendererHostApiBootstrapSource({
 
   function createScopedHandle(spec) {
     const pluginId = _String(spec.pluginId);
-    const allowedSlots = _ObjCreate(null);
-    const rawSlots = _ArrayIsArray(spec.allowedSlotIds) ? spec.allowedSlotIds : [];
-    for (let i = 0; i < rawSlots.length; i++) {
-      allowedSlots[_String(rawSlots[i])] = true;
-    }
+    const allowedSlots = spec.allowedSlotsMap || _ObjCreate(null);
     const storageNamespace = spec.storageNamespace ? _String(spec.storageNamespace) : pluginId;
     const ipcChannelPrefix = spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null;
 
@@ -214,23 +210,35 @@ function buildRendererHostApiBootstrapSource({
       },
       listOwnedSlots() {
         const out = [];
+        let outLen = 0;
         const keys = _ObjKeys(slotOwners);
         for (let i = 0; i < keys.length; i++) {
-          if (slotOwners[keys[i]] === pluginId) out[out.length] = keys[i];
+          if (slotOwners[keys[i]] === pluginId) {
+            _ObjDefineProperty(out, outLen++, {
+              value: keys[i],
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            });
+          }
         }
         return out;
       },
       onDispose(fn) {
         if (typeof fn !== 'function') return;
-        if (!_has(disposers, pluginId)) disposers[pluginId] = [];
-        const list = disposers[pluginId];
-        list[list.length] = fn;
+        if (!_has(disposers, pluginId)) {
+          disposers[pluginId] = { count: 0, items: _ObjCreate(null) };
+        }
+        const bucket = disposers[pluginId];
+        bucket.items[bucket.count++] = fn;
       },
       dispose() {
-        const fns = _has(disposers, pluginId) ? disposers[pluginId] : [];
+        const bucket = _has(disposers, pluginId) ? disposers[pluginId] : null;
         delete disposers[pluginId];
-        for (let i = 0; i < fns.length; i++) {
-          try { fns[i](); } catch (_err) {}
+        if (bucket) {
+          for (let i = 0; i < bucket.count; i++) {
+            try { bucket.items[i](); } catch (_err) {}
+          }
         }
         const owned = handle.listOwnedSlots();
         for (let i = 0; i < owned.length; i++) {
@@ -286,13 +294,15 @@ function buildRendererHostApiBootstrapSource({
         throw new _Error('ERR_INVALID_CAP_REGISTRATION');
       }
       const rawSlots = _ArrayIsArray(spec.allowedSlotIds) ? spec.allowedSlotIds : [];
-      const copiedSlots = [];
+      const allowedSlotsMap = _ObjCreate(null);
       for (let i = 0; i < rawSlots.length; i++) {
-        copiedSlots[i] = _String(rawSlots[i]);
+        if (_has(rawSlots, i)) {
+          allowedSlotsMap[_String(rawSlots[i])] = true;
+        }
       }
       pendingSpecs[token] = _ObjFreeze({
         pluginId: _String(spec.pluginId),
-        allowedSlotIds: _ObjFreeze(copiedSlots),
+        allowedSlotsMap: _ObjFreeze(allowedSlotsMap),
         storageNamespace: spec.storageNamespace ? _String(spec.storageNamespace) : _String(spec.pluginId),
         ipcChannelPrefix: spec.ipcChannelPrefix ? _String(spec.ipcChannelPrefix) : null,
       });
@@ -509,17 +519,19 @@ function attachWebContents(contents, electronApp) {
 
         if (!verifiedLive) {
           injectedIds.clear();
-          hostSecret = crypto.randomBytes(24).toString('hex');
-          instanceNonce = crypto.randomBytes(24).toString('hex');
+          hostSecret = '';
+          instanceNonce = '';
+          const nextSecret = crypto.randomBytes(24).toString('hex');
+          const nextNonce = crypto.randomBytes(24).toString('hex');
           const bootstrapWithSecrets =
-            '(function(){ const __HOST_SECRET__ = ' + JSON.stringify(hostSecret) +
-            '; const __INSTANCE_NONCE__ = ' + JSON.stringify(instanceNonce) + ';\\n' +
+            '(function(){ const __HOST_SECRET__ = ' + JSON.stringify(nextSecret) +
+            '; const __INSTANCE_NONCE__ = ' + JSON.stringify(nextNonce) + ';\\n' +
             RENDERER_API_BOOTSTRAP_TEMPLATE + '\\n})();';
           await contents.executeJavaScript(bootstrapWithSecrets, true);
           const postVerify = Boolean(
             await contents.executeJavaScript(
               'typeof window.__ADDON_HOST_VERIFY__ === "function" && window.__ADDON_HOST_VERIFY__(' +
-                JSON.stringify(instanceNonce) + ')',
+                JSON.stringify(nextNonce) + ')',
               true
             )
           );
@@ -527,6 +539,9 @@ function attachWebContents(contents, electronApp) {
             recordDiag('error', 'ERR_HOST_BOOTSTRAP_SPOOFED', 'Renderer API verification failed after bootstrap');
             return;
           }
+          // R4-F1: Commit closure credentials ONLY after bootstrap + postVerify both succeed
+          hostSecret = nextSecret;
+          instanceNonce = nextNonce;
         }
 
         const addons = collectActiveAddons().filter((a) => a.rendererPath && !injectedIds.has(a.pluginId));
