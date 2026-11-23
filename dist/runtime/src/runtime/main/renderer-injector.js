@@ -80,6 +80,28 @@ function createRendererInjector({
     map.set(pluginId, settingsDeliveryKey(snap));
   }
 
+  function reaggregatePluginLifecycle(pluginId, fallbackState = null) {
+    let aggregated = null;
+    for (const m of lifecycleStatesByWcId.values()) {
+      const s = m.get(pluginId);
+      if (!s) continue;
+      if (s === LIFECYCLE_STATES.ACTIVE) {
+        aggregated = LIFECYCLE_STATES.ACTIVE;
+        break;
+      }
+      if (s === LIFECYCLE_STATES.FAILED && aggregated !== LIFECYCLE_STATES.ACTIVE) {
+        aggregated = LIFECYCLE_STATES.FAILED;
+      } else if (aggregated === null) {
+        aggregated = s;
+      }
+    }
+    if (aggregated !== null) {
+      lifecycleStates.set(pluginId, aggregated);
+    } else if (fallbackState !== null) {
+      lifecycleStates.set(pluginId, fallbackState);
+    }
+  }
+
   function setWindowLifecycleState(wcId, pluginId, state) {
     let wcMap = lifecycleStatesByWcId.get(wcId);
     if (!wcMap) {
@@ -87,19 +109,16 @@ function createRendererInjector({
       lifecycleStatesByWcId.set(wcId, wcMap);
     }
     wcMap.set(pluginId, state);
-    // Aggregate across active windows: ACTIVE wins over FAILED/DISPOSED so Window 2 errors cannot mask Window 1's active status
-    let aggregated = state;
-    for (const m of lifecycleStatesByWcId.values()) {
-      const s = m.get(pluginId);
-      if (s === LIFECYCLE_STATES.ACTIVE) {
-        aggregated = LIFECYCLE_STATES.ACTIVE;
-        break;
-      }
-      if (s === LIFECYCLE_STATES.FAILED && aggregated !== LIFECYCLE_STATES.ACTIVE) {
-        aggregated = LIFECYCLE_STATES.FAILED;
-      }
+    reaggregatePluginLifecycle(pluginId, state);
+  }
+
+  function clearWindowLifecycleStates(wcId) {
+    const removed = lifecycleStatesByWcId.get(wcId);
+    if (!removed) return;
+    lifecycleStatesByWcId.delete(wcId);
+    for (const pluginId of removed.keys()) {
+      reaggregatePluginLifecycle(pluginId, null);
     }
-    lifecycleStates.set(pluginId, aggregated);
   }
   const rendererErrors = [];
 
@@ -495,7 +514,7 @@ ${verified.source}
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
-      lifecycleStatesByWcId.delete(wcId);
+      clearWindowLifecycleStates(wcId);
       syncSettingsBridgeBindings();
       originResolver.rotateGeneration(wcId, url);
     });
@@ -507,7 +526,7 @@ ${verified.source}
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
-      lifecycleStatesByWcId.delete(wcId);
+      clearWindowLifecycleStates(wcId);
       syncSettingsBridgeBindings();
       originResolver.rotateGeneration(wcId, '');
     });
@@ -533,7 +552,7 @@ ${verified.source}
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
-      lifecycleStatesByWcId.delete(wcId);
+      clearWindowLifecycleStates(wcId);
       navAttemptSeqByWcId.delete(wcId);
       syncSettingsBridgeBindings();
       originResolver.clearWebContents(wcId);

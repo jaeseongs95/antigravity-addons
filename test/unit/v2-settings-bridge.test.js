@@ -496,12 +496,16 @@ test('TC-V211-003 (I4 + I10): Kernel resists World 998 prototype tampering, gate
   assert.equal(trustedHandle.invokeAction('p-restricted', 'public-op'), 'PUBLIC_OK');
   assert.equal(trustedHandle.invokeAction('p-trusted', 'secret-op'), 'SECRET_OK');
 
-  // I4: Prototype tampering by restricted plugin MUST NOT hijack stagedHandles or deepFreezeClone
+  // I4 (F-I4-1 + F-I4-2): Prototype & Object.freeze / Set.prototype.size tampering MUST NOT steal handles or drop pushes
   const origMapGet = Map.prototype.get;
   const origMapSet = Map.prototype.set;
   const origObjFreeze = Object.freeze;
   const origObjKeys = Object.keys;
+  const origSetSizeDesc = Object.getOwnPropertyDescriptor(Set.prototype, 'size');
   let hijackAttempts = 0;
+  let stolenHandle = null;
+  let pushedRevisions = [];
+  trustedHandle.onSettingsChange((s) => pushedRevisions.push(s.revision));
   try {
     Map.prototype.get = function () {
       hijackAttempts += 1;
@@ -513,19 +517,42 @@ test('TC-V211-003 (I4 + I10): Kernel resists World 998 prototype tampering, gate
     };
     Object.freeze = (o) => {
       hijackAttempts += 1;
+      if (o && typeof o === 'object' && o.pluginId === 'p-trusted-late') {
+        stolenHandle = o;
+      }
       return o;
     };
     Object.keys = () => {
       hijackAttempts += 1;
       return [];
     };
+    Object.defineProperty(Set.prototype, 'size', {
+      configurable: true,
+      get() {
+        hijackAttempts += 1;
+        return 0;
+      },
+    });
 
+    // F-I4-1: Late-staged trusted handle MUST NOT leak through hooked global Object.freeze
+    const lateStage = kernel.stagePluginHandle(
+      { pluginId: 'p-trusted-late', trustLevel: 'trusted', hasSettingsBridge: true },
+      hostToken,
+      { status: 'ok', data: { enabled: true, provider: 'local-llm' }, revision: 1 }
+    );
+    const lateHandle = kernel.consumeStagedHandle(lateStage.runNonce);
+    assert.equal(stolenHandle, null, 'F-I4-1: hooked Object.freeze must not steal trusted handle');
+    assert.equal(Object.isFrozen(lateHandle), true);
+
+    // F-I4-2: Tampered Set.prototype.size -> 0 MUST NOT suppress pushPluginSettings delivery
     const pushRes = kernel.pushPluginSettings(
       'p-trusted',
       { status: 'ok', data: { enabled: false, provider: 'local-llm' }, revision: 2 },
       hostToken
     );
     assert.equal(pushRes.ok, true);
+    assert.equal(pushRes.delivered, 1, 'F-I4-2: pushPluginSettings must deliver despite Set.prototype.size tamper');
+    assert.deepEqual(pushedRevisions, [2]);
     const snap = trustedHandle.getSettings();
     assert.equal(snap.revision, 2);
     assert.equal(snap.data.enabled, false);
@@ -536,6 +563,8 @@ test('TC-V211-003 (I4 + I10): Kernel resists World 998 prototype tampering, gate
     Map.prototype.set = origMapSet;
     Object.freeze = origObjFreeze;
     Object.keys = origObjKeys;
+    if (origSetSizeDesc) Object.defineProperty(Set.prototype, 'size', origSetSizeDesc);
+    kernel.disposePlugin('p-trusted-late', hostToken);
   }
 
   // I10: disposePlugin runs onDispose BEFORE marking handle disposed so removeStyle succeeds cleanly

@@ -1739,8 +1739,10 @@ const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
 const _ObjectKeys = Object.keys;
 const _ObjectFreeze = Object.freeze;
 const _ObjectDefineProperty = Object.defineProperty;
+const _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const _ArrayIsArray = Array.isArray;
 const _ArrayFrom = Array.from;
+const _ArrayPush = Function.prototype.call.bind(Array.prototype.push);
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
 const _MapSet = Function.prototype.call.bind(Map.prototype.set);
@@ -1753,10 +1755,22 @@ const _SetHas = Function.prototype.call.bind(Set.prototype.has);
 const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
 const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
 const _SetValues = Function.prototype.call.bind(Set.prototype.values);
+const _SetSize = Function.prototype.call.bind(_ObjectGetOwnPropertyDescriptor(Set.prototype, 'size').get);
 const _WeakMap = WeakMap;
 const _WeakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
 const _WeakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
 const _WeakMapHas = Function.prototype.call.bind(WeakMap.prototype.has);
+const _Uint8Array = Uint8Array;
+const _NumberToString = Function.prototype.call.bind(Number.prototype.toString);
+const _StringPadStart = Function.prototype.call.bind(String.prototype.padStart);
+const _StringSlice = Function.prototype.call.bind(String.prototype.slice);
+const _DateNow = Date.now;
+const _MathRandom = Math.random;
+const _GlobalCrypto = typeof globalThis !== 'undefined' && globalThis.crypto ? globalThis.crypto : null;
+const _CryptoGetRandomValues =
+  _GlobalCrypto && typeof _GlobalCrypto.getRandomValues === 'function'
+    ? Function.prototype.bind.call(_GlobalCrypto.getRandomValues, _GlobalCrypto)
+    : null;
 
 const FORBIDDEN_CLONE_KEYS = new _Set(['__proto__', 'constructor', 'prototype']);
 
@@ -1823,18 +1837,22 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   function generateRunNonce() {
     nonceSeq += 1;
     try {
-      const cryptoObj = (win && win.crypto) || (typeof globalThis !== 'undefined' && globalThis.crypto);
-      if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
-        const bytes = new Uint8Array(16);
-        cryptoObj.getRandomValues(bytes);
+      const getRandom =
+        _CryptoGetRandomValues ||
+        (win && win.crypto && typeof win.crypto.getRandomValues === 'function'
+          ? (arr) => win.crypto.getRandomValues(arr)
+          : null);
+      if (getRandom) {
+        const bytes = new _Uint8Array(16);
+        getRandom(bytes);
         let hex = '';
         for (let i = 0; i < bytes.length; i++) {
-          hex += bytes[i].toString(16).padStart(2, '0');
+          hex += _StringPadStart(_NumberToString(bytes[i], 16), 2, '0');
         }
         return `rn-${nonceSeq}-${hex}`;
       }
     } catch (_e) {}
-    return `rn-${nonceSeq}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    return `rn-${nonceSeq}-${_NumberToString(_DateNow(), 36)}-${_StringSlice(_NumberToString(_MathRandom(), 36), 2)}-${_StringSlice(_NumberToString(_MathRandom(), 36), 2)}`;
   }
 
   function assertHostToken(providedToken) {
@@ -2005,7 +2023,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
     };
 
-    const handle = Object.freeze({
+    const handle = _ObjectFreeze({
       pluginId,
       version: pluginMeta.version || '0.0.0',
       trustLevel: effectiveTrustLevel,
@@ -2084,7 +2102,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
             if (effectiveTrustLevel !== 'trusted' && ownerTrust === 'trusted' && a.pluginId !== pluginId) {
               continue;
             }
-            out.push({ pluginId: a.pluginId, actionId: a.actionId, label: a.label });
+            _ArrayPush(out, { pluginId: a.pluginId, actionId: a.actionId, label: a.label });
           }
         }
         return out;
@@ -2212,7 +2230,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     const frozen = snapshot && typeof snapshot === 'object' ? deepFreezeClone(snapshot) : null;
     _MapSet(pluginSettingsSnapshots, pluginId, frozen);
     const subs = _MapGet(pluginSettingsListeners, pluginId);
-    if (!subs || subs.size === 0) {
+    if (!subs || _SetSize(subs) === 0) {
       return { ok: true, delivered: 0 };
     }
     let delivered = 0;
@@ -2245,7 +2263,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     return _MapDelete(stagedHandles, runNonce);
   }
 
-  const api = Object.freeze({
+  const api = _ObjectFreeze({
     boot,
     createPluginHandle,
     stagePluginHandle,
