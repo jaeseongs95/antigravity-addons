@@ -18,25 +18,30 @@ const { createRegionObserver } = require('./region-observer');
 const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
 
 // I4: Capture JS primordials BEFORE any plugin executes in shared Isolated World 998
+const _Error = Error;
+const _String = String;
+const _Number = Number;
+const _ReflectApply = Reflect.apply;
 const _ObjectKeys = Object.keys;
 const _ObjectFreeze = Object.freeze;
 const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const _ArrayIsArray = Array.isArray;
-const _ArrayFrom = Array.from;
 const _ArrayPush = Function.prototype.call.bind(Array.prototype.push);
+const _ArrayShift = Function.prototype.call.bind(Array.prototype.shift);
+const _ArraySlice = Function.prototype.call.bind(Array.prototype.slice);
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
 const _MapSet = Function.prototype.call.bind(Map.prototype.set);
 const _MapHas = Function.prototype.call.bind(Map.prototype.has);
 const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
-const _MapValues = Function.prototype.call.bind(Map.prototype.values);
+const _MapForEach = Function.prototype.call.bind(Map.prototype.forEach);
 const _Set = Set;
 const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
 const _SetHas = Function.prototype.call.bind(Set.prototype.has);
 const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
 const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
-const _SetValues = Function.prototype.call.bind(Set.prototype.values);
+const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
 const _SetSize = Function.prototype.call.bind(_ObjectGetOwnPropertyDescriptor(Set.prototype, 'size').get);
 const _WeakMap = WeakMap;
 const _WeakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
@@ -128,7 +133,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         const bytes = new _Uint8Array(16);
         getRandom(bytes);
         let hex = '';
-        for (let i = 0; i < bytes.length; i++) {
+        for (let i = 0; i < 16; i++) {
           hex += _StringPadStart(_NumberToString(bytes[i], 16), 2, '0');
         }
         return `rn-${nonceSeq}-${hex}`;
@@ -139,14 +144,14 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
   function assertHostToken(providedToken) {
     if (hostToken !== null && providedToken !== hostToken) {
-      throw new Error('ERR_FORBIDDEN_HOST_TOKEN');
+      throw new _Error('ERR_FORBIDDEN_HOST_TOKEN');
     }
   }
 
   function reportPluginError(pluginId, detail) {
-    const entry = { pluginId: String(pluginId || 'unknown'), detail: String(detail || '') };
-    recordedErrors.push(entry);
-    if (recordedErrors.length > 200) recordedErrors.shift();
+    const entry = { pluginId: _String(pluginId || 'unknown'), detail: _String(detail || '') };
+    _ArrayPush(recordedErrors, entry);
+    if (recordedErrors.length > 200) _ArrayShift(recordedErrors);
     if (hostBridge && typeof hostBridge.reportError === 'function') {
       try {
         hostBridge.reportError(entry.pluginId, entry.detail);
@@ -164,9 +169,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     if (typeof cfg.hostToken === 'string' && cfg.hostToken.length >= 16) {
       hostToken = cfg.hostToken;
     }
-    docGenId = Number(cfg.docGenId) || 1;
-    extraNoTranslateAttributes = Array.isArray(cfg.extraNoTranslateAttributes)
-      ? cfg.extraNoTranslateAttributes.slice()
+    docGenId = _Number(cfg.docGenId) || 1;
+    extraNoTranslateAttributes = _ArrayIsArray(cfg.extraNoTranslateAttributes)
+      ? _ArraySlice(cfg.extraNoTranslateAttributes)
       : [];
 
     // T-A Option A1: claim preload bridge ONCE per document generation
@@ -202,7 +207,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     regionObserver = createRegionObserver(doc, win);
     settingsTabs = createSettingsTabCoordinator();
     booted = true;
-    return { ok: true, alreadyBooted: false, docGenId, hasBridge: Boolean(hostBridge) };
+    return { ok: true, alreadyBooted: false, docGenId, hasBridge: !!hostBridge };
   }
 
   function addPluginDisposer(pluginId, fn) {
@@ -224,11 +229,15 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       // I10: Run registered onDispose callbacks BEFORE marking handle disposed so cleanup calls (e.g. removeStyle) succeed cleanly
       const set = _MapGet(pluginDisposers, pluginId);
       if (set) {
-        for (const fn of _ArrayFrom(_SetValues(set))) {
+        const fns = [];
+        _SetForEach(set, (fn) => {
+          _ArrayPush(fns, fn);
+        });
+        for (let i = 0; i < fns.length; i++) {
           try {
-            fn();
+            fns[i]();
           } catch (err) {
-            reportPluginError(pluginId, err && err.message ? err.message : String(err));
+            reportPluginError(pluginId, err && err.message ? err.message : _String(err));
           }
         }
         _SetClear(set);
@@ -236,9 +245,13 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       }
       const markers = _MapGet(pluginMarkDisposed, pluginId);
       if (markers) {
-        for (const mark of _ArrayFrom(_SetValues(markers))) {
+        const marks = [];
+        _SetForEach(markers, (mark) => {
+          _ArrayPush(marks, mark);
+        });
+        for (let i = 0; i < marks.length; i++) {
           try {
-            mark();
+            marks[i]();
           } catch (_e) {}
         }
         _SetClear(markers);
@@ -272,11 +285,11 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   function createPluginHandle(pluginMeta, token, initialSettingsSnapshot = null) {
     assertHostToken(token);
     if (!booted) {
-      throw new Error('ERR_KERNEL_NOT_BOOTED');
+      throw new _Error('ERR_KERNEL_NOT_BOOTED');
     }
     const pluginId = pluginMeta.pluginId;
     const effectiveTrustLevel = pluginMeta.trustLevel || 'restricted';
-    const hasSettingsBridge = Boolean(pluginMeta.hasSettingsBridge && effectiveTrustLevel === 'trusted');
+    const hasSettingsBridge = !!(pluginMeta.hasSettingsBridge && effectiveTrustLevel === 'trusted');
     let disposed = false;
 
     _MapSet(pluginTrustLevels, pluginId, effectiveTrustLevel);
@@ -302,7 +315,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     });
 
     const assertActive = () => {
-      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
+      if (disposed) throw new _Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
     };
 
     const handle = _ObjectFreeze({
@@ -355,7 +368,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
       registerAction(actionId, spec = {}) {
         assertActive();
-        if (!actionId || typeof actionId !== 'string') throw new Error('ERR_INVALID_ACTION_ID');
+        if (!actionId || typeof actionId !== 'string') throw new _Error('ERR_INVALID_ACTION_ID');
         let map = _MapGet(pluginActions, pluginId);
         if (!map) {
           map = new _Map();
@@ -364,7 +377,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         const entry = {
           pluginId,
           actionId,
-          label: String(spec.label || actionId),
+          label: _String(spec.label || actionId),
           run: typeof spec.run === 'function' ? spec.run : null,
         };
         _MapSet(map, actionId, entry);
@@ -378,15 +391,15 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       listActions() {
         assertActive();
         const out = [];
-        for (const map of _MapValues(pluginActions)) {
-          for (const a of _MapValues(map)) {
+        _MapForEach(pluginActions, (map) => {
+          _MapForEach(map, (a) => {
             const ownerTrust = _MapGet(pluginTrustLevels, a.pluginId) || 'restricted';
             if (effectiveTrustLevel !== 'trusted' && ownerTrust === 'trusted' && a.pluginId !== pluginId) {
-              continue;
+              return;
             }
             _ArrayPush(out, { pluginId: a.pluginId, actionId: a.actionId, label: a.label });
-          }
-        }
+          });
+        });
         return out;
       },
 
@@ -394,12 +407,12 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         assertActive();
         const targetTrust = _MapGet(pluginTrustLevels, targetPluginId) || 'restricted';
         if (effectiveTrustLevel !== 'trusted' && targetTrust === 'trusted' && targetPluginId !== pluginId) {
-          throw new Error(`ERR_ACTION_TRUST_FORBIDDEN:${targetPluginId}:${actionId}`);
+          throw new _Error(`ERR_ACTION_TRUST_FORBIDDEN:${targetPluginId}:${actionId}`);
         }
         const map = _MapGet(pluginActions, targetPluginId);
         const a = map && _MapGet(map, actionId);
-        if (!a || !a.run) throw new Error(`ERR_ACTION_NOT_FOUND:${targetPluginId}:${actionId}`);
-        return a.run(...args);
+        if (!a || !a.run) throw new _Error(`ERR_ACTION_NOT_FOUND:${targetPluginId}:${actionId}`);
+        return _ReflectApply(a.run, undefined, args);
       },
 
       isElementInsideIgnored(nodeOrEvent, opts = {}) {
@@ -418,10 +431,10 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       onSettingsChange(callback) {
         assertActive();
         if (typeof callback !== 'function') {
-          throw new Error('ERR_INVALID_SETTINGS_CALLBACK');
+          throw new _Error('ERR_INVALID_SETTINGS_CALLBACK');
         }
         if (!hasSettingsBridge) {
-          throw new Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
+          throw new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
         }
         let subs = _MapGet(pluginSettingsListeners, pluginId);
         if (!subs) {
@@ -437,17 +450,17 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       addManagedListener(target, type, listener, opts) {
         assertActive();
         if (!target || typeof target.addEventListener !== 'function') {
-          throw new Error('ERR_INVALID_EVENT_TARGET');
+          throw new _Error('ERR_INVALID_EVENT_TARGET');
         }
         const safeListener = (ev) => {
           if (disposed) return;
           try {
             const ret = listener(ev);
             if (ret && typeof ret.then === 'function') {
-              ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : String(err)));
+              ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : _String(err)));
             }
           } catch (err) {
-            reportPluginError(pluginId, err && err.message ? err.message : String(err));
+            reportPluginError(pluginId, err && err.message ? err.message : _String(err));
           }
         };
         target.addEventListener(type, safeListener, opts);
@@ -468,13 +481,13 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
           const ret = fn();
           if (ret && typeof ret.then === 'function') {
             return ret.catch((err) => {
-              reportPluginError(pluginId, err && err.message ? err.message : String(err));
+              reportPluginError(pluginId, err && err.message ? err.message : _String(err));
               return undefined;
             });
           }
           return ret;
         } catch (err) {
-          reportPluginError(pluginId, err && err.message ? err.message : String(err));
+          reportPluginError(pluginId, err && err.message ? err.message : _String(err));
           return undefined;
         }
       },
@@ -515,16 +528,20 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     if (!subs || _SetSize(subs) === 0) {
       return { ok: true, delivered: 0 };
     }
+    const cbs = [];
+    _SetForEach(subs, (cb) => {
+      _ArrayPush(cbs, cb);
+    });
     let delivered = 0;
-    for (const cb of _ArrayFrom(_SetValues(subs))) {
+    for (let i = 0; i < cbs.length; i++) {
       delivered += 1;
       try {
-        const ret = cb(frozen);
+        const ret = cbs[i](frozen);
         if (ret && typeof ret.then === 'function') {
-          ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : String(err)));
+          ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : _String(err)));
         }
       } catch (err) {
-        reportPluginError(pluginId, err && err.message ? err.message : String(err));
+        reportPluginError(pluginId, err && err.message ? err.message : _String(err));
       }
     }
     return { ok: true, delivered };
@@ -532,7 +549,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
   function consumeStagedHandle(runNonce) {
     if (typeof runNonce !== 'string' || !_MapHas(stagedHandles, runNonce)) {
-      throw new Error('ERR_INVALID_OR_CONSUMED_RUN_NONCE');
+      throw new _Error('ERR_INVALID_OR_CONSUMED_RUN_NONCE');
     }
     const entry = _MapGet(stagedHandles, runNonce);
     _MapDelete(stagedHandles, runNonce);
@@ -554,8 +571,8 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     clearStagedHandle,
     disposePlugin,
     reportPluginError,
-    getErrors: () => recordedErrors.slice(),
-    getBridgeStatus: () => ({ booted, docGenId, hasBridge: Boolean(hostBridge) }),
+    getErrors: () => _ArraySlice(recordedErrors),
+    getBridgeStatus: () => ({ booted, docGenId, hasBridge: !!hostBridge }),
     listSettingsTabs: () => (settingsTabs ? settingsTabs.listTabs() : []),
   });
 

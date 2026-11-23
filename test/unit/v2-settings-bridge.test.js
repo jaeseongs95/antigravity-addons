@@ -496,16 +496,27 @@ test('TC-V211-003 (I4 + I10): Kernel resists World 998 prototype tampering, gate
   assert.equal(trustedHandle.invokeAction('p-restricted', 'public-op'), 'PUBLIC_OK');
   assert.equal(trustedHandle.invokeAction('p-trusted', 'secret-op'), 'SECRET_OK');
 
-  // I4 (F-I4-1 + F-I4-2): Prototype & Object.freeze / Set.prototype.size tampering MUST NOT steal handles or drop pushes
+  // I4 (F-I4-1 + F-I4-2 + Iterator/Global): Prototype, Iterator, Object.freeze, Set.size & Boolean tampering MUST NOT hijack kernel
   const origMapGet = Map.prototype.get;
   const origMapSet = Map.prototype.set;
   const origObjFreeze = Object.freeze;
   const origObjKeys = Object.keys;
   const origSetSizeDesc = Object.getOwnPropertyDescriptor(Set.prototype, 'size');
+  const origArrIter = Array.prototype[Symbol.iterator];
+  const origArrPush = Array.prototype.push;
+  const setIterProto = Object.getPrototypeOf(new Set().values());
+  const mapIterProto = Object.getPrototypeOf(new Map().values());
+  const origSetIterNext = setIterProto.next;
+  const origMapIterNext = mapIterProto.next;
+  const origBoolean = globalThis.Boolean;
   let hijackAttempts = 0;
   let stolenHandle = null;
-  let pushedRevisions = [];
-  trustedHandle.onSettingsChange((s) => pushedRevisions.push(s.revision));
+  let lastPushedRev = null;
+  let pushCount = 0;
+  trustedHandle.onSettingsChange((s) => {
+    pushCount += 1;
+    lastPushedRev = s.revision;
+  });
   try {
     Map.prototype.get = function () {
       hijackAttempts += 1;
@@ -533,8 +544,28 @@ test('TC-V211-003 (I4 + I10): Kernel resists World 998 prototype tampering, gate
         return 0;
       },
     });
+    Array.prototype[Symbol.iterator] = function () {
+      hijackAttempts += 1;
+      return { next: () => ({ done: true, value: undefined }) };
+    };
+    Array.prototype.push = function () {
+      hijackAttempts += 1;
+      return 0;
+    };
+    setIterProto.next = function () {
+      hijackAttempts += 1;
+      return { done: true, value: undefined };
+    };
+    mapIterProto.next = function () {
+      hijackAttempts += 1;
+      return { done: true, value: undefined };
+    };
+    globalThis.Boolean = () => {
+      hijackAttempts += 1;
+      return false;
+    };
 
-    // F-I4-1: Late-staged trusted handle MUST NOT leak through hooked global Object.freeze
+    // F-I4-1 + Boolean tamper: Late-staged trusted handle MUST keep hasSettingsBridge:true and NOT leak via Object.freeze
     const lateStage = kernel.stagePluginHandle(
       { pluginId: 'p-trusted-late', trustLevel: 'trusted', hasSettingsBridge: true },
       hostToken,
@@ -542,28 +573,40 @@ test('TC-V211-003 (I4 + I10): Kernel resists World 998 prototype tampering, gate
     );
     const lateHandle = kernel.consumeStagedHandle(lateStage.runNonce);
     assert.equal(stolenHandle, null, 'F-I4-1: hooked Object.freeze must not steal trusted handle');
+    assert.equal(lateHandle.hasSettingsBridge, true, 'globalThis.Boolean tamper must not disable hasSettingsBridge');
     assert.equal(Object.isFrozen(lateHandle), true);
 
-    // F-I4-2: Tampered Set.prototype.size -> 0 MUST NOT suppress pushPluginSettings delivery
+    // listActions & invokeAction MUST resist MapIterator/Array.prototype[Symbol.iterator]/Array.prototype.push tamper
+    const actionsUnderTamper = trustedHandle.listActions();
+    assert.equal(actionsUnderTamper.length, 2);
+    assert.equal(trustedHandle.invokeAction('p-restricted', 'public-op', 'arg1'), 'PUBLIC_OK');
+
+    // F-I4-2 + SetIterator/ArrayIterator tamper: pushPluginSettings MUST deliver despite Set.size & iterator tamper
     const pushRes = kernel.pushPluginSettings(
       'p-trusted',
       { status: 'ok', data: { enabled: false, provider: 'local-llm' }, revision: 2 },
       hostToken
     );
     assert.equal(pushRes.ok, true);
-    assert.equal(pushRes.delivered, 1, 'F-I4-2: pushPluginSettings must deliver despite Set.prototype.size tamper');
-    assert.deepEqual(pushedRevisions, [2]);
+    assert.equal(pushRes.delivered, 1, 'F-I4-2: pushPluginSettings must deliver despite Set.size & iterator tamper');
+    assert.equal(pushCount, 1);
+    assert.equal(lastPushedRev, 2);
     const snap = trustedHandle.getSettings();
     assert.equal(snap.revision, 2);
     assert.equal(snap.data.enabled, false);
     assert.equal(Object.isFrozen(snap.data), true);
-    assert.equal(hijackAttempts, 0, 'Kernel must use captured primordials, zero tampered prototype calls');
+    assert.equal(hijackAttempts, 0, 'Kernel must use captured primordials, zero tampered prototype/iterator calls');
   } finally {
     Map.prototype.get = origMapGet;
     Map.prototype.set = origMapSet;
     Object.freeze = origObjFreeze;
     Object.keys = origObjKeys;
     if (origSetSizeDesc) Object.defineProperty(Set.prototype, 'size', origSetSizeDesc);
+    Array.prototype[Symbol.iterator] = origArrIter;
+    Array.prototype.push = origArrPush;
+    setIterProto.next = origSetIterNext;
+    mapIterProto.next = origMapIterNext;
+    globalThis.Boolean = origBoolean;
     kernel.disposePlugin('p-trusted-late', hostToken);
   }
 
