@@ -1,6 +1,3 @@
-* text=auto eol=lf
-*.json text eol=lf
-*.js text eol=lf
-*.mjs text eol=lf
-*.md text eol=lf
-*.yml text eol=lf
+*.cjs text eol=lf
+src/core/generated/** text eol=lf
+dist/runtime/** text eol=lf

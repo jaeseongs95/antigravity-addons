@@ -1,18 +1,24 @@
 'use strict';
 
 /**
- * Runtime- & vendor-neutral AddonManifest.v1 validator backed by Ajv JSON Schema,
- * injected `FileSystemPort` (`src/core/fs-port.js`) realpath confinement,
- * compatibility checks (hostProfile, minHostVersion), explicit trust model
- * (`trusted` | `restricted`), and document-transform scope enforcement.
+ * Runtime- & vendor-neutral AddonManifest v1/v2 validator backed by precompiled
+ * zero-dependency standalone JSON Schema validators, injected `FileSystemPort`
+ * realpath confinement, compatibility checks (hostProfile, minHostVersion),
+ * Default-Deny trust metadata (`strictTrustPolicy = true`), and v2 normalization.
  *
- * ZERO direct `node:fs` or `node:path` imports (SOLID DIP).
+ * ZERO direct `node:fs`, `node:path`, `node:os`, `node:child_process`, vendor,
+ * or runtime `ajv` imports (SOLID DIP — TC-001 / TC-023 / 0-dep AST gate).
  */
 
-const Ajv = require('ajv');
-const MANIFEST_SCHEMA = require('../../schemas/addon-manifest.v1.schema.json');
+const MANIFEST_SCHEMA_V1 = require('../../schemas/addon-manifest.v1.schema.json');
+const MANIFEST_SCHEMA_V2 = require('../../schemas/addon-manifest.v2.schema.json');
+const defaultValidateV1 = require('./generated/validate-v1.cjs');
+const defaultValidateV2 = require('./generated/validate-v2.cjs');
 const { assertFileSystemPort } = require('./fs-port');
+const { normalizeManifestToV2 } = require('./manifest-normalizer');
+const { getPrivilegedRequirements } = require('./trust-policy-port');
 
+const MANIFEST_SCHEMA = MANIFEST_SCHEMA_V1;
 const FORBIDDEN_IDS = new Set(['__proto__', 'constructor', 'prototype']);
 const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
 const SEMVER_RE =
@@ -174,10 +180,12 @@ function resolveConfinedScriptPath(
   }
 }
 
-function createManifestValidator({ schema = MANIFEST_SCHEMA, fsPort = null } = {}) {
+function createManifestValidator({ validators = null, fsPort = null } = {}) {
   const defaultFsPort = fsPort ? assertFileSystemPort(fsPort) : null;
-  const ajv = new Ajv({ allErrors: true, strict: false });
-  const validateSchema = ajv.compile(schema);
+  const compiled = {
+    1: (validators && validators[1]) || defaultValidateV1,
+    2: (validators && validators[2]) || defaultValidateV2,
+  };
 
   function validate(
     manifest,
@@ -186,12 +194,22 @@ function createManifestValidator({ schema = MANIFEST_SCHEMA, fsPort = null } = {
       checkFilesExist = false,
       hostProfileId = null,
       hostVersion = undefined,
-      strictTrustPolicy = false,
+      strictTrustPolicy = true,
       fsPort: callFsPort = null,
     } = {}
   ) {
     if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
       return { ok: false, reason: 'INVALID_MANIFEST_OBJECT', errors: ['Manifest must be a JSON object'] };
+    }
+
+    const schemaVer = manifest.schemaVersion;
+    const validateSchema = schemaVer === 1 ? compiled[1] : schemaVer === 2 ? compiled[2] : null;
+    if (!validateSchema) {
+      return {
+        ok: false,
+        reason: 'ERR_MANIFEST_SCHEMA_INVALID',
+        errors: [`/schemaVersion must be 1 or 2 (got ${String(schemaVer)})`],
+      };
     }
 
     const schemaOk = validateSchema(manifest);
@@ -278,6 +296,13 @@ function createManifestValidator({ schema = MANIFEST_SCHEMA, fsPort = null } = {
       seenSlotIds.add(s.slotId);
       if (s.slot === 'document-transform') {
         hasDocumentTransformSlot = true;
+        if (s.shadow === true) {
+          return {
+            ok: false,
+            reason: 'ERR_DOCUMENT_TRANSFORM_CANNOT_USE_SHADOW',
+            errors: ['document-transform slot cannot set shadow: true'],
+          };
+        }
         if (s.scope !== 'native-host-only') {
           return {
             ok: false,
@@ -295,27 +320,27 @@ function createManifestValidator({ schema = MANIFEST_SCHEMA, fsPort = null } = {
       }
     }
 
-    // Explicit trust policy enforcement (P1):
-    // - Declared `restricted` (or `strictTrustPolicy: true` without explicit `trusted`) CANNOT use
-    //   `mainHook` or `document-transform`.
-    // - Legacy v1.0 manifests omitting `trustLevel` stay compatible in non-strict mode while carrying
-    //   `implicitTrustLevel: true` so hosts/diagnostics can audit them.
+    // Declarative trust validation (v2 Default-Deny):
+    // - `strictTrustPolicy` defaults to `true`.
+    // - Omitting `trustLevel` under strict mode defaults to `restricted`, blocking `mainHook` and `document-transform`.
+    // - Declaring `trustLevel: "trusted"` passes static manifest validation with `requiresTrustApproval: true`;
+    //   actual runtime execution STILL requires host `trust-policy.json` SHA-256 pinning (TrustPolicyPort / TrustVerifier).
     const declaredTrust = manifest.trustLevel || null;
-    const requiresTrusted = caps.has('mainHook') || hasDocumentTransformSlot;
-    const effectiveTrustLevel = declaredTrust || (strictTrustPolicy ? 'restricted' : requiresTrusted ? 'trusted' : 'restricted');
+    const reqs = getPrivilegedRequirements(manifest);
+    const effectiveTrustLevel = declaredTrust || (strictTrustPolicy ? 'restricted' : reqs.hasMainHook || reqs.hasDocumentTransform ? 'trusted' : 'restricted');
     if (effectiveTrustLevel === 'restricted') {
       if (caps.has('mainHook')) {
         return {
           ok: false,
           reason: 'ERR_RESTRICTED_MAIN_HOOK_FORBIDDEN',
-          errors: ['Restricted plugins cannot declare "mainHook" capability; requires trustLevel: "trusted"'],
+          errors: ['Restricted plugins cannot declare "mainHook" capability; requires trustLevel: "trusted" and host trust approval'],
         };
       }
       if (hasDocumentTransformSlot) {
         return {
           ok: false,
           reason: 'ERR_RESTRICTED_DOCUMENT_TRANSFORM_FORBIDDEN',
-          errors: ['Restricted plugins cannot declare "document-transform" slot; requires trustLevel: "trusted"'],
+          errors: ['Restricted plugins cannot declare "document-transform" slot; requires trustLevel: "trusted" and host trust approval'],
         };
       }
     }
@@ -354,15 +379,21 @@ function createManifestValidator({ schema = MANIFEST_SCHEMA, fsPort = null } = {
       resolvedEntries.mainHookScript = res.resolvedPath;
     }
 
+    const normalizedManifest = normalizeManifestToV2(manifest);
+
     return {
       ok: true,
       pluginId: manifest.pluginId,
-      loadOrder: typeof manifest.loadOrder === 'number' ? manifest.loadOrder : 100,
+      sourceSchemaVersion: normalizedManifest.sourceSchemaVersion,
+      loadOrder: normalizedManifest.loadOrder,
       trustLevel: effectiveTrustLevel,
       implicitTrustLevel: !declaredTrust,
+      requiresTrustApproval: reqs.requiresTrustApproval,
+      privilegedCapabilities: reqs.privilegedCapabilities,
       hasDocumentTransformSlot,
       resolvedEntries,
-      manifest,
+      manifest: normalizedManifest,
+      rawManifest: manifest,
     };
   }
 
@@ -377,6 +408,8 @@ function validateAddonManifest(manifest, opts = {}) {
 
 module.exports = {
   MANIFEST_SCHEMA,
+  MANIFEST_SCHEMA_V1,
+  MANIFEST_SCHEMA_V2,
   FORBIDDEN_IDS,
   PLUGIN_ID_RE,
   validatePluginId,

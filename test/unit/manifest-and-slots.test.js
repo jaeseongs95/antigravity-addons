@@ -67,10 +67,43 @@ const MCP_MANAGER_MANIFEST = {
   loadOrder: 60,
 };
 
-test('TC-002: valid AddonManifest.v1 manifests for all 3 reference plugins pass schema & compatibility checks', () => {
+test('TC-002: valid AddonManifest.v1 manifests pass under compat mode and default strictTrustPolicy enforces trustLevel:"trusted" for privileged capabilities', () => {
+  // Default v2 strictTrustPolicy: true requires explicit trustLevel: 'trusted' for document-transform & mainHook
+  assert.equal(
+    validateAddonManifest(STATUSBAR_MANIFEST, { hostProfileId: 'antigravity-desktop', hostVersion: '2.0.0' }).ok,
+    true
+  );
+  assert.equal(
+    validateAddonManifest(KO_TRANSLATOR_MANIFEST, { hostProfileId: 'antigravity-desktop', hostVersion: '2.0.0' }).reason,
+    'ERR_RESTRICTED_DOCUMENT_TRANSFORM_FORBIDDEN'
+  );
+  assert.equal(
+    validateAddonManifest(MCP_MANAGER_MANIFEST, { hostProfileId: 'antigravity-desktop', hostVersion: '2.0.0' }).reason,
+    'ERR_RESTRICTED_MAIN_HOOK_FORBIDDEN'
+  );
+
+  // With explicit trustLevel: 'trusted', privileged v1 manifests pass validation & flag requiresTrustApproval: true
+  const trustedKo = validateAddonManifest(
+    { ...KO_TRANSLATOR_MANIFEST, trustLevel: 'trusted' },
+    { hostProfileId: 'antigravity-desktop', hostVersion: '2.0.0' }
+  );
+  assert.equal(trustedKo.ok, true);
+  assert.equal(trustedKo.requiresTrustApproval, true);
+  const trustedMcp = validateAddonManifest(
+    { ...MCP_MANAGER_MANIFEST, trustLevel: 'trusted' },
+    { hostProfileId: 'antigravity-desktop', hostVersion: '2.0.0' }
+  );
+  assert.equal(trustedMcp.ok, true);
+  assert.equal(trustedMcp.requiresTrustApproval, true);
+
+  // Explicit legacy compat mode (`strictTrustPolicy: false`) still validates all 3 v1 manifests
   for (const m of [KO_TRANSLATOR_MANIFEST, STATUSBAR_MANIFEST, MCP_MANAGER_MANIFEST]) {
-    const res = validateAddonManifest(m, { hostProfileId: 'antigravity-desktop', hostVersion: '1.0.0' });
-    assert.equal(res.ok, true, `Expected ${m.pluginId} manifest to be valid: ${JSON.stringify(res)}`);
+    const res = validateAddonManifest(m, {
+      hostProfileId: 'antigravity-desktop',
+      hostVersion: '1.0.0',
+      strictTrustPolicy: false,
+    });
+    assert.equal(res.ok, true, `Expected ${m.pluginId} manifest to be valid in compat mode: ${JSON.stringify(res)}`);
   }
 });
 
@@ -121,7 +154,11 @@ test('TC-003 (F4 & NB3): invalid schema, duplicate slotId in manifest, compatibi
   );
   assert.equal(
     validateAddonManifest(
-      { ...KO_TRANSLATOR_MANIFEST, compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '1.0.1-alpha.1' } },
+      {
+        ...KO_TRANSLATOR_MANIFEST,
+        trustLevel: 'trusted',
+        compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '1.0.1-alpha.1' },
+      },
       { hostProfileId: 'antigravity-desktop', hostVersion: '1.0.1-beta.1' }
     ).ok,
     true

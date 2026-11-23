@@ -125,9 +125,11 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
     assert.equal(inst.status, 'INSTALLED');
     assert.equal(isAsarHostInstalled(asarPath, ANTIGRAVITY_HOST_PROFILE), true);
     assert.equal(fs.statSync(asarPath).size, origBuf.length);
+    // v2.0.0: .orig and .orig.json live in BACKUPS_DIR, NOT alongside app.asar in resources/
+    assert.notEqual(path.dirname(inst.backupPath), path.dirname(asarPath));
 
     // Tamper .orig.json -> rollback must fail closed
-    const metaPath = `${asarPath}.v2.33.0.orig.json`;
+    const metaPath = `${inst.backupPath}.json`;
     const savedMeta = fs.readFileSync(metaPath, 'utf8');
     fs.writeFileSync(metaPath, JSON.stringify({ sha256: '0'.repeat(64), bytes: 1 }), 'utf8');
     assert.equal(rollbackAsarAddonHost(paths, ANTIGRAVITY_HOST_PROFILE).status, 'ERR_ORIG_META_MISMATCH');
@@ -142,7 +144,12 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
     const noIntPath = path.join(dir, 'no-int.asar');
     const noIntOrig = buildSyntheticAsar(noIntPath, { includeIntegrity: false });
     const noIntInst = installAsarAddonHost(
-      { ...paths, ASAR_PATH: noIntPath, ASAR_LOCK_PATH: path.join(dir, 'noint.lock') },
+      {
+        ...paths,
+        ASAR_PATH: noIntPath,
+        ASAR_LOCK_PATH: path.join(dir, 'noint.lock'),
+        BACKUPS_DIR: path.join(dir, 'backups-noint'),
+      },
       ANTIGRAVITY_HOST_PROFILE
     );
     assert.equal(noIntInst.status, 'INSTALLED');
@@ -186,32 +193,47 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
   }
 });
 
-test('TC-010 (F5): custom non-Antigravity HostProfile works across install, delta>0 comment stripping, .orig reinstall, and rollback', () => {
+test('TC-010 (F5): custom non-Antigravity HostProfile works across install, delta>0 comment stripping, .orig reinstall, and rollback (and rejects process.env anchor overrides)', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-custom-'));
   try {
-    const customProfile = Object.freeze({
-      id: 'acme-electron-app',
+    // v2.0.0 security: custom profile using process.env.* in mainAnchorReplacement MUST fail closed
+    const insecureProfile = Object.freeze({
+      id: 'acme-insecure',
       patchMarker: 'ACME_HOST_LOADER_V1',
-      loaderEnvVar: 'ACME_HOST_LOADER_PATH',
       mainEntry: 'dist/main.js',
       mainAnchorTarget: "app.on('web-contents-created', (_e, contents) => {",
       mainAnchorReplacement:
-        "app.on('web-contents-created', (_e, contents) => {\n// ACME_HOST_LOADER_V1\ntry{require(process.env.ACME_HOST_LOADER_PATH).attachWebContents(contents,app);}catch(_e){}",
-      legacyPatchMarkers: Object.freeze(['ACME_OLD_PATCH']),
+        "app.on('web-contents-created', (_e, contents) => {\n// ACME_HOST_LOADER_V1\ntry{require(process.env.ACME_HOST_LOADER_PATH).initMain(app);}catch(_e){}",
+      legacyPatchMarkers: Object.freeze([]),
       resolvePaths: () => ({}),
     });
-
     const asarPath = path.join(dir, 'app.asar');
     const origBuf = buildSyntheticAsar(asarPath, {
       version: '4.0.0',
-      anchorTarget: customProfile.mainAnchorTarget,
+      anchorTarget: insecureProfile.mainAnchorTarget,
     });
     const paths = {
       ASAR_PATH: asarPath,
       ASAR_LOCK_PATH: path.join(dir, 'asar.lock'),
+      BACKUPS_DIR: path.join(dir, 'backups'),
       ADDONS_DIR: path.join(dir, 'addons.d'),
       LOADER_SCRIPT_PATH: path.join(dir, 'loader.js'),
     };
+    assert.throws(
+      () => installAsarAddonHost(paths, insecureProfile),
+      /ERR_ANCHOR_ENV_OVERRIDE_FORBIDDEN/
+    );
+
+    const customProfile = Object.freeze({
+      id: 'acme-electron-app',
+      patchMarker: 'ACME_HOST_LOADER_V2',
+      mainEntry: 'dist/main.js',
+      mainAnchorTarget: "app.on('web-contents-created', (_e, contents) => {",
+      mainAnchorReplacement:
+        "app.on('web-contents-created', (_e, contents) => {\n// ACME_HOST_LOADER_V2\ntry{const _p=require('path').join(require('os').homedir(),'.acme','loader.js');if(require('path').isAbsolute(_p)&&require('fs').existsSync(_p))require(_p).initMain(app);}catch(_e){}",
+      legacyPatchMarkers: Object.freeze(['ACME_OLD_PATCH']),
+      resolvePaths: () => ({}),
+    });
 
     const inst = installAsarAddonHost(paths, customProfile);
     assert.equal(inst.status, 'INSTALLED');
@@ -565,7 +587,7 @@ test('TC-019 (P0): same-version Build A vs Build B mismatch fails closed (ERR_OR
     const instA = installAsarAddonHost(paths, ANTIGRAVITY_HOST_PROFILE);
     assert.equal(instA.status, 'INSTALLED');
     assert.equal(instA.origSha256, buildASha);
-    const metaPath = `${asarPath}.v2.33.0.orig.json`;
+    const metaPath = `${instA.backupPath}.json`;
     const metaA = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
     assert.equal(metaA.patchedSha256, instA.sha256);
     const patchedABuf = fs.readFileSync(asarPath);
@@ -596,8 +618,9 @@ test('TC-019 (P0): same-version Build A vs Build B mismatch fails closed (ERR_OR
     assert.equal(refreshed.ok, true);
     assert.equal(refreshed.status, 'INSTALLED');
     assert.equal(refreshed.asar.origSha256, buildBSha);
-    const archivedAPath = `${asarPath}.v2.33.0.${buildASha.slice(0, 8)}.orig`;
-    assert.equal(fs.existsSync(archivedAPath), true, 'P0: previous Build A .orig must be archived');
+    const backupsDir = path.dirname(instA.backupPath);
+    const archivedAPath = path.join(backupsDir, `app.asar.v2.33.0.${buildASha.slice(0, 8)}.orig`);
+    assert.equal(fs.existsSync(archivedAPath), true, 'P0: previous Build A .orig must be archived in BACKUPS_DIR');
     assert.deepEqual(fs.readFileSync(archivedAPath), buildABuf);
     assert.equal(lifecycle.diagnoseHost(ctx).healthy, true);
 
@@ -622,7 +645,7 @@ test('TC-019 (P0): same-version Build A vs Build B mismatch fails closed (ERR_OR
       version: '2.33.0',
       anchorTarget: '// missing anchor target so transform fails',
     });
-    const buildBOrigPath = `${asarPath}.v2.33.0.orig`;
+    const buildBOrigPath = refreshed.asar.backupPath;
     const buildBOrigBefore = fs.readFileSync(buildBOrigPath);
     const failedRefresh = installAsarAddonHost(
       { ...paths, ALLOW_REFRESH_ORIG: true },

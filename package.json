@@ -1,14 +1,18 @@
 {
   "name": "antigravity-native-addon-host",
-  "version": "1.1.0",
-  "description": "Vendor-independent native desktop addon host and shared plugin isolation contract (AddonManifest.v1) for Electron apps, with Antigravity Desktop as the default profile.",
+  "version": "2.0.0",
+  "description": "Vendor-independent native desktop addon host and shared plugin isolation contract (AddonManifest v1/v2) for Electron apps, with Antigravity Desktop as the default profile.",
   "license": "MIT",
   "main": "src/index.js",
   "bin": {
     "addon-host": "bin/addon-host.js"
   },
   "scripts": {
-    "test": "node --test",
+    "build:runtime": "node scripts/build-runtime.js",
+    "check:runtime": "node scripts/build-runtime.js --check",
+    "test": "node --test \"test/unit/**/*.test.js\" \"test/e2e/electron-real-runtime.test.js\"",
+    "test:e2e:isolated": "node scripts/e2e-isolated-runtime.cjs",
+    "test:all": "npm run check:runtime && npm test && npm run test:e2e:isolated",
     "status": "node ./bin/addon-host.js --status",
     "doctor": "node ./bin/addon-host.js --doctor"
   },

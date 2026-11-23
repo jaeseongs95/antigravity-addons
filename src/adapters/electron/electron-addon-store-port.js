@@ -1,10 +1,14 @@
 'use strict';
 
 /**
- * Electron implementation of `AddonStorePort` (ISP / DIP / SRP).
- * Owns manifest directory planning, locked atomic registration/unregistration,
- * duplicate non-canonical manifest cleanup with strict ADDONS_DIR confinement (R10-NB1),
- * injected Node FileSystemPort binding, and loader script refresh.
+ * Electron implementation of `AddonStorePort` (ISP / DIP / SRP — v2.0.0).
+ *
+ * - Owns manifest directory planning, locked atomic registration/unregistration,
+ *   and duplicate non-canonical manifest cleanup with strict ADDONS_DIR confinement.
+ * - Default `strictTrustPolicy = true` (D-R4-7).
+ * - ZERO host loader / runtime file rewrites during register/unregister (D-R4-6):
+ *   `HostLifecyclePort` is the single writer of `LOADER_SCRIPT_PATH` & `RUNTIME_DIR`.
+ * - Strictly decoupled from archive patching and AST parsing (`TC-001d`).
  */
 
 const fs = require('node:fs');
@@ -21,7 +25,6 @@ const {
 const {
   loadRawManifestsFromDir,
   collectExecutableAddons,
-  buildHostLoaderScriptSource,
 } = require('./host-loader-builder');
 
 function isDirectChildOfDir(dirPath, candidatePath) {
@@ -35,7 +38,7 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
   const activeFsPort = fsPort || createNodeFileSystemPort();
 
   return Object.freeze({
-    planAddons(ctx, { checkFilesExist = true, hostVersion = pkg.version, strictTrustPolicy = false } = {}) {
+    planAddons(ctx, { checkFilesExist = true, hostVersion = pkg.version, strictTrustPolicy = true } = {}) {
       const { activeProfile, paths } = ctx;
       return collectExecutableAddons(paths, {
         checkFilesExist,
@@ -49,7 +52,7 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
     validateManifest(
       ctx,
       manifest,
-      { checkFilesExist = false, hostVersion = pkg.version, strictTrustPolicy = false } = {}
+      { checkFilesExist = false, hostVersion = pkg.version, strictTrustPolicy = true } = {}
     ) {
       const { activeProfile, paths } = ctx;
       return validateAddonManifest(manifest, {
@@ -67,9 +70,7 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
       manifest,
       {
         hostVersion = pkg.version,
-        strictTrustPolicy = false,
-        mainHookTimeoutMs = 5000,
-        rendererExecTimeoutMs = 10000,
+        strictTrustPolicy = true,
       } = {}
     ) {
       const { activeProfile, paths } = ctx;
@@ -93,7 +94,7 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
         const existingOther = existingEntries
           .map((e) => e.manifest)
           .filter((m) => m && typeof m.pluginId === 'string' && m.pluginId !== manifest.pluginId);
-        const slotCheck = detectSlotConflicts([...existingOther, manifest]);
+        const slotCheck = detectSlotConflicts([...existingOther, check.manifest]);
         if (!slotCheck.ok) {
           return { ok: false, reason: slotCheck.conflicts[0].code, conflicts: slotCheck.conflicts };
         }
@@ -102,7 +103,6 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
         if (!isDirectChildOfDir(paths.ADDONS_DIR, targetPath)) {
           return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
         }
-        // R10-NB1: Symmetric isDirectChildOfDir confinement on non-canonical manifest cleanup
         for (const entry of existingEntries) {
           if (
             entry.manifest &&
@@ -116,19 +116,11 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
         }
 
         writeAtomicSync(targetPath, JSON.stringify(manifest, null, 2) + '\n');
-        writeAtomicSync(
-          paths.LOADER_SCRIPT_PATH,
-          buildHostLoaderScriptSource(paths, activeProfile, {
-            hostVersion,
-            strictTrustPolicy,
-            mainHookTimeoutMs,
-            rendererExecTimeoutMs,
-          })
-        );
         return {
           ok: true,
           pluginId: manifest.pluginId,
           trustLevel: check.trustLevel,
+          requiresTrustApproval: Boolean(check.requiresTrustApproval),
           manifestPath: targetPath,
         };
       } finally {
@@ -136,17 +128,8 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
       }
     },
 
-    unregisterManifest(
-      ctx,
-      pluginId,
-      {
-        hostVersion = pkg.version,
-        strictTrustPolicy = false,
-        mainHookTimeoutMs = 5000,
-        rendererExecTimeoutMs = 10000,
-      } = {}
-    ) {
-      const { activeProfile, paths } = ctx;
+    unregisterManifest(ctx, pluginId) {
+      const { paths } = ctx;
       const idCheck = validatePluginId(pluginId);
       if (!idCheck.ok) {
         return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID', detail: idCheck.reason };
@@ -180,17 +163,6 @@ function createElectronAddonStorePort({ fsPort = null } = {}) {
         }
         for (const filePath of toDelete) {
           if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        }
-        if (paths.LOADER_SCRIPT_PATH && fs.existsSync(paths.LOADER_SCRIPT_PATH)) {
-          writeAtomicSync(
-            paths.LOADER_SCRIPT_PATH,
-            buildHostLoaderScriptSource(paths, activeProfile, {
-              hostVersion,
-              strictTrustPolicy,
-              mainHookTimeoutMs,
-              rendererExecTimeoutMs,
-            })
-          );
         }
         return { ok: true, removed: true, removedCount: toDelete.size, pluginId };
       } finally {

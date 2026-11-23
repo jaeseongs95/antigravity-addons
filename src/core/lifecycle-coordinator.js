@@ -2,8 +2,9 @@
 
 /**
  * Vendor- & runtime-neutral Addon Lifecycle Coordinator.
- * - Validates every manifest against Ajv schema, injected FileSystemPort confinement,
- *   host compatibility, and trust policy (`trusted` | `restricted`).
+ * - Validates every v1/v2 manifest against precompiled standalone JSON schemas,
+ *   injected FileSystemPort confinement, host compatibility, and Default-Deny trust policy.
+ * - Normalizes every active manifest into the unified v2 representation.
  * - Deterministic sorting by (loadOrder ASC, pluginId ASC).
  * - Filters out disabled plugins via injected `isEnabled(pluginId)` read-only gate.
  * - Isolates invalid manifests and slot/namespace/IPC conflicts without blocking healthy peers.
@@ -18,8 +19,8 @@ function planAddonExecution(
     pluginsRootDir = null,
     checkFilesExist = false,
     hostProfileId = null,
-    hostVersion = null,
-    strictTrustPolicy = false,
+    hostVersion = undefined,
+    strictTrustPolicy = true,
     fsPort = null,
     isEnabled = () => true,
   } = {}
