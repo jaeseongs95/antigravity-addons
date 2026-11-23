@@ -23,7 +23,7 @@
 ## 보안 및 격리 위협 모델
 
 - **렌더러 격리 (World `998` — 공존 및 심층 방어)**: 플러그인은 Page World `0` 및 Electron 프리로드 World `999`와 분리된 Isolated World `998`에서 호스트 토큰으로 보호되는 비가변 커널, Option B2 Shadow DOM 슬롯, 엄격한 CSS 살균기와 함께 실행됩니다. 이는 호스트 앱과 플러그인 간의 공존 및 심층 방어(Coexistence + Defense-in-Depth)를 제공하며, 동일 렌더러 프로세스 내 적대적 멀티테넌트 OS 샌드박스를 대체하지는 않습니다.
-- **`mainHook` 신뢰 경계 (SHA-256 핀닝 기반 신뢰 코드)**: `mainHook`은 기본 거부(`strictTrustPolicy: true`) 정책을 따르며, 사용자가 `addon-host trust approve <pluginId>`로 명시적 승인한 SHA-256 핀닝 번들만 메모리 기반 CJS 로더로 메인 프로세스에서 실행됩니다(디스크 TOCTOU 변조 및 비인가 외부 `require` 차단). 별도 프로세스 수준의 완전 격리(`SidecarBridge`)는 `Option S1` 결정에 따라 **`v2.1.0`**으로 이월되었습니다.
+- **`mainHook` 신뢰 경계 (SHA-256 핀닝 기반 신뢰 코드)**: `mainHook`은 기본 거부(`strictTrustPolicy: true`) 정책을 따르며, 사용자가 `addon-host trust approve <pluginId>`로 명시적 승인한 SHA-256 핀닝 번들만 메모리 기반 CJS 로더로 메인 프로세스에서 실행됩니다(디스크 TOCTOU 변조 및 비인가 외부 `require` 차단). **`v2.1.0`**에서는 호스트 설정 전달만 필요한 플러그인이 `mainHook`을 완전히 제거하고 단방향 읽기 전용 `settingsBridge`를 사용할 수 있으며, 양방향 OS 프로세스 RPC(`SidecarBridge`)는 향후 마이너 버전으로 이연되어 있습니다.
 
 ## 빠른 시작
 

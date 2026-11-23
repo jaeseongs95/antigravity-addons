@@ -41,7 +41,8 @@ function parseSafeJson(rawText) {
 }
 
 function serializeSafeInlineJson(value) {
-  return JSON.stringify(value)
+  const raw = JSON.stringify(value === undefined ? null : value);
+  return String(raw === undefined ? 'null' : raw)
     .replace(/</g, '\\u003c')
     .replace(/>/g, '\\u003e')
     .replace(/&/g, '\\u0026')

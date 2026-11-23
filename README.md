@@ -23,7 +23,7 @@
 ## Security & Isolation Threat Model
 
 - **Renderer Isolation (World `998` — Coexistence + Defense-in-Depth)**: Plugins execute in Electron Isolated World `998` (separated from Page World `0` and Electron preload World `999`) with a non-writable, host-token-authenticated kernel, Option B2 Shadow DOM slots, and strict CSS sanitization. This provides strong coexistence and defense-in-depth between well-behaved or buggy plugins and the host app; it is **not** a hostile multi-tenant OS sandbox between plugins sharing the same renderer process.
-- **`mainHook` Trust Boundary (SHA-256 Pinned Node Code)**: `mainHook` is strictly Default-Deny (`strictTrustPolicy: true`). Only explicitly user-approved (`addon-host trust approve <pluginId>`), SHA-256-pinned bundles execute in the Main process via the memory-backed CommonJS loader (eliminating disk TOCTOU tampering and accidental external requires). Full OS-process isolation for out-of-process services (`SidecarBridge`) is intentionally deferred to **`v2.1.0`** (`Option S1`).
+- **`mainHook` Trust Boundary (SHA-256 Pinned Node Code)**: `mainHook` is strictly Default-Deny (`strictTrustPolicy: true`). Only explicitly user-approved (`addon-host trust approve <pluginId>`), SHA-256-pinned bundles execute in the Main process via the memory-backed CommonJS loader (eliminating disk TOCTOU tampering and accidental external requires). In **`v2.1.0`**, plugins that only need host-persisted settings can drop `mainHook` completely and use the unidirectional read-only `settingsBridge` (full multi-process RPC `SidecarBridge` remains deferred to a future minor release).
 
 ## Quick Start
 

@@ -183,175 +183,196 @@ function createRendererInjector({
 
     // Dispose any previously injected plugins that are now disabled/unregistered
     const hostToken = hostTokensByWcId.get(wcId) || null;
-    for (const oldId of Array.from(injectedSet)) {
-      if (!isStillCurrent()) return;
-      if (!activeIds.has(oldId)) {
-        try {
-          await execInWorld(
-            contents,
-            `globalThis.__addonHostKernel && globalThis.__addonHostKernel.disposePlugin(${JSON.stringify(oldId)}, ${JSON.stringify(hostToken)})`,
-            `dispose:${oldId}`
-          );
-          injectedSet.delete(oldId);
-          trustedSettingsMap.delete(oldId);
-          lifecycleStates.set(oldId, LIFECYCLE_STATES.DISPOSED);
-        } catch (err) {
-          if (!isStillCurrent()) return;
-          recordRendererError(oldId, err && err.message ? err.message : String(err));
-        }
-      }
-    }
-
-    // Inject active plugins in deterministic loadOrder (Single-Buffer Read-Then-Execute + S-1 CSP-safe two-phase staged handle)
-    for (const addon of activeRendererAddons) {
-      if (!isStillCurrent()) return;
-      if (injectedSet.has(addon.pluginId)) continue;
-
-      const scriptPath = addon.resolvedEntries.rendererScript;
-      if (!scriptPath || !fs.existsSync(scriptPath)) {
-        recordDiag('warn', 'RENDERER_SCRIPT_MISSING', addon.pluginId);
-        continue;
-      }
-
-      const verified = readVerifiedRendererScript(scriptPath, addon.manifest, policy, {
-        strictTrustPolicy,
-      });
-      if (!verified.ok) {
-        lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
-        recordDiag('warn', 'RENDERER_TRUST_REJECTED', `${addon.pluginId}: ${verified.reason}`);
-        continue;
-      }
-
-      const settingsSpec =
-        addon.manifest.settingsBridge &&
-        typeof addon.manifest.settingsBridge === 'object' &&
-        typeof addon.manifest.settingsBridge.fileName === 'string' &&
-        addon.manifest.settingsBridge.fileName.length > 0
-          ? addon.manifest.settingsBridge
-          : null;
-      const hasSettingsBridge = Boolean(settingsSpec && verified.effectiveTrustLevel === 'trusted');
-      const initialSettingsSnapshot =
-        hasSettingsBridge && settingsBridge && typeof settingsBridge.readSnapshotForPlugin === 'function'
-          ? settingsBridge.readSnapshotForPlugin(addon.pluginId, settingsSpec)
-          : null;
-
-      const pluginMeta = {
-        pluginId: addon.pluginId,
-        version: addon.manifest.version,
-        sourceSchemaVersion: addon.manifest.sourceSchemaVersion || 2,
-        trustLevel: verified.effectiveTrustLevel,
-        hasDocumentTransformSlot: Boolean(addon.hasDocumentTransformSlot),
-        hasSettingsBridge,
-        uiSlots: addon.manifest.uiSlots || [],
-        isolation: addon.manifest.isolation || {},
-      };
-
-      // Phase 1 (Host-only): authenticate with hostToken and stage handle behind a single-use runNonce
-      let stageRes;
-      try {
-        stageRes = await execInWorld(
-          contents,
-          `(() => {
-            if (!globalThis.__addonHostKernel) return { ok: false, reason: 'NO_KERNEL' };
-            return globalThis.__addonHostKernel.stagePluginHandle(${serializeSafeInlineJson(pluginMeta)}, ${JSON.stringify(hostToken)}, ${serializeSafeInlineJson(initialSettingsSnapshot)});
-          })()`,
-          `stage:${addon.pluginId}`
-        );
-      } catch (stageErr) {
+    try {
+      for (const oldId of Array.from(injectedSet)) {
         if (!isStillCurrent()) return;
-        injectedSet.add(addon.pluginId);
-        lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
-        recordRendererError(addon.pluginId, stageErr && stageErr.message ? stageErr.message : String(stageErr));
-        continue;
-      }
-
-      if (!isStillCurrent()) {
-        if (stageRes && stageRes.ok && stageRes.runNonce) {
+        if (!activeIds.has(oldId)) {
           try {
             await execInWorld(
               contents,
-              `globalThis.__addonHostKernel && globalThis.__addonHostKernel.clearStagedHandle(${JSON.stringify(stageRes.runNonce)}, ${JSON.stringify(hostToken)})`,
-              `clear-staged-abort:${addon.pluginId}`
+              `globalThis.__addonHostKernel && globalThis.__addonHostKernel.disposePlugin(${JSON.stringify(oldId)}, ${JSON.stringify(hostToken)})`,
+              `dispose:${oldId}`
             );
-          } catch (_c) {}
-        }
-        return;
-      }
-
-      if (!stageRes || !stageRes.ok || typeof stageRes.runNonce !== 'string') {
-        injectedSet.add(addon.pluginId);
-        lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
-        recordRendererError(addon.pluginId, (stageRes && stageRes.reason) || 'ERR_STAGE_HANDLE_FAILED');
-        continue;
-      }
-
-      const runNonce = stageRes.runNonce;
-
-      // Phase 2 (Plugin-only, ZERO hostToken in script text, strict mode, CSP-safe without new Function/eval)
-      const runCode = `(async () => {
-        'use strict';
-        if (!globalThis.__addonHostKernel) return { ok: false, reason: 'NO_KERNEL' };
-        const __h = globalThis.__addonHostKernel.consumeStagedHandle(${JSON.stringify(runNonce)});
-        try {
-          const __fn = (function(addonHost) {
-            'use strict';
-${verified.source}
-          });
-          const __ret = __fn(__h);
-          if (__ret && typeof __ret.then === 'function') {
-            await __ret;
+            injectedSet.delete(oldId);
+            trustedSettingsMap.delete(oldId);
+            lifecycleStates.set(oldId, LIFECYCLE_STATES.DISPOSED);
+          } catch (err) {
+            if (!isStillCurrent()) return;
+            recordRendererError(oldId, err && err.message ? err.message : String(err));
           }
-          return { ok: true };
-        } catch (e) {
-          try { __h.dispose(); } catch (_d) {}
-          globalThis.__addonHostKernel.reportPluginError(${JSON.stringify(addon.pluginId)}, e && e.message ? e.message : String(e));
-          return { ok: false, error: e && e.message ? e.message : String(e) };
         }
-      })()`;
+      }
 
-      try {
-        const execRes = await execInWorld(contents, runCode, `plugin:${addon.pluginId}`);
+      // Inject active plugins in deterministic loadOrder (Single-Buffer Read-Then-Execute + S-1 CSP-safe two-phase staged handle)
+      for (const addon of activeRendererAddons) {
         if (!isStillCurrent()) return;
-        if (execRes && execRes.ok) {
+        if (injectedSet.has(addon.pluginId)) continue;
+
+        const scriptPath = addon.resolvedEntries.rendererScript;
+        if (!scriptPath || !fs.existsSync(scriptPath)) {
+          recordDiag('warn', 'RENDERER_SCRIPT_MISSING', addon.pluginId);
+          continue;
+        }
+
+        const verified = readVerifiedRendererScript(scriptPath, addon.manifest, policy, {
+          strictTrustPolicy,
+        });
+        if (!verified.ok) {
+          lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
+          recordDiag('warn', 'RENDERER_TRUST_REJECTED', `${addon.pluginId}: ${verified.reason}`);
+          continue;
+        }
+
+        const settingsSpec =
+          addon.manifest.settingsBridge &&
+          typeof addon.manifest.settingsBridge === 'object' &&
+          typeof addon.manifest.settingsBridge.fileName === 'string' &&
+          addon.manifest.settingsBridge.fileName.length > 0
+            ? addon.manifest.settingsBridge
+            : null;
+        const hasSettingsBridge = Boolean(settingsSpec && verified.effectiveTrustLevel === 'trusted');
+        const initialSettingsSnapshot =
+          hasSettingsBridge && settingsBridge && typeof settingsBridge.readSnapshotForPlugin === 'function'
+            ? settingsBridge.readSnapshotForPlugin(addon.pluginId, settingsSpec)
+            : null;
+
+        const pluginMeta = {
+          pluginId: addon.pluginId,
+          version: addon.manifest.version,
+          sourceSchemaVersion: addon.manifest.sourceSchemaVersion || 2,
+          trustLevel: verified.effectiveTrustLevel,
+          hasDocumentTransformSlot: Boolean(addon.hasDocumentTransformSlot),
+          hasSettingsBridge,
+          uiSlots: addon.manifest.uiSlots || [],
+          isolation: addon.manifest.isolation || {},
+        };
+
+        // Phase 1 (Host-only): authenticate with hostToken and stage handle behind a single-use runNonce
+        let stageRes;
+        try {
+          stageRes = await execInWorld(
+            contents,
+            `(() => {
+              if (!globalThis.__addonHostKernel) return { ok: false, reason: 'NO_KERNEL' };
+              return globalThis.__addonHostKernel.stagePluginHandle(${serializeSafeInlineJson(pluginMeta)}, ${JSON.stringify(hostToken)}, ${serializeSafeInlineJson(initialSettingsSnapshot)});
+            })()`,
+            `stage:${addon.pluginId}`
+          );
+        } catch (stageErr) {
+          if (!isStillCurrent()) return;
           injectedSet.add(addon.pluginId);
-          if (hasSettingsBridge && settingsSpec) {
-            trustedSettingsMap.set(addon.pluginId, {
-              pluginId: addon.pluginId,
-              fileName: settingsSpec.fileName,
-              maxBytes: settingsSpec.maxBytes,
-            });
+          lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
+          recordRendererError(addon.pluginId, stageErr && stageErr.message ? stageErr.message : String(stageErr));
+          continue;
+        }
+
+        if (!isStillCurrent()) {
+          if (stageRes && stageRes.ok && stageRes.runNonce) {
+            try {
+              await execInWorld(
+                contents,
+                `globalThis.__addonHostKernel && globalThis.__addonHostKernel.clearStagedHandle(${JSON.stringify(stageRes.runNonce)}, ${JSON.stringify(hostToken)})`,
+                `clear-staged-abort:${addon.pluginId}`
+              );
+            } catch (_c) {}
           }
-          lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.ACTIVE);
-        } else {
+          return;
+        }
+
+        if (!stageRes || !stageRes.ok || typeof stageRes.runNonce !== 'string') {
+          injectedSet.add(addon.pluginId);
+          lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
+          recordRendererError(addon.pluginId, (stageRes && stageRes.reason) || 'ERR_STAGE_HANDLE_FAILED');
+          continue;
+        }
+
+        const runNonce = stageRes.runNonce;
+
+        // Phase 2 (Plugin-only, ZERO hostToken in script text, strict mode, CSP-safe without new Function/eval)
+        const runCode = `(async () => {
+          'use strict';
+          if (!globalThis.__addonHostKernel) return { ok: false, reason: 'NO_KERNEL' };
+          const __h = globalThis.__addonHostKernel.consumeStagedHandle(${JSON.stringify(runNonce)});
+          try {
+            const __fn = (function(addonHost) {
+              'use strict';
+${verified.source}
+            });
+            const __ret = __fn(__h);
+            if (__ret && typeof __ret.then === 'function') {
+              await __ret;
+            }
+            return { ok: true };
+          } catch (e) {
+            try { __h.dispose(); } catch (_d) {}
+            globalThis.__addonHostKernel.reportPluginError(${JSON.stringify(addon.pluginId)}, e && e.message ? e.message : String(e));
+            return { ok: false, error: e && e.message ? e.message : String(e) };
+          }
+        })()`;
+
+        try {
+          const execRes = await execInWorld(contents, runCode, `plugin:${addon.pluginId}`);
+          if (!isStillCurrent()) return;
+          if (execRes && execRes.ok) {
+            injectedSet.add(addon.pluginId);
+            if (hasSettingsBridge && settingsSpec) {
+              trustedSettingsMap.set(addon.pluginId, {
+                pluginId: addon.pluginId,
+                fileName: settingsSpec.fileName,
+                maxBytes: settingsSpec.maxBytes,
+              });
+              // F1: Reconcile any settings file edit that arrived while async plugin startup ran
+              if (settingsBridge && typeof settingsBridge.readSnapshotForPlugin === 'function') {
+                const postSnap = settingsBridge.readSnapshotForPlugin(addon.pluginId, settingsSpec);
+                if (
+                  postSnap &&
+                  (!initialSettingsSnapshot ||
+                    postSnap.revision !== initialSettingsSnapshot.revision ||
+                    postSnap.sha256 !== initialSettingsSnapshot.sha256 ||
+                    postSnap.status !== initialSettingsSnapshot.status)
+                ) {
+                  await execInWorld(
+                    contents,
+                    `globalThis.__addonHostKernel && globalThis.__addonHostKernel.pushPluginSettings(${JSON.stringify(addon.pluginId)}, ${serializeSafeInlineJson(postSnap)}, ${JSON.stringify(hostToken)})`,
+                    `settings-catchup:${addon.pluginId}`
+                  );
+                }
+              }
+            }
+            lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.ACTIVE);
+          } else {
+            injectedSet.add(addon.pluginId);
+            trustedSettingsMap.delete(addon.pluginId);
+            lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
+            recordRendererError(addon.pluginId, (execRes && execRes.error) || 'ERR_PLUGIN_EXEC');
+            try {
+              await execInWorld(
+                contents,
+                `globalThis.__addonHostKernel && (globalThis.__addonHostKernel.clearStagedHandle(${JSON.stringify(runNonce)}, ${JSON.stringify(hostToken)}), globalThis.__addonHostKernel.disposePlugin(${JSON.stringify(addon.pluginId)}, ${JSON.stringify(hostToken)}))`,
+                `dispose-after-fail:${addon.pluginId}`
+              );
+            } catch (_disposeErr) {}
+          }
+        } catch (err) {
+          if (!isStillCurrent()) return;
           injectedSet.add(addon.pluginId);
           trustedSettingsMap.delete(addon.pluginId);
           lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
-          recordRendererError(addon.pluginId, (execRes && execRes.error) || 'ERR_PLUGIN_EXEC');
+          recordRendererError(addon.pluginId, err && err.message ? err.message : String(err));
           try {
             await execInWorld(
               contents,
               `globalThis.__addonHostKernel && (globalThis.__addonHostKernel.clearStagedHandle(${JSON.stringify(runNonce)}, ${JSON.stringify(hostToken)}), globalThis.__addonHostKernel.disposePlugin(${JSON.stringify(addon.pluginId)}, ${JSON.stringify(hostToken)}))`,
-              `dispose-after-fail:${addon.pluginId}`
+              `dispose-after-err:${addon.pluginId}`
             );
           } catch (_disposeErr) {}
         }
-      } catch (err) {
-        if (!isStillCurrent()) return;
-        injectedSet.add(addon.pluginId);
-        lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
-        recordRendererError(addon.pluginId, err && err.message ? err.message : String(err));
-        try {
-          await execInWorld(
-            contents,
-            `globalThis.__addonHostKernel && (globalThis.__addonHostKernel.clearStagedHandle(${JSON.stringify(runNonce)}, ${JSON.stringify(hostToken)}), globalThis.__addonHostKernel.disposePlugin(${JSON.stringify(addon.pluginId)}, ${JSON.stringify(hostToken)}))`,
-            `dispose-after-err:${addon.pluginId}`
-          );
-        } catch (_disposeErr) {}
       }
-    }
 
-    injectedPluginsByWcId.set(wcId, injectedSet);
-    syncSettingsBridgeBindings();
+      injectedPluginsByWcId.set(wcId, injectedSet);
+    } finally {
+      syncSettingsBridgeBindings();
+    }
   }
 
   function pushSettingsUpdate(pluginId, snapshot) {

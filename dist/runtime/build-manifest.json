@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "f1077ae8",
-  "buildSha256": "f1077ae81f6f70e3d81b3347f92aee49053da10d421dea7024adfcf3345ec0a1",
+  "buildSha8": "a553c75d",
+  "buildSha256": "a553c75d18c30074a2844c5897c1c7368d5af33297d51b5f0f5417fe5bdc3e64",
   "fileCount": 29,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
@@ -20,7 +20,7 @@
     "src/core/host-profile-port.js": "a27839a839dd23b01624a200c7087e436d4f3e0eaab9ad81535d0df709ce4b71",
     "src/core/lifecycle-coordinator.js": "cf598f3ad4db08138f7dd663fd7b4aba6d796f271ce273864aa033385ad2fa1e",
     "src/core/manifest-normalizer.js": "d4a8f38620f013aa62c9712d655cdf5d45e4b039b873c70573206b5495957609",
-    "src/core/manifest-validator.js": "618d9c99198f6725cd5821d7bc6dbc12c8a85b1386d0bbcb8c816dbe599c341e",
+    "src/core/manifest-validator.js": "096f02c5cb8df84ef0ac07ee27d039021b3333e1443c70b1c3b291ef870dc018",
     "src/core/slot-registry.js": "eedaf54e394863502577e228720126da75ee267c73ce3d96b6d149844d888a98",
     "src/core/trust-policy-port.js": "fb441826313b0edc1a213a9b76d6fcc3659c4e89dc4f9149eddda5bb9eb0e8db",
     "src/runtime/main/host-origin-resolver.js": "faed20a13ba9d26139743b9e79a0bbdf5c9e80c2103f81ee9e7b2a693fd0ad44",
@@ -28,10 +28,10 @@
     "src/runtime/main/main-hook-runner.js": "7aaa3ea2b8cf3664592eed241b1521e7fbffa1a49d7bc35ff3f298cb4a4a9682",
     "src/runtime/main/portal-arbiter.js": "3dbb4c85ada7a7d9046956aef130d655ce1b05c8dfb196bb4230b12f7a473704",
     "src/runtime/main/preload-registrar.js": "c323aa7c2a4da31091fe57ca66e0d90b4c549883b739dcbed513fae766a79c47",
-    "src/runtime/main/renderer-injector.js": "4be6ee080e78d9ebf09bc122b6a3703c887ac050dcc4b85a117688112b3af3d8",
-    "src/runtime/main/settings-bridge.js": "98911cb9c7a2e9954aa9013fdbb587b81bdf7e297ba0146e77fffa76d5b938d1",
+    "src/runtime/main/renderer-injector.js": "fc848d46cc308225203313325bcf69bbdc210914dcd6ad1850dd20fc6bd8ebb2",
+    "src/runtime/main/settings-bridge.js": "cb5417aceb4588a608e3195b6dbe6e41ce2f70abf4e93c0c1cf5a0719beaf87b",
     "src/runtime/main/trust-verifier.js": "cd2857094274b7b861b096376eb2222a29748d4c20923e6f727ade6212971c30",
     "src/runtime/shared/constants.js": "3aa18a1a6e222c84af2304ce0758565ff4051c4e795efccf66a4777d4bb6777b",
-    "src/runtime/shared/safe-json.js": "60c135c31c53e18afb3a4a450598440398914370eb57d3076106c32bbecb16ea"
+    "src/runtime/shared/safe-json.js": "7c7924f2964d20fb1060bc83e6149dd7a4db81d04f31a182630e8e6ecf3d7095"
   }
 }

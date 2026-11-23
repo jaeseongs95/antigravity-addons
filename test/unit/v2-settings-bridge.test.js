@@ -68,6 +68,9 @@ test('TC-V21-001: settingsBridge schema validation, trustLevel requirement, rese
     'package.json',
     'app.orig.json',
     'a..json',
+    'con.json',
+    'nul.json',
+    'com1.json',
   ]) {
     assert.equal(isReservedSettingsFileName(bad), true, `Expected reserved rejection for ${bad}`);
     const res = validateAddonManifest(makeTrustedBridgeManifest({ settingsBridge: { fileName: bad } }), {

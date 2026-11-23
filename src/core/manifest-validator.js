@@ -28,6 +28,7 @@ const RESERVED_SETTINGS_BRIDGE_FILES = new Set([
   'package.json',
 ]);
 const SETTINGS_FILE_RE = /^[a-z0-9][a-z0-9._-]{1,63}\.json$/;
+const WINDOWS_DOS_DEVICE_RE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
 
 function isReservedSettingsFileName(fileName) {
@@ -36,6 +37,7 @@ function isReservedSettingsFileName(fileName) {
   const lower = fileName.toLowerCase();
   if (RESERVED_SETTINGS_BRIDGE_FILES.has(lower)) return true;
   if (lower.endsWith('.orig.json')) return true;
+  if (WINDOWS_DOS_DEVICE_RE.test(lower)) return true;
   return false;
 }
 const SEMVER_RE =

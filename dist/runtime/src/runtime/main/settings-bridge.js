@@ -126,17 +126,38 @@ function readSettingsFileSnapshot(settingsDataDir, spec, { reservedFilePaths = [
   }
 
   let buf;
+  let fd = null;
   try {
-    buf = fs.readFileSync(realTarget);
+    fd = fs.openSync(realTarget, 'r');
+    const fstat = fs.fstatSync(fd);
+    if (!fstat.isFile()) {
+      return { status: 'error', data: null, sha256: null, reason: 'ERR_SETTINGS_NOT_REGULAR_FILE', updatedAt };
+    }
+    if (fstat.size > maxBytes) {
+      return { status: 'error', data: null, sha256: null, reason: 'ERR_SETTINGS_FILE_TOO_LARGE', updatedAt };
+    }
+    const readBuf = Buffer.allocUnsafe(maxBytes + 1);
+    let totalRead = 0;
+    while (totalRead <= maxBytes) {
+      const n = fs.readSync(fd, readBuf, totalRead, readBuf.length - totalRead, totalRead);
+      if (n <= 0) break;
+      totalRead += n;
+    }
+    if (totalRead > maxBytes) {
+      return { status: 'error', data: null, sha256: null, reason: 'ERR_SETTINGS_FILE_TOO_LARGE', updatedAt };
+    }
+    buf = readBuf.subarray(0, totalRead);
   } catch (err) {
     if (err && err.code === 'ENOENT') {
       return { status: 'missing', data: null, sha256: null, reason: 'ERR_SETTINGS_FILE_MISSING', updatedAt };
     }
     return { status: 'error', data: null, sha256: null, reason: 'ERR_SETTINGS_READ_FAILED', updatedAt };
-  }
-
-  if (buf.length > maxBytes) {
-    return { status: 'error', data: null, sha256: null, reason: 'ERR_SETTINGS_FILE_TOO_LARGE', updatedAt };
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_closeErr) {}
+    }
   }
 
   let parsed;
