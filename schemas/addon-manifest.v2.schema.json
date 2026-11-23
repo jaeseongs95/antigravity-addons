@@ -1,0 +1,176 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/jaeseongs95/antigravity-native-addon-host/schemas/addon-manifest.v2.schema.json",
+  "title": "AddonManifest.v2",
+  "description": "Declarative v2 contract for native desktop plugins hosted in World 998 with Shadow DOM default slots and explicit SHA-256 trust pinning.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "pluginId",
+    "displayName",
+    "version",
+    "capabilities",
+    "entry",
+    "isolation"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "schemaVersion": {
+      "const": 2
+    },
+    "pluginId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "trustLevel": {
+      "type": "string",
+      "enum": ["trusted", "restricted"],
+      "description": "Declarative trust level. Privileged capabilities still require host trust-policy.json SHA-256 pinning at runtime."
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostProfile": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+        },
+        "minHostVersion": {
+          "type": "string",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["renderer", "mainHook"]
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rendererScript": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "mainHookScript": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rendererSha256": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "mainHookBundleSha256": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "uiSlots": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slot", "slotId"],
+        "properties": {
+          "slot": {
+            "type": "string",
+            "enum": [
+              "title-bar",
+              "sidebar",
+              "overview-pane",
+              "status-bar",
+              "composer-toolbar",
+              "settings-pane",
+              "page-section",
+              "aux-pane",
+              "modal",
+              "overlay",
+              "theme",
+              "document-transform",
+              "custom"
+            ]
+          },
+          "slotId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{1,95}$"
+          },
+          "anchor": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+            "description": "Optional semantic HostProfile uiAnchor key."
+          },
+          "exclusive": {
+            "type": "boolean"
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["addon-owned-slot", "native-host-only"]
+          },
+          "shadow": {
+            "type": "boolean",
+            "description": "Whether the slot renders inside an open ShadowRoot (v2 normalizes to true by default; forbidden on document-transform)."
+          }
+        }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["noTranslate", "i18nSelfManaged"],
+      "properties": {
+        "noTranslate": {
+          "type": "boolean"
+        },
+        "i18nSelfManaged": {
+          "type": "boolean"
+        },
+        "respectsNoTranslate": {
+          "type": "boolean"
+        },
+        "storageNamespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+        },
+        "ipcChannelPrefix": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._:-]{1,63}$"
+        }
+      }
+    },
+    "loadOrder": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    }
+  }
+}

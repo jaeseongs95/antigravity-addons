@@ -1,10 +1,13 @@
 'use strict';
 
 /**
- * Electron ASAR Single-Owner Patcher, Integrity Verifier, Rollback, and Legacy Conflict Doctor.
+ * Electron ASAR Single-Owner Patcher, Integrity Verifier, V1->V2 Upgrader,
+ * External Backup Manager (N=3 pinned-active pruning), Rollback, and Legacy Conflict Doctor.
  *
- * Uses official `@electron/asar` and `proper-lockfile`.
+ * Uses official `@electron/asar`, `acorn`, and `proper-lockfile`.
  * Strictly vendor-independent: all paths, anchors, and markers come from the injected `HostProfile`.
+ * Strict exact-size invariant ONLY (outBuf.length === archive.buf.length).
+ * Fail-fast on Windows EBUSY/EPERM (ERR_TARGET_LOCKED_APP_RUNNING — Option B-Clean).
  */
 
 const fs = require('node:fs');
@@ -21,6 +24,8 @@ const {
 } = require('../fs-lock-atomic');
 const { assertValidElectronHostProfile } = require('./electron-host-profile-port');
 
+const DEFAULT_BACKUP_RETENTION = 3;
+
 function sha256Hex(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
@@ -32,6 +37,114 @@ function sanitizeVersionForFilename(rawVersion) {
     .replace(/^[._-]+/, '')
     .slice(0, 64);
   return cleaned || 'unknown';
+}
+
+function resolveBackupsDir(paths) {
+  if (paths && typeof paths.BACKUPS_DIR === 'string' && paths.BACKUPS_DIR.trim()) {
+    return paths.BACKUPS_DIR;
+  }
+  const base =
+    (paths && paths.HOST_DATA_DIR) ||
+    (paths && paths.LOADER_SCRIPT_PATH && path.dirname(paths.LOADER_SCRIPT_PATH)) ||
+    (paths && paths.ASAR_LOCK_PATH && path.dirname(paths.ASAR_LOCK_PATH)) ||
+    path.dirname(paths.ASAR_PATH);
+  return path.join(base, 'backups');
+}
+
+function getBackupIndexPath(backupsDir) {
+  return path.join(backupsDir, 'index.json');
+}
+
+function readBackupIndex(backupsDir) {
+  const idxPath = getBackupIndexPath(backupsDir);
+  if (!fs.existsSync(idxPath)) {
+    return {
+      schemaVersion: 1,
+      activeOrigSha256: null,
+      activePatchedSha256: null,
+      activeVersion: null,
+      activeBackupPath: null,
+      rolledBackAt: null,
+      pinnedShas: [],
+    };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
+    return {
+      schemaVersion: 1,
+      activeOrigSha256: parsed.activeOrigSha256 || null,
+      activePatchedSha256: parsed.activePatchedSha256 || null,
+      activeVersion: parsed.activeVersion || null,
+      activeBackupPath: parsed.activeBackupPath || null,
+      rolledBackAt: parsed.rolledBackAt || null,
+      pinnedShas: Array.isArray(parsed.pinnedShas) ? parsed.pinnedShas.filter((s) => typeof s === 'string') : [],
+    };
+  } catch (_err) {
+    return {
+      schemaVersion: 1,
+      activeOrigSha256: null,
+      activePatchedSha256: null,
+      activeVersion: null,
+      activeBackupPath: null,
+      rolledBackAt: null,
+      pinnedShas: [],
+    };
+  }
+}
+
+function writeBackupIndex(backupsDir, indexObj) {
+  fs.mkdirSync(backupsDir, { recursive: true });
+  writeAtomicSync(getBackupIndexPath(backupsDir), JSON.stringify(indexObj, null, 2) + '\n');
+}
+
+function getVersionedBackupPath(backupsDir, safeVer, sha256) {
+  return path.join(backupsDir, `app.asar.v${safeVer}.${String(sha256).slice(0, 8)}.orig`);
+}
+
+function getLegacyBackupPath(asarPath, safeVer) {
+  return `${asarPath}.v${safeVer}.orig`;
+}
+
+function pruneBackups(backupsDir, indexObj, maxKeep = DEFAULT_BACKUP_RETENTION) {
+  if (!fs.existsSync(backupsDir)) return;
+  const protectedShas = new Set(indexObj.pinnedShas || []);
+  if (indexObj.activeOrigSha256) protectedShas.add(indexObj.activeOrigSha256);
+
+  const items = [];
+  for (const name of fs.readdirSync(backupsDir)) {
+    if (!name.endsWith('.orig')) continue;
+    const origPath = path.join(backupsDir, name);
+    const metaPath = `${origPath}.json`;
+    let sha = null;
+    let mtimeMs = 0;
+    try {
+      mtimeMs = fs.statSync(origPath).mtimeMs;
+      if (fs.existsSync(metaPath)) {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        if (meta && typeof meta.sha256 === 'string') sha = meta.sha256;
+      }
+    } catch (_e) {}
+    const isProtected =
+      (sha && protectedShas.has(sha)) ||
+      (indexObj.activeBackupPath && path.resolve(origPath) === path.resolve(indexObj.activeBackupPath));
+    items.push({ origPath, metaPath, sha, mtimeMs, isProtected });
+  }
+
+  if (items.length <= maxKeep) return;
+  // Sort newest first; never prune protected entries
+  items.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  let kept = items.filter((i) => i.isProtected).length;
+  for (const item of items) {
+    if (item.isProtected) continue;
+    if (kept < maxKeep) {
+      kept++;
+      continue;
+    }
+    try {
+      if (fs.existsSync(item.origPath)) fs.unlinkSync(item.origPath);
+      if (fs.existsSync(item.metaPath)) fs.unlinkSync(item.metaPath);
+    } catch (_e) {}
+  }
 }
 
 function computeIntegrity(buf) {
@@ -105,17 +218,22 @@ function verifyAllAsarIntegrity(archive) {
 function detectArchiveMarkers(archive, profile) {
   assertValidElectronHostProfile(profile);
   const mainBuf = archive.fileMap.get(profile.mainEntry);
-  if (!mainBuf) return { mainPresent: false, hostInstalled: false, legacyMarkers: [] };
+  if (!mainBuf) {
+    return { mainPresent: false, hostInstalled: false, priorHostMarkersInstalled: [], legacyMarkers: [] };
+  }
   const text = mainBuf.toString('utf8');
   const hostInstalled = text.includes(profile.patchMarker);
+  const priorHostMarkersInstalled = (profile.priorHostMarkers || []).filter(
+    (m) => m !== profile.patchMarker && text.includes(m)
+  );
   const legacyMarkers = (profile.legacyPatchMarkers || []).filter((m) => text.includes(m));
-  return { mainPresent: true, hostInstalled, legacyMarkers };
+  return { mainPresent: true, hostInstalled, priorHostMarkersInstalled, legacyMarkers };
 }
 
 function isPureUnpatchedArchive(archive, profile) {
   const info = detectArchiveMarkers(archive, profile);
   if (!info.mainPresent) return false;
-  return !info.hostInstalled && info.legacyMarkers.length === 0;
+  return !info.hostInstalled && info.priorHostMarkersInstalled.length === 0 && info.legacyMarkers.length === 0;
 }
 
 function isAsarHostInstalled(asarPath, profile) {
@@ -135,8 +253,6 @@ function isJsLineTerminator(ch) {
 
 function parseJavaScriptWithAcorn(sourceText, onComment = null) {
   const tryParse = (sourceType) => {
-    // R8-F1: Collect comments into an attempt-local buffer so a failed 'script' pass
-    // before falling back to 'module' never duplicates comment ranges into caller state.
     const collected = onComment ? [] : null;
     const opts = {
       ecmaVersion: 'latest',
@@ -164,11 +280,6 @@ function parseJavaScriptWithAcorn(sourceText, onComment = null) {
   }
 }
 
-/**
- * Finds exact character-offset ranges `[lineStart, lineEnd]` of standalone `//` line comments
- * using Acorn's `onComment(block, text, start, end)` offsets directly.
- * Immune to `\r`, `\u2028`, `\u2029`, regex literals, nested template `${...}`, and strings.
- */
 function findSafeStandaloneCommentRanges(sourceText) {
   const rawComments = [];
   parseJavaScriptWithAcorn(sourceText, (block, _text, start, end) => {
@@ -180,7 +291,6 @@ function findSafeStandaloneCommentRanges(sourceText) {
   const ranges = [];
   const len = sourceText.length;
   for (const c of rawComments) {
-    // Walk backward to the nearest ECMAScript line terminator (\n, \r, \u2028, \u2029) or start of file
     let lineStart = c.start;
     while (lineStart > 0 && !isJsLineTerminator(sourceText[lineStart - 1])) {
       lineStart--;
@@ -188,7 +298,6 @@ function findSafeStandaloneCommentRanges(sourceText) {
     const prefix = sourceText.slice(lineStart, c.start);
     if (!/^[ \t]*$/.test(prefix)) continue;
 
-    // Verify the comment reaches end-of-line (or EOF) and consume its trailing line terminator
     let lineEnd = c.end;
     if (lineEnd < len) {
       const ch = sourceText[lineEnd];
@@ -252,7 +361,6 @@ function transformExactSize(origBuf, targetStr, replacementStr, marker) {
   if (finalDiff > 0) {
     nextText = nextText + ' '.repeat(finalDiff);
   }
-  // R6-F2: Validate syntax with Acorn (supports CJS, ESM, and Hashbang uniformly)
   parseJavaScriptWithAcorn(nextText);
   const outBuf = Buffer.from(nextText, 'utf8');
   if (outBuf.length !== origBuf.length) {
@@ -263,7 +371,7 @@ function transformExactSize(origBuf, targetStr, replacementStr, marker) {
 
 function verifyOrigBackupStrict(backupPath, metaPath, expectedVersion, profile, { backfillMeta = false } = {}) {
   assertValidElectronHostProfile(profile);
-  if (!fs.existsSync(backupPath)) return { ok: false, status: 'ERR_ORIG_MISSING' };
+  if (!backupPath || !fs.existsSync(backupPath)) return { ok: false, status: 'ERR_ORIG_MISSING' };
   let archive;
   try {
     archive = readAsarArchive(backupPath);
@@ -280,34 +388,156 @@ function verifyOrigBackupStrict(backupPath, metaPath, expectedVersion, profile, 
     return { ok: false, status: 'ERR_ORIG_INTEGRITY_MISMATCH' };
   }
   const actualHash = sha256Hex(archive.buf);
-  if (fs.existsSync(metaPath)) {
+  let parsedMeta = null;
+  if (metaPath && fs.existsSync(metaPath)) {
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
       const expectedBytes = typeof meta.bytes === 'number' ? meta.bytes : meta.size;
       if (!meta || meta.sha256 !== actualHash || expectedBytes !== archive.buf.length) {
         return { ok: false, status: 'ERR_ORIG_META_MISMATCH' };
       }
+      parsedMeta = meta;
     } catch (_err) {
       return { ok: false, status: 'ERR_ORIG_META_CORRUPTED' };
     }
-  } else if (backfillMeta) {
-    writeAtomicSync(
-      metaPath,
-      JSON.stringify(
-        {
-          appVersion: archive.appVersion,
-          bytes: archive.buf.length,
-          sha256: actualHash,
-          createdAt: new Date().toISOString(),
-        },
-        null,
-        2
-      ) + '\n'
-    );
+  } else if (backfillMeta && metaPath) {
+    // O-4: Synthesize metadata strictly in memory — NEVER write .json into vendor resources/ during legacy migration
+    parsedMeta = {
+      appVersion: archive.appVersion,
+      bytes: archive.buf.length,
+      sha256: actualHash,
+      createdAt: new Date().toISOString(),
+    };
   } else {
     return { ok: false, status: 'ERR_ORIG_META_MISSING' };
   }
-  return { ok: true, archive, sha256: actualHash };
+  return { ok: true, archive, sha256: actualHash, meta: parsedMeta, backupPath, metaPath };
+}
+
+/**
+ * Finds the best candidate .orig backup for `appVersion` across:
+ * 1) Active index pointer in BACKUPS_DIR
+ * 2) Matching versioned `.orig` files in BACKUPS_DIR (preferring matching patchedSha256 or sha256)
+ * 3) Legacy `${ASAR_PATH}.v<ver>.orig` for seamless V1 -> V2 migration
+ */
+function isPathConfinedToDir(dirPath, candidatePath) {
+  if (!dirPath || !candidatePath) return false;
+  const resolvedDir = path.resolve(dirPath);
+  const resolvedCandidate = path.resolve(candidatePath);
+  const rel = path.relative(resolvedDir, resolvedCandidate);
+  return Boolean(rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function findCandidateBackup(paths, safeVer, currentSha256, { preferPatchedMatch = false } = {}) {
+  const backupsDir = resolveBackupsDir(paths);
+  const index = readBackupIndex(backupsDir);
+  const candidates = [];
+
+  // SEC-06: Confine index.activeBackupPath strictly inside backupsDir before touching it
+  if (
+    index.activeBackupPath &&
+    isPathConfinedToDir(backupsDir, index.activeBackupPath) &&
+    fs.existsSync(index.activeBackupPath) &&
+    (!index.activeVersion || index.activeVersion === safeVer)
+  ) {
+    candidates.push({ backupPath: index.activeBackupPath, metaPath: `${index.activeBackupPath}.json`, source: 'index' });
+  }
+
+  if (fs.existsSync(backupsDir)) {
+    const prefix = `app.asar.v${safeVer}.`;
+    for (const name of fs.readdirSync(backupsDir).sort()) {
+      if (!name.startsWith(prefix) || !name.endsWith('.orig')) continue;
+      const bp = path.join(backupsDir, name);
+      if (candidates.some((c) => path.resolve(c.backupPath) === path.resolve(bp))) continue;
+      candidates.push({ backupPath: bp, metaPath: `${bp}.json`, source: 'backupsDir' });
+    }
+  }
+
+  const legacyPath = getLegacyBackupPath(paths.ASAR_PATH, safeVer);
+  if (fs.existsSync(legacyPath) && !candidates.some((c) => path.resolve(c.backupPath) === path.resolve(legacyPath))) {
+    candidates.push({ backupPath: legacyPath, metaPath: `${legacyPath}.json`, source: 'legacy' });
+  }
+
+  if (candidates.length === 0) return null;
+
+  // Prefer candidate whose metadata matches currentSha256 (either as patchedSha256 or orig sha256)
+  for (const c of candidates) {
+    if (!fs.existsSync(c.metaPath)) continue;
+    try {
+      const m = JSON.parse(fs.readFileSync(c.metaPath, 'utf8'));
+      if (preferPatchedMatch && m.patchedSha256 && m.patchedSha256 === currentSha256) return c;
+      if (!preferPatchedMatch && m.sha256 && m.sha256 === currentSha256) return c;
+    } catch (_e) {}
+  }
+
+  return candidates[0];
+}
+
+function classifyWriteError(err) {
+  const code = err && err.code;
+  if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') {
+    return { status: 'ERR_TARGET_LOCKED_APP_RUNNING', fsCode: code, error: err.message };
+  }
+  return null;
+}
+
+function rebuildArchiveExactSize(archive, profile) {
+  const mainBuf = archive.fileMap.get(profile.mainEntry);
+  if (!mainBuf) return { ok: false, status: 'ERR_MAIN_MISSING' };
+
+  let patchedMainBuf;
+  try {
+    patchedMainBuf = transformExactSize(
+      mainBuf,
+      profile.mainAnchorTarget,
+      profile.mainAnchorReplacement,
+      profile.patchMarker
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      status: 'ERR_EXACT_SIZE_TRANSFORM_FAILED',
+      error: err && err.message ? err.message : String(err),
+    };
+  }
+  archive.fileMap.set(profile.mainEntry, patchedMainBuf);
+
+  const chunks = [];
+  let currentOffset = 0n;
+  function rebuild(node, relPath) {
+    if (node.files) {
+      for (const [name, child] of Object.entries(node.files)) {
+        rebuild(child, relPath ? `${relPath}/${name}` : name);
+      }
+    } else if (!node.unpacked && node.offset !== undefined && node.size !== undefined) {
+      const data = archive.fileMap.get(relPath);
+      node.size = data.length;
+      node.offset = currentOffset.toString();
+      if (node.integrity) {
+        node.integrity = computeIntegrity(data);
+      }
+      chunks.push(data);
+      currentOffset += BigInt(data.length);
+    }
+  }
+  rebuild(archive.header, '');
+
+  const headerStrBuf = Buffer.from(JSON.stringify(archive.header), 'utf8');
+  const alignedStrSize = Math.ceil(headerStrBuf.length / 4) * 4;
+  const newU8 = 4 + alignedStrSize;
+  const newU4 = 4 + newU8;
+  const headerBuf = Buffer.alloc(8 + newU4, 0);
+  headerBuf.writeUInt32LE(archive.u0, 0);
+  headerBuf.writeUInt32LE(newU4, 4);
+  headerBuf.writeUInt32LE(newU8, 8);
+  headerBuf.writeUInt32LE(headerStrBuf.length, 12);
+  headerStrBuf.copy(headerBuf, 16);
+
+  const outBuf = Buffer.concat([headerBuf, ...chunks]);
+  if (outBuf.length !== archive.buf.length) {
+    return { ok: false, status: 'ERR_ARCHIVE_SIZE_DRIFT' };
+  }
+  return { ok: true, outBuf };
 }
 
 function installAsarAddonHost(paths, profile) {
@@ -320,9 +550,12 @@ function installAsarAddonHost(paths, profile) {
 
   try {
     let archive = readAsarArchive(paths.ASAR_PATH);
+    const currentSha256 = sha256Hex(archive.buf);
+    const currentIsPure = isPureUnpatchedArchive(archive, profile);
     const curMarkers = detectArchiveMarkers(archive, profile);
+
     if (curMarkers.hostInstalled) {
-      return { status: 'ALREADY_INSTALLED', appVersion: archive.appVersion };
+      return { status: 'ALREADY_INSTALLED', appVersion: archive.appVersion, sha256: currentSha256 };
     }
     if (curMarkers.legacyMarkers.length > 0 && !paths.ALLOW_REPLACE_LEGACY) {
       return {
@@ -332,109 +565,170 @@ function installAsarAddonHost(paths, profile) {
       };
     }
 
+    const backupsDir = resolveBackupsDir(paths);
+    const index = readBackupIndex(backupsDir);
     const safeVer = sanitizeVersionForFilename(archive.appVersion);
-    const backupPath = `${paths.ASAR_PATH}.v${safeVer}.orig`;
-    const metaPath = `${backupPath}.json`;
+    const existingCandidate = findCandidateBackup(paths, safeVer, currentSha256, {
+      preferPatchedMatch: !currentIsPure,
+    });
 
-    if (fs.existsSync(backupPath)) {
-      const check = verifyOrigBackupStrict(backupPath, metaPath, archive.appVersion, profile, {
-        backfillMeta: true,
+    let backupPath = null;
+    let metaPath = null;
+    let activeMeta = null;
+    let pendingOrigCommit = null;
+
+    if (existingCandidate) {
+      // SEC-06: Only allow legacy resources/*.orig migration to backfill missing .json metadata
+      const check = verifyOrigBackupStrict(existingCandidate.backupPath, existingCandidate.metaPath, archive.appVersion, profile, {
+        backfillMeta: existingCandidate.source === 'legacy',
       });
       if (!check.ok) {
         return { status: check.status, appVersion: archive.appVersion };
       }
-      archive = check.archive;
-    } else if (isPureUnpatchedArchive(archive, profile)) {
+
+      // P0 Build-Hash Identity Guard: NEVER overwrite a newer pure build of the same appVersion with an older .orig backup!
+      if (currentIsPure && currentSha256 !== check.sha256) {
+        if (!paths.ALLOW_REFRESH_ORIG) {
+          return {
+            status: 'ERR_ORIG_BUILD_MISMATCH',
+            appVersion: archive.appVersion,
+            currentSha256,
+            backupSha256: check.sha256,
+            backupPath: existingCandidate.backupPath,
+          };
+        }
+        if (!verifyAllAsarIntegrity(archive)) {
+          return { status: 'ERR_ARCHIVE_INTEGRITY_MISMATCH', appVersion: archive.appVersion };
+        }
+        backupPath = getVersionedBackupPath(backupsDir, safeVer, currentSha256);
+        metaPath = `${backupPath}.json`;
+        const archivedPrevPath = getVersionedBackupPath(backupsDir, safeVer, check.sha256);
+        const archivedPrevMetaPath = `${archivedPrevPath}.json`;
+        activeMeta = {
+          appVersion: archive.appVersion,
+          bytes: archive.buf.length,
+          sha256: currentSha256,
+          createdAt: new Date().toISOString(),
+          previousOrigSha256: check.sha256,
+        };
+        pendingOrigCommit = {
+          archivedPrevPath,
+          archivedPrevMetaPath,
+          prevBuf: check.archive.buf,
+          prevMeta: check.meta,
+          nextBuf: archive.buf,
+        };
+      } else {
+        // Use verified .orig (migrating legacy resources/*.orig into BACKUPS_DIR if needed!)
+        archive = check.archive;
+        backupPath = getVersionedBackupPath(backupsDir, safeVer, check.sha256);
+        metaPath = `${backupPath}.json`;
+        activeMeta = check.meta
+          ? { ...check.meta }
+          : {
+              appVersion: archive.appVersion,
+              bytes: archive.buf.length,
+              sha256: check.sha256,
+              createdAt: new Date().toISOString(),
+            };
+        if (path.resolve(existingCandidate.backupPath) !== path.resolve(backupPath)) {
+          pendingOrigCommit = {
+            archivedPrevPath: null,
+            archivedPrevMetaPath: null,
+            prevBuf: null,
+            prevMeta: null,
+            nextBuf: check.archive.buf,
+          };
+        }
+      }
+    } else if (currentIsPure) {
       if (!verifyAllAsarIntegrity(archive)) {
         return { status: 'ERR_ARCHIVE_INTEGRITY_MISMATCH', appVersion: archive.appVersion };
       }
-      writeAtomicSync(backupPath, archive.buf, { isBinary: true });
-      writeAtomicSync(
-        metaPath,
-        JSON.stringify(
-          {
-            appVersion: archive.appVersion,
-            bytes: archive.buf.length,
-            sha256: sha256Hex(archive.buf),
-            createdAt: new Date().toISOString(),
-          },
-          null,
-          2
-        ) + '\n'
-      );
+      backupPath = getVersionedBackupPath(backupsDir, safeVer, currentSha256);
+      metaPath = `${backupPath}.json`;
+      activeMeta = {
+        appVersion: archive.appVersion,
+        bytes: archive.buf.length,
+        sha256: currentSha256,
+        createdAt: new Date().toISOString(),
+      };
+      pendingOrigCommit = {
+        archivedPrevPath: null,
+        archivedPrevMetaPath: null,
+        prevBuf: null,
+        prevMeta: null,
+        nextBuf: archive.buf,
+      };
     } else {
       return { status: 'ERR_ORIG_MISSING_FOR_PATCHED_ASAR', appVersion: archive.appVersion };
     }
 
-    const mainBuf = archive.fileMap.get(profile.mainEntry);
-    if (!mainBuf) return { status: 'ERR_MAIN_MISSING', appVersion: archive.appVersion };
-
-    let patchedMainBuf;
-    try {
-      patchedMainBuf = transformExactSize(
-        mainBuf,
-        profile.mainAnchorTarget,
-        profile.mainAnchorReplacement,
-        profile.patchMarker
-      );
-    } catch (err) {
-      return {
-        status: 'ERR_EXACT_SIZE_TRANSFORM_FAILED',
-        error: err && err.message ? err.message : String(err),
-        appVersion: archive.appVersion,
-      };
+    const built = rebuildArchiveExactSize(archive, profile);
+    if (!built.ok) {
+      return { status: built.status, error: built.error, appVersion: archive.appVersion };
     }
-    archive.fileMap.set(profile.mainEntry, patchedMainBuf);
+    const { outBuf } = built;
 
-    const chunks = [];
-    let currentOffset = 0n;
-    function rebuild(node, relPath) {
-      if (node.files) {
-        for (const [name, child] of Object.entries(node.files)) {
-          rebuild(child, relPath ? `${relPath}/${name}` : name);
-        }
-      } else if (!node.unpacked && node.offset !== undefined && node.size !== undefined) {
-        const data = archive.fileMap.get(relPath);
-        node.size = data.length;
-        node.offset = currentOffset.toString();
-        // Preserve header layout: recompute integrity ONLY when the original archive carried integrity metadata.
-        if (node.integrity) {
-          node.integrity = computeIntegrity(data);
-        }
-        chunks.push(data);
-        currentOffset += BigInt(data.length);
+    fs.mkdirSync(backupsDir, { recursive: true });
+    if (pendingOrigCommit) {
+      if (pendingOrigCommit.archivedPrevPath && !fs.existsSync(pendingOrigCommit.archivedPrevPath)) {
+        writeAtomicSync(pendingOrigCommit.archivedPrevPath, pendingOrigCommit.prevBuf, { isBinary: true });
+        writeAtomicSync(
+          pendingOrigCommit.archivedPrevMetaPath,
+          JSON.stringify(pendingOrigCommit.prevMeta, null, 2) + '\n'
+        );
       }
-    }
-    rebuild(archive.header, '');
-
-    const headerStrBuf = Buffer.from(JSON.stringify(archive.header), 'utf8');
-    const alignedStrSize = Math.ceil(headerStrBuf.length / 4) * 4;
-    const newU8 = 4 + alignedStrSize;
-    const newU4 = 4 + newU8;
-    const headerBuf = Buffer.alloc(8 + newU4, 0);
-    headerBuf.writeUInt32LE(archive.u0, 0);
-    headerBuf.writeUInt32LE(newU4, 4);
-    headerBuf.writeUInt32LE(newU8, 8);
-    headerBuf.writeUInt32LE(headerStrBuf.length, 12);
-    headerStrBuf.copy(headerBuf, 16);
-
-    const outBuf = Buffer.concat([headerBuf, ...chunks]);
-    if (outBuf.length !== archive.buf.length) {
-      return { status: 'ERR_ARCHIVE_SIZE_DRIFT', appVersion: archive.appVersion };
+      writeAtomicSync(backupPath, pendingOrigCommit.nextBuf, { isBinary: true });
+      writeAtomicSync(metaPath, JSON.stringify(activeMeta, null, 2) + '\n');
     }
 
-    writeAtomicSync(paths.ASAR_PATH, outBuf, { isBinary: true });
+    const patchedSha256 = sha256Hex(outBuf);
+    try {
+      writeAtomicSync(paths.ASAR_PATH, outBuf, { isBinary: true });
+    } catch (writeErr) {
+      const classified = classifyWriteError(writeErr);
+      if (classified) return { ...classified, appVersion: archive.appVersion };
+      throw writeErr;
+    }
     asar.uncacheAll();
+
+    const nextMeta = {
+      ...activeMeta,
+      patchedSha256,
+      patchMarker: profile.patchMarker,
+      patchedAt: new Date().toISOString(),
+    };
+    delete nextMeta.rolledBackAt;
+    writeAtomicSync(metaPath, JSON.stringify(nextMeta, null, 2) + '\n');
+
+    const nextIndex = {
+      ...index,
+      activeOrigSha256: activeMeta.sha256,
+      activePatchedSha256: patchedSha256,
+      activeVersion: safeVer,
+      activeBackupPath: backupPath,
+      rolledBackAt: null,
+    };
+    writeBackupIndex(backupsDir, nextIndex);
+    pruneBackups(backupsDir, nextIndex, paths.BACKUP_RETENTION || DEFAULT_BACKUP_RETENTION);
+
     return {
-      status: 'INSTALLED',
+      status: curMarkers.priorHostMarkersInstalled.length > 0 ? 'UPGRADED' : 'INSTALLED',
+      upgradedFrom: curMarkers.priorHostMarkersInstalled,
       patchMarker: profile.patchMarker,
       appVersion: archive.appVersion,
       backupPath,
-      sha256: sha256Hex(outBuf),
+      origSha256: activeMeta.sha256,
+      sha256: patchedSha256,
     };
   } finally {
     releaseExclusiveLock(paths.ASAR_LOCK_PATH, lockRes.token);
   }
+}
+
+function upgradeAsarAddonHost(paths, profile) {
+  return installAsarAddonHost(paths, profile);
 }
 
 function rollbackAsarAddonHost(paths, profile, { force = false } = {}) {
@@ -443,15 +737,16 @@ function rollbackAsarAddonHost(paths, profile, { force = false } = {}) {
     return { status: 'SKIPPED_NO_ASAR' };
   }
 
-  const lockRes = acquireExclusiveLockDetailed(paths.ASAR_LOCK_PATH, 60000);
-  if (!lockRes.ok) return { status: lockRes.code, error: lockRes.error, fsCode: lockRes.fsCode };
-  // NB1: Also acquire ADDONS_LOCK_PATH (when provided) to serialize rollback against concurrent --register
   const addonsLockRes = paths.ADDONS_LOCK_PATH
     ? acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH, 30000)
     : { ok: true, token: null };
   if (!addonsLockRes.ok) {
-    releaseExclusiveLock(paths.ASAR_LOCK_PATH, lockRes.token);
     return { status: addonsLockRes.code, error: addonsLockRes.error, fsCode: addonsLockRes.fsCode };
+  }
+  const lockRes = acquireExclusiveLockDetailed(paths.ASAR_LOCK_PATH, 60000);
+  if (!lockRes.ok) {
+    if (addonsLockRes.token) releaseExclusiveLock(paths.ADDONS_LOCK_PATH, addonsLockRes.token);
+    return { status: lockRes.code, error: lockRes.error, fsCode: lockRes.fsCode };
   }
   try {
     const remainingManifests = fs.existsSync(paths.ADDONS_DIR)
@@ -468,58 +763,153 @@ function rollbackAsarAddonHost(paths, profile, { force = false } = {}) {
     if (isPureUnpatchedArchive(cur, profile)) {
       return { status: 'ALREADY_UNPATCHED', appVersion: cur.appVersion };
     }
+    const curMarkers = detectArchiveMarkers(cur, profile);
+    const curSha256 = sha256Hex(cur.buf);
     const safeVer = sanitizeVersionForFilename(cur.appVersion);
-    const backupPath = `${paths.ASAR_PATH}.v${safeVer}.orig`;
-    const metaPath = `${backupPath}.json`;
-    const check = verifyOrigBackupStrict(backupPath, metaPath, cur.appVersion, profile, {
+    const candidate = findCandidateBackup(paths, safeVer, curSha256, { preferPatchedMatch: true });
+    if (!candidate) {
+      return { status: 'ERR_ORIG_MISSING', appVersion: cur.appVersion };
+    }
+
+    const check = verifyOrigBackupStrict(candidate.backupPath, candidate.metaPath, cur.appVersion, profile, {
       backfillMeta: false,
     });
     if (!check.ok) {
       return { status: check.status, appVersion: cur.appVersion };
     }
-    writeAtomicSync(paths.ASAR_PATH, check.archive.buf, { isBinary: true });
+
+    const expectedPatchedSha256 =
+      check.meta && typeof check.meta.patchedSha256 === 'string' && check.meta.patchedSha256
+        ? check.meta.patchedSha256
+        : null;
+    const isKnownHostMarker = curMarkers.hostInstalled || curMarkers.priorHostMarkersInstalled.length > 0;
+    const unexpectedModification =
+      !isKnownHostMarker || (expectedPatchedSha256 && curSha256 !== expectedPatchedSha256);
+    if (unexpectedModification && !force) {
+      return {
+        status: 'ERR_PATCHED_ASAR_UNEXPECTED_MODIFICATION',
+        appVersion: cur.appVersion,
+        currentSha256: curSha256,
+        expectedPatchedSha256,
+      };
+    }
+
+    try {
+      writeAtomicSync(paths.ASAR_PATH, check.archive.buf, { isBinary: true });
+    } catch (writeErr) {
+      const classified = classifyWriteError(writeErr);
+      if (classified) return { ...classified, appVersion: cur.appVersion };
+      throw writeErr;
+    }
     asar.uncacheAll();
+
+    const rolledBackAt = new Date().toISOString();
+    if (check.meta) {
+      const cleanedMeta = { ...check.meta, rolledBackAt };
+      delete cleanedMeta.patchedSha256;
+      delete cleanedMeta.patchedAt;
+      writeAtomicSync(candidate.metaPath, JSON.stringify(cleanedMeta, null, 2) + '\n');
+    }
+
+    const backupsDir = resolveBackupsDir(paths);
+    const index = readBackupIndex(backupsDir);
+    writeBackupIndex(backupsDir, {
+      ...index,
+      activePatchedSha256: null,
+      rolledBackAt,
+    });
+
     return {
       status: 'ROLLED_BACK',
       appVersion: cur.appVersion,
       sha256: check.sha256,
+      rolledBackAt,
     };
   } finally {
-    if (addonsLockRes.token) releaseExclusiveLock(paths.ADDONS_LOCK_PATH, addonsLockRes.token);
     releaseExclusiveLock(paths.ASAR_LOCK_PATH, lockRes.token);
+    if (addonsLockRes.token) releaseExclusiveLock(paths.ADDONS_LOCK_PATH, addonsLockRes.token);
   }
 }
 
 function diagnoseAsarState(paths, profile) {
   assertValidElectronHostProfile(profile);
   if (!fs.existsSync(paths.ASAR_PATH)) {
-    return { asarExists: false, status: 'NO_ASAR', legacyMarkers: [], origBackupValid: false };
+    return {
+      asarExists: false,
+      status: 'NO_ASAR',
+      legacyMarkers: [],
+      priorHostMarkersInstalled: [],
+      origBackupValid: false,
+      updatedUnpatched: false,
+    };
   }
   const archive = readAsarArchive(paths.ASAR_PATH);
+  const asarSha256 = sha256Hex(archive.buf);
+  const pure = isPureUnpatchedArchive(archive, profile);
   const markers = detectArchiveMarkers(archive, profile);
   const safeVer = sanitizeVersionForFilename(archive.appVersion);
-  const backupPath = `${paths.ASAR_PATH}.v${safeVer}.orig`;
-  const metaPath = `${backupPath}.json`;
-  const origCheck = fs.existsSync(backupPath)
-    ? verifyOrigBackupStrict(backupPath, metaPath, archive.appVersion, profile, { backfillMeta: false })
+  const backupsDir = resolveBackupsDir(paths);
+  const index = readBackupIndex(backupsDir);
+
+  const candidate = findCandidateBackup(paths, safeVer, asarSha256, { preferPatchedMatch: !pure });
+  const origCheck = candidate
+    ? verifyOrigBackupStrict(candidate.backupPath, candidate.metaPath, archive.appVersion, profile, { backfillMeta: false })
     : { ok: false, status: 'ORIG_NOT_CREATED_YET' };
+  const origBackupSha256 = origCheck.ok ? origCheck.sha256 : null;
+  const expectedPatchedSha256 =
+    origCheck.ok && origCheck.meta && typeof origCheck.meta.patchedSha256 === 'string'
+      ? origCheck.meta.patchedSha256
+      : null;
+
+  const origBuildMismatch = Boolean(origCheck.ok && pure && asarSha256 !== origCheck.sha256);
+  const patchedShaMismatch = Boolean(
+    markers.hostInstalled && expectedPatchedSha256 && asarSha256 !== expectedPatchedSha256
+  );
+
+  // Distinguish intentional rollback (`index.rolledBackAt`) from vendor auto-update overwrite (`UPDATED_UNPATCHED`)
+  const hadPreviousActiveInstall = Boolean(index.activePatchedSha256 && !index.rolledBackAt);
+  const updatedUnpatched = Boolean(
+    pure && hadPreviousActiveInstall && asarSha256 !== index.activePatchedSha256
+  );
+  const needsUpgrade = markers.priorHostMarkersInstalled.length > 0 && !markers.hostInstalled;
 
   return {
     asarExists: true,
     appVersion: archive.appVersion,
-    asarSha256: sha256Hex(archive.buf),
+    asarSha256,
     hostInstalled: markers.hostInstalled,
+    priorHostMarkersInstalled: markers.priorHostMarkersInstalled,
+    needsUpgrade,
     legacyMarkers: markers.legacyMarkers,
     hasLegacyConflict: markers.legacyMarkers.length > 0,
-    origBackupPath: backupPath,
+    backupsDir,
+    origBackupPath: candidate ? candidate.backupPath : getVersionedBackupPath(backupsDir, safeVer, asarSha256),
     origBackupValid: Boolean(origCheck.ok),
     origBackupStatus: origCheck.ok ? 'VALID' : origCheck.status,
+    origBackupSha256,
+    expectedPatchedSha256,
+    rolledBackAt: index.rolledBackAt || null,
+    updatedUnpatched,
+    status: updatedUnpatched
+      ? 'UPDATED_UNPATCHED'
+      : needsUpgrade
+        ? 'NEEDS_UPGRADE'
+        : markers.hostInstalled
+          ? 'INSTALLED'
+          : 'UNPATCHED',
+    origBuildMismatch,
+    patchedShaMismatch,
   };
 }
 
 module.exports = {
+  DEFAULT_BACKUP_RETENTION,
   sha256Hex,
   sanitizeVersionForFilename,
+  resolveBackupsDir,
+  readBackupIndex,
+  writeBackupIndex,
+  pruneBackups,
   acquireExclusiveLockDetailed,
   acquireExclusiveLock,
   releaseExclusiveLock,
@@ -534,6 +924,7 @@ module.exports = {
   transformExactSize,
   verifyOrigBackupStrict,
   installAsarAddonHost,
+  upgradeAsarAddonHost,
   rollbackAsarAddonHost,
   diagnoseAsarState,
 };

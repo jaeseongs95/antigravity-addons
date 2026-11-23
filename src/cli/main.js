@@ -1,21 +1,26 @@
 'use strict';
 
 /**
- * Zero-Daemon Host-Agnostic CLI Factory (SOLID: SRP / OCP / LSP / ISP / DIP).
+ * Zero-Daemon Host-Agnostic CLI Factory (SOLID: SRP / OCP / LSP / ISP / DIP — v2.0.0).
  *
- * Depends exclusively on `src/core/host-ports` and two segregated host-neutral ports:
- *   - `hostLifecycle` (HostLifecyclePort)
- *   - `addonStore`    (AddonStorePort)
+ * Depends exclusively on `src/core/host-ports` and segregated host-neutral ports:
+ *   - `hostLifecycle` (HostLifecyclePort — 6 required methods, TC-014 preserved)
+ *   - `addonStore`    (AddonStorePort    — 4 required methods, TC-014 preserved)
+ *   - `trustPolicy`   (optional TrustPolicyPort — explicit SHA-256 trust pinning)
  *
  * Treats `ctx` returned by `hostLifecycle.resolveContext()` as an opaque host context
  * (resolving it at most once per CLI invocation) and contains ZERO file writes, file locks,
- * archive/runtime fields, or vendor literals.
+ * archive/runtime fields, or vendor literals (`TC-001c`).
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
 const pkg = require('../../package.json');
-const { assertHostLifecyclePort, assertAddonStorePort } = require('../core/host-ports');
+const {
+  assertHostLifecyclePort,
+  assertAddonStorePort,
+  assertTrustPolicyPort,
+} = require('../core/host-ports');
 
 function getProfileIdFromContext(ctx, fallbackProfile) {
   if (ctx && typeof ctx.hostProfileId === 'string' && ctx.hostProfileId) {
@@ -27,9 +32,16 @@ function getProfileIdFromContext(ctx, fallbackProfile) {
   return fallbackProfile && typeof fallbackProfile.id === 'string' ? fallbackProfile.id : 'unknown';
 }
 
-function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion = pkg.version } = {}) {
+function createCliApp({
+  hostLifecycle,
+  addonStore,
+  trustPolicy = null,
+  defaultProfile,
+  hostVersion = pkg.version,
+} = {}) {
   const lifecycle = assertHostLifecyclePort(hostLifecycle);
   const store = assertAddonStorePort(addonStore);
+  const trust = trustPolicy ? assertTrustPolicyPort(trustPolicy) : null;
   const baseProfile = lifecycle.validateProfile(defaultProfile);
 
   function loadHostProfileFromFile(profilePath) {
@@ -49,6 +61,7 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
   function buildStatusReportFromCtx(ctx, fallbackProfile = baseProfile) {
     const hostStatus = lifecycle.getHostStatus(ctx);
     const plan = store.planAddons(ctx, { checkFilesExist: true, hostVersion });
+    const trustSummary = trust ? trust.listApproved(ctx) : null;
     return {
       hostVersion,
       hostProfileId: getProfileIdFromContext(ctx, fallbackProfile),
@@ -58,17 +71,32 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
         pluginId: a.pluginId,
         version: a.manifest.version,
         loadOrder: a.loadOrder,
+        trustLevel: a.trustLevel,
+        requiresTrustApproval: Boolean(a.requiresTrustApproval),
         capabilities: a.manifest.capabilities,
       })),
       disabledAddons: plan.disabled,
       rejectedAddons: plan.rejected,
       slots: plan.slots,
+      approvedTrustPins: trustSummary && trustSummary.ok ? trustSummary.approved : undefined,
     };
   }
 
   function buildDoctorReportFromCtx(ctx, fallbackProfile = baseProfile) {
     const hostDiag = lifecycle.diagnoseHost(ctx);
     const plan = store.planAddons(ctx, { checkFilesExist: true, hostVersion });
+    const trustSummary = trust ? trust.listApproved(ctx) : null;
+    const trustPolicyOk = trust ? Boolean(trustSummary && trustSummary.ok) : true;
+    const approvedIds = new Set(
+      trustPolicyOk && trustSummary && Array.isArray(trustSummary.approved)
+        ? trustSummary.approved.map((r) => r && r.pluginId).filter(Boolean)
+        : []
+    );
+    const unapprovedTrustedAddons = trust
+      ? plan.active
+          .filter((a) => Boolean(a && a.requiresTrustApproval) && !approvedIds.has(a.pluginId))
+          .map((a) => a.pluginId)
+      : [];
     return {
       hostVersion,
       hostProfileId: getProfileIdFromContext(ctx, fallbackProfile),
@@ -79,7 +107,22 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
         rejectedCount: plan.rejected.length,
         rejected: plan.rejected,
       },
-      healthy: Boolean(hostDiag && hostDiag.healthy) && plan.rejected.length === 0,
+      ...(trust
+        ? {
+            trustPolicy: {
+              ok: trustPolicyOk,
+              reason: (trustSummary && trustSummary.reason) || null,
+              error: (trustSummary && trustSummary.error) || null,
+              approvedCount: approvedIds.size,
+              unapprovedTrustedAddons,
+            },
+          }
+        : {}),
+      healthy:
+        Boolean(hostDiag && hostDiag.healthy) &&
+        plan.rejected.length === 0 &&
+        trustPolicyOk &&
+        unapprovedTrustedAddons.length === 0,
     };
   }
 
@@ -107,7 +150,6 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
   }
 
   function unregisterAddonManifestFromCtx(ctx, pluginId) {
-    // R9-F1: CLI checks only flag-like arg syntax; pluginId domain invariant belongs to AddonStorePort
     if (!pluginId || String(pluginId).startsWith('-')) {
       return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
     }
@@ -146,18 +188,22 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
       'Usage: addon-host [options] <command>',
       '',
       'Commands:',
-      '  --status                       Read-only JSON status report',
-      '  --doctor                       Read-only conflict & host integrity diagnostics',
-      '  --validate <manifest.json>     Validate an AddonManifest.v1 file',
-      '  --register <manifest.json>     Validate & atomically register a manifest',
-      '  --unregister <pluginId>        Unregister a plugin manifest',
-      '  --install [--replace-legacy]   Install single shared host bootstrap hook',
-      '  --rollback [--force]           Restore original host bundle byte-identically',
-      '  --version, -v                  Print version',
-      '  --help, -h                     Print this help',
+      '  --status                               Read-only JSON status report',
+      '  --doctor                               Read-only conflict & host integrity diagnostics',
+      '  --validate <manifest.json>             Validate an AddonManifest (v1 or v2) file',
+      '  --register <manifest.json>             Validate & atomically register a manifest',
+      '  --unregister <pluginId>                Unregister a plugin manifest',
+      '  --install [--replace-legacy] [--refresh-orig] Install single shared host bootstrap hook',
+      '  --upgrade [--replace-legacy] [--refresh-orig] Upgrade host bootstrap from prior version',
+      '  --rollback [--force]                   Restore original host bundle byte-identically',
+      '  trust approve <pluginId>               Pin plugin SHA-256 digests in host trust policy',
+      '  trust revoke <pluginId>                Revoke plugin trust approval',
+      '  trust list                             List approved plugin SHA-256 trust pins',
+      '  --version, -v                          Print version',
+      '  --help, -h                             Print this help',
       '',
       'Options:',
-      '  --profile <path-to-profile.js> Use a custom HostProfile module',
+      '  --profile <path-to-profile.js>         Use a custom HostProfile module',
     ].join('\n');
   }
 
@@ -186,6 +232,29 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
 
     // R7-F1: Resolve opaque host context strictly ONCE per CLI invocation
     const ctx = resolveContext(overrides, effectiveProfile);
+
+    if (args[0] === 'trust') {
+      if (!trust) {
+        const out = { ok: false, reason: 'ERR_TRUST_POLICY_PORT_NOT_CONFIGURED' };
+        process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+        process.exitCode = 1;
+        return out;
+      }
+      const sub = args[1];
+      let out;
+      if (sub === 'approve') {
+        out = trust.approvePlugin(ctx, args[2]);
+      } else if (sub === 'revoke') {
+        out = trust.revokePlugin(ctx, args[2]);
+      } else if (sub === 'list') {
+        out = trust.listApproved(ctx);
+      } else {
+        throw new Error(`Unsupported trust subcommand: ${String(sub || '')}`);
+      }
+      process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+      if (!out || !out.ok) process.exitCode = 1;
+      return out;
+    }
 
     if (args.includes('--status') || args.length === 0) {
       const out = buildStatusReportFromCtx(ctx, effectiveProfile);
@@ -223,9 +292,27 @@ function createCliApp({ hostLifecycle, addonStore, defaultProfile, hostVersion =
       return out;
     }
 
+    if (args.includes('--upgrade')) {
+      if (typeof lifecycle.upgradeHost !== 'function') {
+        const out = { ok: false, reason: 'ERR_UPGRADE_UNSUPPORTED' };
+        process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+        process.exitCode = 1;
+        return out;
+      }
+      const out = lifecycle.upgradeHost(ctx, {
+        replaceLegacy: args.includes('--replace-legacy'),
+        refreshOrig: args.includes('--refresh-orig'),
+        hostVersion,
+      });
+      process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+      if (!out || !out.ok) process.exitCode = 1;
+      return out;
+    }
+
     if (args.includes('--install')) {
       const out = lifecycle.installHost(ctx, {
         replaceLegacy: args.includes('--replace-legacy'),
+        refreshOrig: args.includes('--refresh-orig'),
         hostVersion,
       });
       process.stdout.write(JSON.stringify(out, null, 2) + '\n');

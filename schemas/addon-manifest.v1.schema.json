@@ -35,6 +35,11 @@
       "type": "string",
       "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
     },
+    "trustLevel": {
+      "type": "string",
+      "enum": ["trusted", "restricted"],
+      "description": "Explicit execution trust policy. Restricted plugins cannot use mainHook, document-transform, or global CSS."
+    },
     "compatibility": {
       "type": "object",
       "additionalProperties": false,
@@ -88,9 +93,11 @@
             "enum": [
               "title-bar",
               "sidebar",
+              "overview-pane",
               "status-bar",
               "composer-toolbar",
               "settings-pane",
+              "page-section",
               "aux-pane",
               "modal",
               "overlay",
@@ -102,6 +109,11 @@
           "slotId": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9._-]{1,95}$"
+          },
+          "anchor": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+            "description": "Optional semantic HostProfile uiAnchor key (e.g. sidebar, settings-pane, automation-page, customizations-page)."
           },
           "exclusive": {
             "type": "boolean",

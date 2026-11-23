@@ -5,7 +5,13 @@
  *
  * `src/cli/` depends ONLY on these small, host-neutral interfaces rather than
  * concrete host adapters, file locks, or runtime-specific archive formats.
+ *
+ * Option B-Clean (TC-014 LSP): HOST_LIFECYCLE_PORT_METHODS (6) and
+ * ADDON_STORE_PORT_METHODS (4) are strictly preserved unchanged.
+ * Optional TrustPolicyPort is segregated in `src/core/trust-policy-port.js`.
  */
+
+const { TRUST_POLICY_PORT_METHODS, assertTrustPolicyPort } = require('./trust-policy-port');
 
 const HOST_LIFECYCLE_PORT_METHODS = Object.freeze([
   'validateProfile',
@@ -46,6 +52,8 @@ function assertAddonStorePort(port) {
 module.exports = {
   HOST_LIFECYCLE_PORT_METHODS,
   ADDON_STORE_PORT_METHODS,
+  TRUST_POLICY_PORT_METHODS,
   assertHostLifecyclePort,
   assertAddonStorePort,
+  assertTrustPolicyPort,
 };

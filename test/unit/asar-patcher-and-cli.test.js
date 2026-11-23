@@ -125,9 +125,11 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
     assert.equal(inst.status, 'INSTALLED');
     assert.equal(isAsarHostInstalled(asarPath, ANTIGRAVITY_HOST_PROFILE), true);
     assert.equal(fs.statSync(asarPath).size, origBuf.length);
+    // v2.0.0: .orig and .orig.json live in BACKUPS_DIR, NOT alongside app.asar in resources/
+    assert.notEqual(path.dirname(inst.backupPath), path.dirname(asarPath));
 
     // Tamper .orig.json -> rollback must fail closed
-    const metaPath = `${asarPath}.v2.33.0.orig.json`;
+    const metaPath = `${inst.backupPath}.json`;
     const savedMeta = fs.readFileSync(metaPath, 'utf8');
     fs.writeFileSync(metaPath, JSON.stringify({ sha256: '0'.repeat(64), bytes: 1 }), 'utf8');
     assert.equal(rollbackAsarAddonHost(paths, ANTIGRAVITY_HOST_PROFILE).status, 'ERR_ORIG_META_MISMATCH');
@@ -142,7 +144,12 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
     const noIntPath = path.join(dir, 'no-int.asar');
     const noIntOrig = buildSyntheticAsar(noIntPath, { includeIntegrity: false });
     const noIntInst = installAsarAddonHost(
-      { ...paths, ASAR_PATH: noIntPath, ASAR_LOCK_PATH: path.join(dir, 'noint.lock') },
+      {
+        ...paths,
+        ASAR_PATH: noIntPath,
+        ASAR_LOCK_PATH: path.join(dir, 'noint.lock'),
+        BACKUPS_DIR: path.join(dir, 'backups-noint'),
+      },
       ANTIGRAVITY_HOST_PROFILE
     );
     assert.equal(noIntInst.status, 'INSTALLED');
@@ -186,32 +193,47 @@ test('TC-009 (F6): synthetic ASAR exact-size install (with & without integrity),
   }
 });
 
-test('TC-010 (F5): custom non-Antigravity HostProfile works across install, delta>0 comment stripping, .orig reinstall, and rollback', () => {
+test('TC-010 (F5): custom non-Antigravity HostProfile works across install, delta>0 comment stripping, .orig reinstall, and rollback (and rejects process.env anchor overrides)', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-custom-'));
   try {
-    const customProfile = Object.freeze({
-      id: 'acme-electron-app',
+    // v2.0.0 security: custom profile using process.env.* in mainAnchorReplacement MUST fail closed
+    const insecureProfile = Object.freeze({
+      id: 'acme-insecure',
       patchMarker: 'ACME_HOST_LOADER_V1',
-      loaderEnvVar: 'ACME_HOST_LOADER_PATH',
       mainEntry: 'dist/main.js',
       mainAnchorTarget: "app.on('web-contents-created', (_e, contents) => {",
       mainAnchorReplacement:
-        "app.on('web-contents-created', (_e, contents) => {\n// ACME_HOST_LOADER_V1\ntry{require(process.env.ACME_HOST_LOADER_PATH).attachWebContents(contents,app);}catch(_e){}",
-      legacyPatchMarkers: Object.freeze(['ACME_OLD_PATCH']),
+        "app.on('web-contents-created', (_e, contents) => {\n// ACME_HOST_LOADER_V1\ntry{require(process.env.ACME_HOST_LOADER_PATH).initMain(app);}catch(_e){}",
+      legacyPatchMarkers: Object.freeze([]),
       resolvePaths: () => ({}),
     });
-
     const asarPath = path.join(dir, 'app.asar');
     const origBuf = buildSyntheticAsar(asarPath, {
       version: '4.0.0',
-      anchorTarget: customProfile.mainAnchorTarget,
+      anchorTarget: insecureProfile.mainAnchorTarget,
     });
     const paths = {
       ASAR_PATH: asarPath,
       ASAR_LOCK_PATH: path.join(dir, 'asar.lock'),
+      BACKUPS_DIR: path.join(dir, 'backups'),
       ADDONS_DIR: path.join(dir, 'addons.d'),
       LOADER_SCRIPT_PATH: path.join(dir, 'loader.js'),
     };
+    assert.throws(
+      () => installAsarAddonHost(paths, insecureProfile),
+      /ERR_ANCHOR_ENV_OVERRIDE_FORBIDDEN/
+    );
+
+    const customProfile = Object.freeze({
+      id: 'acme-electron-app',
+      patchMarker: 'ACME_HOST_LOADER_V2',
+      mainEntry: 'dist/main.js',
+      mainAnchorTarget: "app.on('web-contents-created', (_e, contents) => {",
+      mainAnchorReplacement:
+        "app.on('web-contents-created', (_e, contents) => {\n// ACME_HOST_LOADER_V2\ntry{const _p=require('path').join(require('os').homedir(),'.acme','loader.js');if(require('path').isAbsolute(_p)&&require('fs').existsSync(_p))require(_p).initMain(app);}catch(_e){}",
+      legacyPatchMarkers: Object.freeze(['ACME_OLD_PATCH']),
+      resolvePaths: () => ({}),
+    });
 
     const inst = installAsarAddonHost(paths, customProfile);
     assert.equal(inst.status, 'INSTALLED');
@@ -360,6 +382,14 @@ test('TC-014 (R5-F1, R6-F1, NB1-NB3): SOLID ISP/DIP segregated ports, non-Electr
   assert.equal(
     validateElectronHostProfile({ ...ANTIGRAVITY_HOST_PROFILE, patchMarker: 'BAD\nMARKER' }).reason,
     'INVALID_PATCH_MARKER_NEWLINE'
+  );
+  assert.equal(
+    validateElectronHostProfile({ ...ANTIGRAVITY_HOST_PROFILE, uiAnchors: 'bad' }).reason,
+    'INVALID_UI_ANCHORS'
+  );
+  assert.equal(
+    validateElectronHostProfile({ ...ANTIGRAVITY_HOST_PROFILE, uiAnchors: { sidebar: [] } }).reason,
+    'INVALID_UI_ANCHOR_ENTRY:sidebar'
   );
 
   const brokenElectronProfile = {
@@ -530,6 +560,154 @@ test('TC-014 (R5-F1, R6-F1, NB1-NB3): SOLID ISP/DIP segregated ports, non-Electr
     }
     assert.equal(fs.existsSync(externalConfigFile), true, 'R9-F1: external config.json must remain untouched');
     assert.equal(fs.existsSync(externalOutsideFile), true, 'R9-F1: external outside.json must remain untouched');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TC-019 (P0): same-version Build A vs Build B mismatch fails closed (ERR_ORIG_BUILD_MISMATCH), --refresh-orig archives previous .orig, and tampered patched ASAR blocks non-force rollback', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-tc019-'));
+  try {
+    const asarPath = path.join(dir, 'app.asar');
+    const paths = {
+      ASAR_PATH: asarPath,
+      ASAR_LOCK_PATH: path.join(dir, 'asar.lock'),
+      ADDONS_DIR: path.join(dir, 'addons.d'),
+      ADDONS_LOCK_PATH: path.join(dir, 'addons.lock'),
+      LOADER_SCRIPT_PATH: path.join(dir, 'addon-host-loader.js'),
+      PLUGINS_ROOT_DIR: path.join(dir, 'plugins'),
+      CONFIG_JSON_PATH: path.join(dir, 'config.json'),
+    };
+    const lifecycle = createElectronHostLifecyclePort();
+    const ctx = { hostProfileId: ANTIGRAVITY_HOST_PROFILE.id, activeProfile: ANTIGRAVITY_HOST_PROFILE, paths };
+
+    // 1) Install Build A (v2.33.0) -> records patchedSha256 in .orig.json -> rollback to pure Build A
+    const buildABuf = buildSyntheticAsar(asarPath, { version: '2.33.0', extraLines: ['// vendor build A'] });
+    const buildASha = crypto.createHash('sha256').update(buildABuf).digest('hex');
+    const instA = installAsarAddonHost(paths, ANTIGRAVITY_HOST_PROFILE);
+    assert.equal(instA.status, 'INSTALLED');
+    assert.equal(instA.origSha256, buildASha);
+    const metaPath = `${instA.backupPath}.json`;
+    const metaA = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    assert.equal(metaA.patchedSha256, instA.sha256);
+    const patchedABuf = fs.readFileSync(asarPath);
+
+    const rbA = rollbackAsarAddonHost(paths, ANTIGRAVITY_HOST_PROFILE);
+    assert.equal(rbA.status, 'ROLLED_BACK');
+    assert.deepEqual(fs.readFileSync(asarPath), buildABuf);
+
+    // 2) Vendor silently ships Build B with SAME version 2.33.0 but different content/SHA
+    const buildBBuf = buildSyntheticAsar(asarPath, { version: '2.33.0', extraLines: ['// vendor hotfix build B'] });
+    const buildBSha = crypto.createHash('sha256').update(buildBBuf).digest('hex');
+    assert.notEqual(buildBSha, buildASha);
+
+    // diagnoseHost must detect origBuildMismatch & mark unhealthy
+    const diagMismatch = lifecycle.diagnoseHost(ctx);
+    assert.equal(diagMismatch.origBuildMismatch, true);
+    assert.equal(diagMismatch.healthy, false);
+
+    // Installing WITHOUT refreshOrig must fail closed and NEVER overwrite Build B with Build A!
+    const blocked = installAsarAddonHost(paths, ANTIGRAVITY_HOST_PROFILE);
+    assert.equal(blocked.status, 'ERR_ORIG_BUILD_MISMATCH');
+    assert.equal(blocked.currentSha256, buildBSha);
+    assert.equal(blocked.backupSha256, buildASha);
+    assert.deepEqual(fs.readFileSync(asarPath), buildBBuf, 'P0: Build B must remain byte-identical when mismatch is blocked');
+
+    // 3) Explicit refreshOrig archives Build A .orig, updates .orig to Build B, and patches Build B
+    const refreshed = lifecycle.installHost(ctx, { refreshOrig: true });
+    assert.equal(refreshed.ok, true);
+    assert.equal(refreshed.status, 'INSTALLED');
+    assert.equal(refreshed.asar.origSha256, buildBSha);
+    const backupsDir = path.dirname(instA.backupPath);
+    const archivedAPath = path.join(backupsDir, `app.asar.v2.33.0.${buildASha.slice(0, 8)}.orig`);
+    assert.equal(fs.existsSync(archivedAPath), true, 'P0: previous Build A .orig must be archived in BACKUPS_DIR');
+    assert.deepEqual(fs.readFileSync(archivedAPath), buildABuf);
+    assert.equal(lifecycle.diagnoseHost(ctx).healthy, true);
+
+    // 4) Tamper patched app.asar (swap in Build A's patched bytes while .orig.json expects Build B's patchedSha256)
+    fs.writeFileSync(asarPath, patchedABuf);
+    const diagTampered = lifecycle.diagnoseHost(ctx);
+    assert.equal(diagTampered.patchedShaMismatch, true);
+    assert.equal(diagTampered.healthy, false);
+
+    // Rollback WITHOUT force must fail closed with ERR_PATCHED_ASAR_UNEXPECTED_MODIFICATION
+    const rbBlocked = rollbackAsarAddonHost(paths, ANTIGRAVITY_HOST_PROFILE);
+    assert.equal(rbBlocked.status, 'ERR_PATCHED_ASAR_UNEXPECTED_MODIFICATION');
+    assert.deepEqual(fs.readFileSync(asarPath), patchedABuf);
+
+    // Rollback WITH force: true overrides explicitly and restores Build B pure .orig
+    const rbForced = rollbackAsarAddonHost(paths, ANTIGRAVITY_HOST_PROFILE, { force: true });
+    assert.equal(rbForced.status, 'ROLLED_BACK');
+    assert.deepEqual(fs.readFileSync(asarPath), buildBBuf);
+
+    // NB3: --refresh-orig against a Build C whose transformExactSize fails must NOT mutate existing Build B .orig!
+    const buildCBuf = buildSyntheticAsar(asarPath, {
+      version: '2.33.0',
+      anchorTarget: '// missing anchor target so transform fails',
+    });
+    const buildBOrigPath = refreshed.asar.backupPath;
+    const buildBOrigBefore = fs.readFileSync(buildBOrigPath);
+    const failedRefresh = installAsarAddonHost(
+      { ...paths, ALLOW_REFRESH_ORIG: true },
+      ANTIGRAVITY_HOST_PROFILE
+    );
+    assert.equal(failedRefresh.status, 'ERR_EXACT_SIZE_TRANSFORM_FAILED');
+    assert.deepEqual(fs.readFileSync(buildBOrigPath), buildBOrigBefore, 'NB3: failed refresh must preserve existing .orig');
+    assert.deepEqual(fs.readFileSync(asarPath), buildCBuf, 'NB3: failed refresh must leave live app.asar untouched');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TC-020 (P2): transactional installHost stages loader first and auto-compensates on ASAR failure or lock contention', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-tc020-'));
+  try {
+    const asarPath = path.join(dir, 'app.asar');
+    const paths = {
+      ASAR_PATH: asarPath,
+      ASAR_LOCK_PATH: path.join(dir, 'asar.lock'),
+      ADDONS_DIR: path.join(dir, 'addons.d'),
+      ADDONS_LOCK_PATH: path.join(dir, 'addons.lock'),
+      LOADER_SCRIPT_PATH: path.join(dir, 'addon-host-loader.js'),
+      PLUGINS_ROOT_DIR: path.join(dir, 'plugins'),
+      CONFIG_JSON_PATH: path.join(dir, 'config.json'),
+    };
+    const lifecycle = createElectronHostLifecyclePort();
+    const ctx = { hostProfileId: ANTIGRAVITY_HOST_PROFILE.id, activeProfile: ANTIGRAVITY_HOST_PROFILE, paths };
+
+    // Case 1: ADDONS_LOCK held -> installHost fails at LOADER_LOCK_FAILED without touching app.asar
+    const pureBuf = buildSyntheticAsar(asarPath);
+    const heldLock = acquireExclusiveLockDetailed(paths.ADDONS_LOCK_PATH);
+    assert.equal(heldLock.ok, true);
+    try {
+      const lockFail = lifecycle.installHost(ctx);
+      assert.equal(lockFail.ok, false);
+      assert.equal(lockFail.phase, 'LOADER_LOCK_FAILED');
+      assert.equal(fs.existsSync(paths.LOADER_SCRIPT_PATH), false);
+      assert.deepEqual(fs.readFileSync(asarPath), pureBuf);
+    } finally {
+      releaseExclusiveLock(paths.ADDONS_LOCK_PATH, heldLock.token);
+    }
+
+    // Case 2: Fresh install where ASAR fails (legacy direct patch present, replaceLegacy=false)
+    //         -> staged loader must be removed (compensated: true)
+    const legacyBuf = buildSyntheticAsar(asarPath, { extraLines: ['// AGY_STATUSBAR_LEGACY'] });
+    const freshFail = lifecycle.installHost(ctx, { replaceLegacy: false });
+    assert.equal(freshFail.ok, false);
+    assert.equal(freshFail.phase, 'ASAR_PATCH_FAILED');
+    assert.equal(freshFail.compensated, true);
+    assert.equal(freshFail.asar.status, 'ERR_LEGACY_DIRECT_PATCH_DETECTED');
+    assert.equal(fs.existsSync(paths.LOADER_SCRIPT_PATH), false, 'P2: newly staged loader must be deleted on ASAR failure');
+    assert.deepEqual(fs.readFileSync(asarPath), legacyBuf);
+
+    // Case 3: Existing prior loader present + ASAR patch failure -> prior loader bytes restored intact
+    const priorLoader = '// prior-loader-v1.0.1-sentinel\n';
+    fs.writeFileSync(paths.LOADER_SCRIPT_PATH, priorLoader, 'utf8');
+    const upgradeFail = lifecycle.installHost(ctx, { replaceLegacy: false });
+    assert.equal(upgradeFail.ok, false);
+    assert.equal(upgradeFail.phase, 'ASAR_PATCH_FAILED');
+    assert.equal(upgradeFail.compensated, true);
+    assert.equal(fs.readFileSync(paths.LOADER_SCRIPT_PATH, 'utf8'), priorLoader, 'P2: prior loader must be restored verbatim');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

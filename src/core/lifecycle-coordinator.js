@@ -1,8 +1,10 @@
 'use strict';
 
 /**
- * Vendor-neutral Addon Lifecycle Coordinator.
- * - Validates every manifest against Ajv schema, confinement, and host compatibility.
+ * Vendor- & runtime-neutral Addon Lifecycle Coordinator.
+ * - Validates every v1/v2 manifest against precompiled standalone JSON schemas,
+ *   injected FileSystemPort confinement, host compatibility, and Default-Deny trust policy.
+ * - Normalizes every active manifest into the unified v2 representation.
  * - Deterministic sorting by (loadOrder ASC, pluginId ASC).
  * - Filters out disabled plugins via injected `isEnabled(pluginId)` read-only gate.
  * - Isolates invalid manifests and slot/namespace/IPC conflicts without blocking healthy peers.
@@ -17,7 +19,9 @@ function planAddonExecution(
     pluginsRootDir = null,
     checkFilesExist = false,
     hostProfileId = null,
-    hostVersion = null,
+    hostVersion = undefined,
+    strictTrustPolicy = true,
+    fsPort = null,
     isEnabled = () => true,
   } = {}
 ) {
@@ -32,6 +36,8 @@ function planAddonExecution(
       checkFilesExist,
       hostProfileId,
       hostVersion,
+      strictTrustPolicy,
+      fsPort,
     });
     if (!check.ok) {
       rejected.push({
