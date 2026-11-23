@@ -5,7 +5,18 @@
 
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)
 
-**Single, vendor-independent native desktop addon host framework (`v2.2.0`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, SHA-256 trust pinning, and bidirectional trusted `settingsBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent native desktop & remote web addon host framework (`v2.3.0`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+
+## Key Updates in v2.3.0 (Remote Web Host Integration & Option A Named-Scope `configBridge`)
+
+- **Remote Web Host (`antigravity-remote-web`) & Unified `HostBridgePort`**:
+  - Extracts a transport-neutral `HostBridgePort` so the exact same renderer kernel (`src/runtime/renderer/kernel.js`) runs on both Desktop Electron (preload `claim(nonce)`) and Remote Web (`https://antigravity.google.com/*`).
+  - Adds multi-profile compatibility (`compatibleHostProfiles`, `compatibility.hostProfiles`, `compatibility.excludeHostProfiles`) and `supportedCapabilities` gating: existing `antigravity-desktop` `AddonManifest.v2` renderer addons automatically run on Remote Web, dual-capability addons safely skip `mainHook`, and `mainHook`-only addons fail closed (`ERR_UNSUPPORTED_HOST_CAPABILITY`).
+  - Ships vendor-neutral browser runtime modules (`src/adapters/remote-web/`), Shadow-DOM status/settings/diagnostics drawer, zero-HTML-sink DOM helpers, scoped TrustedTypes guard, and deterministic Userscript & Bookmarklet builder (`npm run build:remote`, `npm run check:remote`, `addon-host --build-remote`, `addon-host --profile remote-web --status`). See [Remote Web Host Guide (`docs/REMOTE_WEB.md`)](./docs/REMOTE_WEB.md).
+- **Option A Declarative Named-Scope `configBridge` (`AddonManifest.v2`)**:
+  - Lets explicitly trusted (`trustLevel: "trusted"` + SHA-256 `trust-policy.json` pinned) renderer plugins declare vendor-neutral `configBridge.scopes` (`[{ scopeId, access: "ro" | "rw", maxBytes? }]`) with single-`rw` writer enforcement in `SlotRegistry` (`ERR_DUPLICATE_CONFIG_SCOPE_WRITER`).
+  - Antigravity profile defines 3 named scopes exclusively in `src/profiles/antigravity.js`: `antigravity:mcp-config` (`rw`, `~/.gemini/config/mcp_config.json` with private rotating backups), `antigravity:plugin-mcp-configs` (`ro`, `~/.gemini/config/plugins/*/mcp_config.json`), and `antigravity:mcp-config-legacy` (`ro`, `~/.gemini/antigravity/mcp_config.json`).
+  - Main process enforces ancestor symlink/junction confinement, single-fd bounded reads, raw-text corruption recovery (`status: "corrupt"`), advisory lockfiles, SHA-256 CAS (`ERR_CONFIG_CAS_CONFLICT`), `fsyncSync` + Windows retryable atomic `renameSync`, and zero `app.asar` re-patching.
 
 ## Key Updates in v2.2.0 (Trusted `settingsBridge.saveSettings` IPC, Centered Modal Portal & Hardening)
 
@@ -54,6 +65,12 @@ node ./bin/addon-host.js trust list
 node ./bin/addon-host.js trust approve <pluginId>
 node ./bin/addon-host.js trust revoke <pluginId>
 
+# Build & verify Remote Web Userscript / Bookmarklet bundle
+npm run check:remote
+npm run build:remote
+node ./bin/addon-host.js --profile remote-web --status
+node ./bin/addon-host.js --build-remote --no-addons --check
+
 # Install, upgrade (V1 -> V2), or roll back the shared app.asar bootstrap hook
 node ./bin/addon-host.js --install
 node ./bin/addon-host.js --upgrade
@@ -74,6 +91,8 @@ if (rootEl) {
 
 ## Documentation
 
+- [Release Notes (`v2.3.0` EN/KO)](./RELEASE_NOTES_v2.3.0.md)
+- [Remote Web Host Guide (`docs/REMOTE_WEB.md`)](./docs/REMOTE_WEB.md)
 - [Release Notes (`v2.2.0` EN/KO)](./RELEASE_NOTES_v2.2.0.md)
 - [Release Notes (`v2.1.0` EN/KO)](./RELEASE_NOTES_v2.1.0.md)
 - [Release Notes (`v2.0.0` EN/KO)](./RELEASE_NOTES_v2.0.0.md)

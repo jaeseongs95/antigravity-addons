@@ -60,6 +60,8 @@ function collectExecutableAddons(
   {
     checkFilesExist = true,
     hostProfileId = null,
+    compatibleHostProfiles = undefined,
+    supportedCapabilities = undefined,
     hostVersion = undefined,
     strictTrustPolicy = true,
     fsPort = null,
@@ -71,6 +73,8 @@ function collectExecutableAddons(
     pluginsRootDir: paths.PLUGINS_ROOT_DIR,
     checkFilesExist,
     hostProfileId,
+    compatibleHostProfiles,
+    supportedCapabilities,
     hostVersion,
     strictTrustPolicy,
     fsPort: activeFsPort,
@@ -82,7 +86,7 @@ function buildHostLoaderScriptSource(
   paths,
   profile,
   {
-    hostVersion = '2.1.1',
+    hostVersion = '2.3.0',
     strictTrustPolicy = true,
     mainHookTimeoutMs = 5000,
     rendererExecTimeoutMs = 10000,

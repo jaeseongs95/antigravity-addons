@@ -830,3 +830,90 @@ test('v2.3.0 Main IPC CONFIG_READ / CONFIG_WRITE enforces claimed origin and tru
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('TC-V23-006: CLI --profile remote-web, --build-remote, and src/index.js integration wiring', () => {
+  const { spawnSync } = require('node:child_process');
+  const pkgIndex = require('../../src/index');
+
+  assert.equal(pkgIndex.ANTIGRAVITY_REMOTE_WEB_PROFILE.id, 'antigravity-remote-web');
+  assert.equal(typeof pkgIndex.toBrowserRemoteWebProfile, 'function');
+  assert.equal(typeof pkgIndex.bootRemoteWebHost, 'function');
+  assert.equal(typeof pkgIndex.collectRemoteWebAddons, 'function');
+
+  const tmpDir = makeTmpDir();
+  try {
+    const configDir = path.join(tmpDir, '.gemini', 'config');
+    const agyDir = path.join(tmpDir, '.gemini', 'antigravity');
+    const pluginsRoot = path.join(configDir, 'plugins');
+    const addonsDir = path.join(agyDir, 'addons.d');
+    const remoteDistDir = path.join(agyDir, 'remote-dist');
+    const pluginDir = path.join(pluginsRoot, 'desktop-compat-ui');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.mkdirSync(addonsDir, { recursive: true });
+
+    const rendererPath = path.join(pluginDir, 'renderer.js');
+    fs.writeFileSync(rendererPath, 'void 0;\n', 'utf8');
+    const mainHookPath = path.join(pluginDir, 'main-hook.js');
+    fs.writeFileSync(mainHookPath, 'module.exports = {};\n', 'utf8');
+
+    const manifest = makeBaseManifest({
+      pluginId: 'desktop-compat-ui',
+      trustLevel: 'trusted',
+      capabilities: ['renderer', 'mainHook'],
+      entry: { rendererScript: 'renderer.js', mainHookScript: 'main-hook.js' },
+      compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '2.0.0' },
+    });
+    fs.writeFileSync(path.join(addonsDir, 'desktop-compat-ui.json'), JSON.stringify(manifest, null, 2), 'utf8');
+    fs.writeFileSync(
+      path.join(configDir, 'config.json'),
+      JSON.stringify({ plugins: { 'desktop-compat-ui': { enabled: true } } }),
+      'utf8'
+    );
+
+    const env = {
+      ...process.env,
+      HOME: tmpDir,
+      USERPROFILE: tmpDir,
+      AGY_REMOTE_DIST_DIR: remoteDistDir,
+    };
+
+    const binPath = path.resolve(__dirname, '..', '..', 'bin', 'addon-host.js');
+
+    // 1. --profile remote-web --status auto-includes desktop v2 renderer addon & skips mainHook
+    const statusRes = spawnSync(process.execPath, [binPath, '--profile', 'remote-web', '--status'], {
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(statusRes.status, 0, statusRes.stderr);
+    const statusJson = JSON.parse(statusRes.stdout);
+    assert.equal(statusJson.hostVersion, '2.3.0');
+    assert.equal(statusJson.hostProfileId, 'antigravity-remote-web');
+    assert.equal(statusJson.hostStatus.mode, 'remote-web');
+    assert.equal(statusJson.activeAddons.length, 1);
+    assert.equal(statusJson.activeAddons[0].pluginId, 'desktop-compat-ui');
+
+    // 2. --profile remote-web --install fails closed with ERR_REMOTE_WEB_USES_BUILD_REMOTE
+    const installRes = spawnSync(process.execPath, [binPath, '--profile', 'remote-web', '--install'], {
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(installRes.status, 1);
+    const installJson = JSON.parse(installRes.stdout);
+    assert.equal(installJson.ok, false);
+    assert.equal(installJson.reason, 'ERR_REMOTE_WEB_USES_BUILD_REMOTE');
+
+    // 3. --build-remote --no-addons --check passes determinism & AST gate
+    const buildRes = spawnSync(process.execPath, [binPath, '--build-remote', '--no-addons', '--check'], {
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(buildRes.status, 0, buildRes.stderr);
+    const buildJson = JSON.parse(buildRes.stdout);
+    assert.equal(buildJson.ok, true);
+    assert.equal(buildJson.mode, 'check');
+    assert.equal(buildJson.addonCount, 0);
+    assert.equal(buildJson.astViolations, 0);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

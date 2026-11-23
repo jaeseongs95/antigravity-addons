@@ -5,7 +5,18 @@
 
 > **언어**: [English (README.md)](./README.md) | 한국어
 
-**무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, SHA-256 신뢰 핀닝, 양방향 신뢰 `settingsBridge` 설정 동기화를 제공하는 벤더 중립 데스크톱 애드온 호스트 프레임워크(`v2.2.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+**무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Remote Web 호스트 통합, Shadow DOM UI 격리, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.3.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+
+## v2.3.0 주요 업데이트 (Remote Web 호스트 통합 · Option A Named-Scope `configBridge`)
+
+- **Remote Web 호스트(`antigravity-remote-web`) 및 공용 `HostBridgePort` 통합**:
+  - 전송 계층 중립 `HostBridgePort`를 도입해 단일 렌더러 커널(`src/runtime/renderer/kernel.js`)이 Desktop Electron(프리로드 `claim(nonce)`)과 Remote Web(`https://antigravity.google.com/*`) 모두에서 동일하게 실행됩니다.
+  - 다중 프로필 호환성(`compatibleHostProfiles`, `compatibility.hostProfiles`, `compatibility.excludeHostProfiles`)과 `supportedCapabilities` 게이팅을 추가했습니다. 기존 `antigravity-desktop`용 `AddonManifest.v2` 렌더러 애드온은 수정 없이 Remote Web에 자동 포함되며, `mainHook` 병행 애드온은 안전하게 `mainHook`만 스킵하고 `mainHook` 전용 애드온은 `ERR_UNSUPPORTED_HOST_CAPABILITY`로 차단됩니다.
+  - 벤더 중립 브라우저 어댑터(`src/adapters/remote-web/`), Shadow-DOM 상태·설정·진단 드로어, HTML 싱크 제로 DOM 헬퍼, 스코프드 TrustedTypes 가드, 결정적 Userscript & Bookmarklet 빌더(`npm run build:remote`, `npm run check:remote`, `addon-host --build-remote`, `addon-host --profile remote-web --status`)를 제공합니다. 자세한 내용은 [Remote Web 호스트 가이드 (`docs/REMOTE_WEB.ko.md`)](./docs/REMOTE_WEB.ko.md)를 참고하세요.
+- **Option A 선언형 Named-Scope `configBridge` (`AddonManifest.v2`)**:
+  - `trustLevel: "trusted"` 및 `trust-policy.json` SHA-256 승인을 받은 렌더러 플러그인이 벤더 중립 `configBridge.scopes` (`[{ scopeId, access: "ro" | "rw", maxBytes? }]`)를 선언할 수 있으며, `SlotRegistry`가 `scopeId`당 단일 `rw` 작성자 배타성(`ERR_DUPLICATE_CONFIG_SCOPE_WRITER`)을 강제합니다.
+  - Antigravity 전용 3개 Named Scope(`antigravity:mcp-config` `rw`, `antigravity:plugin-mcp-configs` `ro`, `antigravity:mcp-config-legacy` `ro`)는 `src/profiles/antigravity.js`에만 격리 정의됩니다.
+  - 메인 프로세스에서 상위 경로 심볼릭 링크/정션 차단, 단일 fd 크기 제한 읽기, 손상 JSON 원문 복구(`status: "corrupt"`), 권고 락 파일, SHA-256 CAS(`ERR_CONFIG_CAS_CONFLICT`), `fsyncSync` + Windows 재시도 원자적 `renameSync`를 수행하며 `app.asar` 재패치는 0바이트입니다.
 
 ## v2.2.0 주요 업데이트 (신뢰 `settingsBridge.saveSettings` IPC · 모달 중앙 정렬 · 보안 경화)
 
@@ -54,6 +65,12 @@ node ./bin/addon-host.js trust list
 node ./bin/addon-host.js trust approve <pluginId>
 node ./bin/addon-host.js trust revoke <pluginId>
 
+# Remote Web Userscript / Bookmarklet 번들 빌드 및 검증
+npm run check:remote
+npm run build:remote
+node ./bin/addon-host.js --profile remote-web --status
+node ./bin/addon-host.js --build-remote --no-addons --check
+
 # 공유 app.asar 부트스트랩 설치, 업그레이드(V1 -> V2) 및 롤백
 node ./bin/addon-host.js --install
 node ./bin/addon-host.js --upgrade
@@ -62,6 +79,8 @@ node ./bin/addon-host.js --rollback
 
 ## 문서
 
+- [릴리스 노트 (`v2.3.0` 영문/국문)](./RELEASE_NOTES_v2.3.0.md)
+- [Remote Web 호스트 가이드 (`docs/REMOTE_WEB.ko.md`)](./docs/REMOTE_WEB.ko.md)
 - [릴리스 노트 (`v2.2.0` 영문/국문)](./RELEASE_NOTES_v2.2.0.md)
 - [릴리스 노트 (`v2.1.0` 영문/국문)](./RELEASE_NOTES_v2.1.0.md)
 - [릴리스 노트 (`v2.0.0` 영문/국문)](./RELEASE_NOTES_v2.0.0.md)
