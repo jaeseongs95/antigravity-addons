@@ -82,7 +82,7 @@ function buildHostLoaderScriptSource(
   paths,
   profile,
   {
-    hostVersion = '2.0.0',
+    hostVersion = '2.1.0',
     strictTrustPolicy = true,
     mainHookTimeoutMs = 5000,
     rendererExecTimeoutMs = 10000,
@@ -113,6 +113,7 @@ function buildHostLoaderScriptSource(
         ? profile.isolatedWorldId
         : 998,
     addonsDir: paths.ADDONS_DIR,
+    settingsDataDir: paths.HOST_DATA_DIR || loaderDir || (paths.ADDONS_DIR ? path.dirname(path.resolve(paths.ADDONS_DIR)) : null),
     pluginsRootDir: paths.PLUGINS_ROOT_DIR,
     configJsonPath: paths.CONFIG_JSON_PATH || null,
     trustPolicyPath:

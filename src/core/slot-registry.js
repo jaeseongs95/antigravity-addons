@@ -12,6 +12,7 @@ function createSlotRegistry() {
   const entriesBySlotKind = new Map();
   const ownersByStorageNs = new Map();
   const ownersByIpcPrefix = new Map();
+  const ownersBySettingsFile = new Map();
 
   function registerManifestSlots(manifest) {
     const pluginId = manifest && manifest.pluginId;
@@ -111,6 +112,29 @@ function createSlotRegistry() {
       }
     }
 
+    // 5) Settings bridge filename collision (unique per active manifest)
+    const settingsFileName =
+      manifest &&
+      manifest.settingsBridge &&
+      typeof manifest.settingsBridge === 'object' &&
+      typeof manifest.settingsBridge.fileName === 'string' &&
+      manifest.settingsBridge.fileName.trim()
+        ? manifest.settingsBridge.fileName.trim()
+        : null;
+    const settingsFileKey = settingsFileName ? settingsFileName.toLowerCase() : null;
+    if (settingsFileKey) {
+      const exSettingsOwner = ownersBySettingsFile.get(settingsFileKey);
+      if (exSettingsOwner && exSettingsOwner !== pluginId) {
+        conflicts.push({
+          code: 'ERR_DUPLICATE_SETTINGS_FILE',
+          kind: 'DUPLICATE_SETTINGS_FILE',
+          fileName: settingsFileName,
+          existingPluginId: exSettingsOwner,
+          incomingPluginId: pluginId,
+        });
+      }
+    }
+
     if (conflicts.length > 0) {
       return { ok: false, reason: conflicts[0].code, conflicts };
     }
@@ -130,6 +154,7 @@ function createSlotRegistry() {
     }
     if (storageNs) ownersByStorageNs.set(storageNs, pluginId);
     if (ipcPrefix) ownersByIpcPrefix.set(ipcPrefix, pluginId);
+    if (settingsFileKey) ownersBySettingsFile.set(settingsFileKey, pluginId);
 
     return { ok: true, conflicts: [] };
   }
@@ -143,7 +168,9 @@ function createSlotRegistry() {
     for (const [k, v] of ownersByStorageNs.entries()) storageNamespaces[k] = v;
     const ipcPrefixes = Object.create(null);
     for (const [k, v] of ownersByIpcPrefix.entries()) ipcPrefixes[k] = v;
-    return { bySlotId, bySlot, storageNamespaces, ipcPrefixes };
+    const settingsBridgeFiles = Object.create(null);
+    for (const [k, v] of ownersBySettingsFile.entries()) settingsBridgeFiles[k] = v;
+    return { bySlotId, bySlot, storageNamespaces, ipcPrefixes, settingsBridgeFiles };
   }
 
   return {

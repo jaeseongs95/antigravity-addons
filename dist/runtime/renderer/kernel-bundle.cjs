@@ -1727,6 +1727,34 @@ const { createModalPortal } = require('./modal-portal');
 const { createRegionObserver } = require('./region-observer');
 const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
 
+const FORBIDDEN_CLONE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function deepFreezeClone(value, seen = new WeakMap()) {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (seen.has(value)) {
+    return seen.get(value);
+  }
+  if (Array.isArray(value)) {
+    const out = [];
+    seen.set(value, out);
+    for (let i = 0; i < value.length; i++) {
+      out.push(deepFreezeClone(value[i], seen));
+    }
+    return Object.freeze(out);
+  }
+  const out = {};
+  seen.set(value, out);
+  const keys = Object.keys(value);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (FORBIDDEN_CLONE_KEYS.has(k)) continue;
+    out[k] = deepFreezeClone(value[k], seen);
+  }
+  return Object.freeze(out);
+}
+
 function createRendererKernel(doc = globalThis.document, win = globalThis.window || globalThis) {
   let booted = false;
   let docGenId = 0;
@@ -1742,6 +1770,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   const pluginDisposers = new Map(); // pluginId -> Set<Function>
   const pluginMarkDisposed = new Map(); // pluginId -> Set<Function>
   const pluginActions = new Map(); // pluginId -> Map<actionId, object>
+  const pluginSettingsAllowed = new Set(); // pluginId (trusted + settingsBridge declared)
+  const pluginSettingsSnapshots = new Map(); // pluginId -> frozen snapshot
+  const pluginSettingsListeners = new Map(); // pluginId -> Set<Function>
   const stagedHandles = new Map(); // runNonce -> { pluginId, handle } (S-1 CSP-safe two-phase execution)
   const recordedErrors = [];
   let nonceSeq = 0;
@@ -1870,6 +1901,13 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     if (regionObserver) regionObserver.disposePluginObservers(pluginId);
     if (settingsTabs) settingsTabs.disposePluginTabs(pluginId);
     pluginActions.delete(pluginId);
+    pluginSettingsAllowed.delete(pluginId);
+    pluginSettingsSnapshots.delete(pluginId);
+    const settingsSubs = pluginSettingsListeners.get(pluginId);
+    if (settingsSubs) {
+      settingsSubs.clear();
+      pluginSettingsListeners.delete(pluginId);
+    }
     return true;
   }
 
@@ -1878,13 +1916,25 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     return disposePluginInternal(pluginId);
   }
 
-  function createPluginHandle(pluginMeta, token) {
+  function createPluginHandle(pluginMeta, token, initialSettingsSnapshot = null) {
     assertHostToken(token);
     if (!booted) {
       throw new Error('ERR_KERNEL_NOT_BOOTED');
     }
     const pluginId = pluginMeta.pluginId;
+    const effectiveTrustLevel = pluginMeta.trustLevel || 'restricted';
+    const hasSettingsBridge = Boolean(pluginMeta.hasSettingsBridge && effectiveTrustLevel === 'trusted');
     let disposed = false;
+
+    if (hasSettingsBridge) {
+      pluginSettingsAllowed.add(pluginId);
+      pluginSettingsSnapshots.set(
+        pluginId,
+        initialSettingsSnapshot && typeof initialSettingsSnapshot === 'object'
+          ? deepFreezeClone(initialSettingsSnapshot)
+          : null
+      );
+    }
 
     let markers = pluginMarkDisposed.get(pluginId);
     if (!markers) {
@@ -1902,9 +1952,10 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     const handle = Object.freeze({
       pluginId,
       version: pluginMeta.version || '0.0.0',
-      trustLevel: pluginMeta.trustLevel || 'restricted',
+      trustLevel: effectiveTrustLevel,
       schemaVersion: 2,
       sourceSchemaVersion: pluginMeta.sourceSchemaVersion || 2,
+      hasSettingsBridge,
 
       mountSlot(slotId, opts) {
         assertActive();
@@ -1993,6 +2044,31 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         });
       },
 
+      getSettings() {
+        assertActive();
+        if (!hasSettingsBridge) return null;
+        return pluginSettingsSnapshots.get(pluginId) || null;
+      },
+
+      onSettingsChange(callback) {
+        assertActive();
+        if (typeof callback !== 'function') {
+          throw new Error('ERR_INVALID_SETTINGS_CALLBACK');
+        }
+        if (!hasSettingsBridge) {
+          throw new Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
+        }
+        let subs = pluginSettingsListeners.get(pluginId);
+        if (!subs) {
+          subs = new Set();
+          pluginSettingsListeners.set(pluginId, subs);
+        }
+        subs.add(callback);
+        return () => {
+          subs.delete(callback);
+        };
+      },
+
       addManagedListener(target, type, listener, opts) {
         assertActive();
         if (!target || typeof target.addEventListener !== 'function') {
@@ -2053,12 +2129,41 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     return handle;
   }
 
-  function stagePluginHandle(pluginMeta, token) {
+  function stagePluginHandle(pluginMeta, token, initialSettingsSnapshot = null) {
     assertHostToken(token);
-    const handle = createPluginHandle(pluginMeta, token);
+    const handle = createPluginHandle(pluginMeta, token, initialSettingsSnapshot);
     const runNonce = generateRunNonce();
     stagedHandles.set(runNonce, { pluginId: pluginMeta.pluginId, handle });
     return { ok: true, runNonce };
+  }
+
+  function pushPluginSettings(pluginId, snapshot, token) {
+    assertHostToken(token);
+    if (!booted) {
+      return { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED', delivered: 0 };
+    }
+    if (!pluginSettingsAllowed.has(pluginId)) {
+      return { ok: false, reason: 'ERR_SETTINGS_BRIDGE_NOT_BOUND', delivered: 0 };
+    }
+    const frozen = snapshot && typeof snapshot === 'object' ? deepFreezeClone(snapshot) : null;
+    pluginSettingsSnapshots.set(pluginId, frozen);
+    const subs = pluginSettingsListeners.get(pluginId);
+    if (!subs || subs.size === 0) {
+      return { ok: true, delivered: 0 };
+    }
+    let delivered = 0;
+    for (const cb of Array.from(subs)) {
+      delivered += 1;
+      try {
+        const ret = cb(frozen);
+        if (ret && typeof ret.then === 'function') {
+          ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : String(err)));
+        }
+      } catch (err) {
+        reportPluginError(pluginId, err && err.message ? err.message : String(err));
+      }
+    }
+    return { ok: true, delivered };
   }
 
   function consumeStagedHandle(runNonce) {
@@ -2080,6 +2185,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     boot,
     createPluginHandle,
     stagePluginHandle,
+    pushPluginSettings,
     consumeStagedHandle,
     clearStagedHandle,
     disposePlugin,

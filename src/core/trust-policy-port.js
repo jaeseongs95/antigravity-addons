@@ -33,12 +33,21 @@ function getPrivilegedRequirements(manifest) {
   const slots = Array.isArray(manifest && manifest.uiSlots) ? manifest.uiSlots : [];
   const hasMainHook = caps.has('mainHook');
   const hasDocumentTransform = slots.some((s) => s && s.slot === 'document-transform');
+  const hasSettingsBridge = Boolean(
+    manifest &&
+      manifest.settingsBridge &&
+      typeof manifest.settingsBridge === 'object' &&
+      typeof manifest.settingsBridge.fileName === 'string' &&
+      manifest.settingsBridge.fileName.length > 0
+  );
   const required = [];
   if (hasMainHook) required.push('mainHook');
   if (hasDocumentTransform) required.push('document-transform');
+  if (hasSettingsBridge) required.push('settingsBridge');
   return {
     hasMainHook,
     hasDocumentTransform,
+    hasSettingsBridge,
     requiresTrustApproval: required.length > 0 || (manifest && manifest.trustLevel === 'trusted'),
     privilegedCapabilities: required,
   };

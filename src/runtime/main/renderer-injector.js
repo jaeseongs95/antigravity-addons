@@ -14,6 +14,7 @@
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { ISOLATED_WORLD_ID, LIFECYCLE_STATES } = require('../shared/constants');
+const { serializeSafeInlineJson } = require('../shared/safe-json');
 const { readVerifiedRendererScript } = require('./trust-verifier');
 
 function withExecTimeout(promise, timeoutMs, label) {
@@ -51,15 +52,29 @@ function createRendererInjector({
   rendererExecTimeoutMs = 10000,
   planProvider,
   policyProvider,
+  settingsBridge = null,
   recordDiag = () => {},
   lifecycleStates = new Map(),
 } = {}) {
   const queuesByWcId = new Map();
+  const webContentsByWcId = new Map();
   const kernelGenByWcId = new Map(); // wcId -> claimed docGenId
   const hostTokensByWcId = new Map(); // wcId -> per-document-generation CSPRNG kernel auth token (SEC-02)
   const injectedPluginsByWcId = new Map(); // wcId -> Set<pluginId>
+  const trustedSettingsByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, fileName, maxBytes }>
   const navAttemptSeqByWcId = new Map(); // wcId -> incremented on did-start-navigation to abort in-flight loops without bricking live doc (R-1)
   const rendererErrors = [];
+
+  function syncSettingsBridgeBindings() {
+    if (!settingsBridge || typeof settingsBridge.syncPlugins !== 'function') return;
+    const union = new Map();
+    for (const map of trustedSettingsByWcId.values()) {
+      for (const [pluginId, spec] of map.entries()) {
+        if (!union.has(pluginId)) union.set(pluginId, spec);
+      }
+    }
+    settingsBridge.syncPlugins(Array.from(union.values()));
+  }
 
   function recordRendererError(pluginId, detail) {
     rendererErrors.push({
@@ -160,6 +175,11 @@ function createRendererInjector({
     );
     const activeIds = new Set(activeRendererAddons.map((a) => a.pluginId));
     const injectedSet = injectedPluginsByWcId.get(wcId) || new Set();
+    let trustedSettingsMap = trustedSettingsByWcId.get(wcId);
+    if (!trustedSettingsMap) {
+      trustedSettingsMap = new Map();
+      trustedSettingsByWcId.set(wcId, trustedSettingsMap);
+    }
 
     // Dispose any previously injected plugins that are now disabled/unregistered
     const hostToken = hostTokensByWcId.get(wcId) || null;
@@ -173,6 +193,7 @@ function createRendererInjector({
             `dispose:${oldId}`
           );
           injectedSet.delete(oldId);
+          trustedSettingsMap.delete(oldId);
           lifecycleStates.set(oldId, LIFECYCLE_STATES.DISPOSED);
         } catch (err) {
           if (!isStillCurrent()) return;
@@ -201,12 +222,26 @@ function createRendererInjector({
         continue;
       }
 
+      const settingsSpec =
+        addon.manifest.settingsBridge &&
+        typeof addon.manifest.settingsBridge === 'object' &&
+        typeof addon.manifest.settingsBridge.fileName === 'string' &&
+        addon.manifest.settingsBridge.fileName.length > 0
+          ? addon.manifest.settingsBridge
+          : null;
+      const hasSettingsBridge = Boolean(settingsSpec && verified.effectiveTrustLevel === 'trusted');
+      const initialSettingsSnapshot =
+        hasSettingsBridge && settingsBridge && typeof settingsBridge.readSnapshotForPlugin === 'function'
+          ? settingsBridge.readSnapshotForPlugin(addon.pluginId, settingsSpec)
+          : null;
+
       const pluginMeta = {
         pluginId: addon.pluginId,
         version: addon.manifest.version,
         sourceSchemaVersion: addon.manifest.sourceSchemaVersion || 2,
         trustLevel: verified.effectiveTrustLevel,
         hasDocumentTransformSlot: Boolean(addon.hasDocumentTransformSlot),
+        hasSettingsBridge,
         uiSlots: addon.manifest.uiSlots || [],
         isolation: addon.manifest.isolation || {},
       };
@@ -218,7 +253,7 @@ function createRendererInjector({
           contents,
           `(() => {
             if (!globalThis.__addonHostKernel) return { ok: false, reason: 'NO_KERNEL' };
-            return globalThis.__addonHostKernel.stagePluginHandle(${JSON.stringify(pluginMeta)}, ${JSON.stringify(hostToken)});
+            return globalThis.__addonHostKernel.stagePluginHandle(${serializeSafeInlineJson(pluginMeta)}, ${JSON.stringify(hostToken)}, ${serializeSafeInlineJson(initialSettingsSnapshot)});
           })()`,
           `stage:${addon.pluginId}`
         );
@@ -279,9 +314,17 @@ ${verified.source}
         if (!isStillCurrent()) return;
         if (execRes && execRes.ok) {
           injectedSet.add(addon.pluginId);
+          if (hasSettingsBridge && settingsSpec) {
+            trustedSettingsMap.set(addon.pluginId, {
+              pluginId: addon.pluginId,
+              fileName: settingsSpec.fileName,
+              maxBytes: settingsSpec.maxBytes,
+            });
+          }
           lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.ACTIVE);
         } else {
           injectedSet.add(addon.pluginId);
+          trustedSettingsMap.delete(addon.pluginId);
           lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
           recordRendererError(addon.pluginId, (execRes && execRes.error) || 'ERR_PLUGIN_EXEC');
           try {
@@ -308,6 +351,39 @@ ${verified.source}
     }
 
     injectedPluginsByWcId.set(wcId, injectedSet);
+    syncSettingsBridgeBindings();
+  }
+
+  function pushSettingsUpdate(pluginId, snapshot) {
+    const tasks = [];
+    for (const [wcId, map] of trustedSettingsByWcId.entries()) {
+      if (!map || !map.has(pluginId)) continue;
+      const contents = webContentsByWcId.get(wcId);
+      if (!contents) continue;
+      tasks.push(
+        enqueue(wcId, async () => {
+          if (typeof contents.isDestroyed === 'function' && contents.isDestroyed()) return;
+          const activeMap = trustedSettingsByWcId.get(wcId);
+          if (!activeMap || !activeMap.has(pluginId)) return;
+          const genId = kernelGenByWcId.get(wcId);
+          const hostToken = hostTokensByWcId.get(wcId);
+          const latest = originResolver.getState(wcId);
+          if (!genId || !hostToken || !latest || latest.docGenId !== genId) return;
+          const curUrl = typeof contents.getURL === 'function' ? contents.getURL() : latest.pinnedUrl;
+          if (!originResolver.isAllowedUrl(curUrl)) return;
+          try {
+            await execInWorld(
+              contents,
+              `globalThis.__addonHostKernel && globalThis.__addonHostKernel.pushPluginSettings(${JSON.stringify(pluginId)}, ${serializeSafeInlineJson(snapshot)}, ${JSON.stringify(hostToken)})`,
+              `settings-push:${pluginId}`
+            );
+          } catch (err) {
+            recordDiag('warn', 'SETTINGS_PUSH_ERR', `${pluginId}@wc${wcId}: ${err && err.message ? err.message : String(err)}`);
+          }
+        })
+      );
+    }
+    return Promise.allSettled(tasks);
   }
 
   function scheduleSync(contents) {
@@ -338,6 +414,7 @@ ${verified.source}
     if (!contents || typeof contents.on !== 'function') return;
     if (!originResolver.isSessionAllowed(contents)) return;
     const wcId = contents.id;
+    webContentsByWcId.set(wcId, contents);
 
     contents.on('did-start-navigation', (_ev, _url, isInPlace, isMainFrame) => {
       if (isMainFrame && !isInPlace) {
@@ -352,6 +429,8 @@ ${verified.source}
       kernelGenByWcId.delete(wcId);
       hostTokensByWcId.delete(wcId);
       injectedPluginsByWcId.delete(wcId);
+      trustedSettingsByWcId.delete(wcId);
+      syncSettingsBridgeBindings();
       originResolver.rotateGeneration(wcId, url);
     });
 
@@ -360,6 +439,8 @@ ${verified.source}
       kernelGenByWcId.delete(wcId);
       hostTokensByWcId.delete(wcId);
       injectedPluginsByWcId.delete(wcId);
+      trustedSettingsByWcId.delete(wcId);
+      syncSettingsBridgeBindings();
       originResolver.rotateGeneration(wcId, '');
     });
 
@@ -378,10 +459,13 @@ ${verified.source}
 
     contents.once('destroyed', () => {
       queuesByWcId.delete(wcId);
+      webContentsByWcId.delete(wcId);
       kernelGenByWcId.delete(wcId);
       hostTokensByWcId.delete(wcId);
       injectedPluginsByWcId.delete(wcId);
+      trustedSettingsByWcId.delete(wcId);
       navAttemptSeqByWcId.delete(wcId);
+      syncSettingsBridgeBindings();
       originResolver.clearWebContents(wcId);
     });
   }
@@ -393,6 +477,7 @@ ${verified.source}
   return Object.freeze({
     attachWebContents,
     scheduleSync,
+    pushSettingsUpdate,
     recordRendererError,
     collectRendererErrors,
   });

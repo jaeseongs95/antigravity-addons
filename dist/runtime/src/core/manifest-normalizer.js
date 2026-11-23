@@ -35,6 +35,21 @@ function normalizeManifestToV2(manifest) {
   const sourceSchemaVersion = manifest.schemaVersion === 2 ? 2 : 1;
   const rawSlots = Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [];
   const rawIsolation = manifest.isolation && typeof manifest.isolation === 'object' ? manifest.isolation : {};
+  const rawSettingsBridge =
+    manifest.settingsBridge &&
+    typeof manifest.settingsBridge === 'object' &&
+    typeof manifest.settingsBridge.fileName === 'string' &&
+    manifest.settingsBridge.fileName.length > 0
+      ? {
+          fileName: manifest.settingsBridge.fileName,
+          maxBytes:
+            Number.isInteger(manifest.settingsBridge.maxBytes) &&
+            manifest.settingsBridge.maxBytes >= 1024 &&
+            manifest.settingsBridge.maxBytes <= 262144
+              ? manifest.settingsBridge.maxBytes
+              : 65536,
+        }
+      : null;
 
   return {
     ...manifest,
@@ -46,6 +61,7 @@ function normalizeManifestToV2(manifest) {
       ...rawIsolation,
       respectsNoTranslate: rawIsolation.respectsNoTranslate !== false,
     },
+    settingsBridge: rawSettingsBridge,
     integrity:
       manifest.integrity && typeof manifest.integrity === 'object'
         ? {
