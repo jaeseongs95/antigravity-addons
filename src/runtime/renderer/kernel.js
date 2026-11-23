@@ -17,32 +17,65 @@ const { createModalPortal } = require('./modal-portal');
 const { createRegionObserver } = require('./region-observer');
 const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
 
-const FORBIDDEN_CLONE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+// I4: Capture JS primordials BEFORE any plugin executes in shared Isolated World 998
+const _ObjectKeys = Object.keys;
+const _ObjectFreeze = Object.freeze;
+const _ObjectDefineProperty = Object.defineProperty;
+const _ArrayIsArray = Array.isArray;
+const _ArrayFrom = Array.from;
+const _Map = Map;
+const _MapGet = Function.prototype.call.bind(Map.prototype.get);
+const _MapSet = Function.prototype.call.bind(Map.prototype.set);
+const _MapHas = Function.prototype.call.bind(Map.prototype.has);
+const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
+const _MapValues = Function.prototype.call.bind(Map.prototype.values);
+const _Set = Set;
+const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
+const _SetHas = Function.prototype.call.bind(Set.prototype.has);
+const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
+const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
+const _SetValues = Function.prototype.call.bind(Set.prototype.values);
+const _WeakMap = WeakMap;
+const _WeakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
+const _WeakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
+const _WeakMapHas = Function.prototype.call.bind(WeakMap.prototype.has);
 
-function deepFreezeClone(value, seen = new WeakMap()) {
+const FORBIDDEN_CLONE_KEYS = new _Set(['__proto__', 'constructor', 'prototype']);
+
+function deepFreezeClone(value, seen = new _WeakMap()) {
   if (value === null || typeof value !== 'object') {
     return value;
   }
-  if (seen.has(value)) {
-    return seen.get(value);
+  if (_WeakMapHas(seen, value)) {
+    return _WeakMapGet(seen, value);
   }
-  if (Array.isArray(value)) {
+  if (_ArrayIsArray(value)) {
     const out = [];
-    seen.set(value, out);
+    _WeakMapSet(seen, value, out);
     for (let i = 0; i < value.length; i++) {
-      out.push(deepFreezeClone(value[i], seen));
+      _ObjectDefineProperty(out, i, {
+        value: deepFreezeClone(value[i], seen),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
-    return Object.freeze(out);
+    return _ObjectFreeze(out);
   }
   const out = {};
-  seen.set(value, out);
-  const keys = Object.keys(value);
+  _WeakMapSet(seen, value, out);
+  const keys = _ObjectKeys(value);
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
-    if (FORBIDDEN_CLONE_KEYS.has(k)) continue;
-    out[k] = deepFreezeClone(value[k], seen);
+    if (_SetHas(FORBIDDEN_CLONE_KEYS, k)) continue;
+    _ObjectDefineProperty(out, k, {
+      value: deepFreezeClone(value[k], seen),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
-  return Object.freeze(out);
+  return _ObjectFreeze(out);
 }
 
 function createRendererKernel(doc = globalThis.document, win = globalThis.window || globalThis) {
@@ -57,13 +90,15 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   let regionObserver = null;
   let settingsTabs = null;
 
-  const pluginDisposers = new Map(); // pluginId -> Set<Function>
-  const pluginMarkDisposed = new Map(); // pluginId -> Set<Function>
-  const pluginActions = new Map(); // pluginId -> Map<actionId, object>
-  const pluginSettingsAllowed = new Set(); // pluginId (trusted + settingsBridge declared)
-  const pluginSettingsSnapshots = new Map(); // pluginId -> frozen snapshot
-  const pluginSettingsListeners = new Map(); // pluginId -> Set<Function>
-  const stagedHandles = new Map(); // runNonce -> { pluginId, handle } (S-1 CSP-safe two-phase execution)
+  const pluginDisposers = new _Map(); // pluginId -> Set<Function>
+  const pluginMarkDisposed = new _Map(); // pluginId -> Set<Function>
+  const disposingPlugins = new _Set(); // pluginId (I10: re-entrancy guard during onDispose)
+  const pluginActions = new _Map(); // pluginId -> Map<actionId, object>
+  const pluginTrustLevels = new _Map(); // pluginId -> 'trusted' | 'restricted' (I4)
+  const pluginSettingsAllowed = new _Set(); // pluginId (trusted + settingsBridge declared)
+  const pluginSettingsSnapshots = new _Map(); // pluginId -> frozen snapshot
+  const pluginSettingsListeners = new _Map(); // pluginId -> Set<Function>
+  const stagedHandles = new _Map(); // runNonce -> { pluginId, handle } (S-1 CSP-safe two-phase execution)
   const recordedErrors = [];
   let nonceSeq = 0;
 
@@ -154,51 +189,61 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
   function addPluginDisposer(pluginId, fn) {
     if (typeof fn !== 'function') return;
-    let set = pluginDisposers.get(pluginId);
+    let set = _MapGet(pluginDisposers, pluginId);
     if (!set) {
-      set = new Set();
-      pluginDisposers.set(pluginId, set);
+      set = new _Set();
+      _MapSet(pluginDisposers, pluginId, set);
     }
-    set.add(fn);
+    _SetAdd(set, fn);
   }
 
   function disposePluginInternal(pluginId) {
-    const markers = pluginMarkDisposed.get(pluginId);
-    if (markers) {
-      for (const mark of Array.from(markers)) {
-        try {
-          mark();
-        } catch (_e) {}
-      }
-      markers.clear();
-      pluginMarkDisposed.delete(pluginId);
+    if (_SetHas(disposingPlugins, pluginId)) {
+      return true;
     }
-    const set = pluginDisposers.get(pluginId);
-    if (set) {
-      for (const fn of Array.from(set)) {
-        try {
-          fn();
-        } catch (err) {
-          reportPluginError(pluginId, err && err.message ? err.message : String(err));
+    _SetAdd(disposingPlugins, pluginId);
+    try {
+      // I10: Run registered onDispose callbacks BEFORE marking handle disposed so cleanup calls (e.g. removeStyle) succeed cleanly
+      const set = _MapGet(pluginDisposers, pluginId);
+      if (set) {
+        for (const fn of _ArrayFrom(_SetValues(set))) {
+          try {
+            fn();
+          } catch (err) {
+            reportPluginError(pluginId, err && err.message ? err.message : String(err));
+          }
         }
+        _SetClear(set);
+        _MapDelete(pluginDisposers, pluginId);
       }
-      set.clear();
-      pluginDisposers.delete(pluginId);
+      const markers = _MapGet(pluginMarkDisposed, pluginId);
+      if (markers) {
+        for (const mark of _ArrayFrom(_SetValues(markers))) {
+          try {
+            mark();
+          } catch (_e) {}
+        }
+        _SetClear(markers);
+        _MapDelete(pluginMarkDisposed, pluginId);
+      }
+      if (slotManager) slotManager.disposePluginSlots(pluginId);
+      if (styleManager) styleManager.disposePluginStyles(pluginId);
+      if (modalPortal) modalPortal.disposePluginPortals(pluginId);
+      if (regionObserver) regionObserver.disposePluginObservers(pluginId);
+      if (settingsTabs) settingsTabs.disposePluginTabs(pluginId);
+      _MapDelete(pluginActions, pluginId);
+      _MapDelete(pluginTrustLevels, pluginId);
+      _SetDelete(pluginSettingsAllowed, pluginId);
+      _MapDelete(pluginSettingsSnapshots, pluginId);
+      const settingsSubs = _MapGet(pluginSettingsListeners, pluginId);
+      if (settingsSubs) {
+        _SetClear(settingsSubs);
+        _MapDelete(pluginSettingsListeners, pluginId);
+      }
+      return true;
+    } finally {
+      _SetDelete(disposingPlugins, pluginId);
     }
-    if (slotManager) slotManager.disposePluginSlots(pluginId);
-    if (styleManager) styleManager.disposePluginStyles(pluginId);
-    if (modalPortal) modalPortal.disposePluginPortals(pluginId);
-    if (regionObserver) regionObserver.disposePluginObservers(pluginId);
-    if (settingsTabs) settingsTabs.disposePluginTabs(pluginId);
-    pluginActions.delete(pluginId);
-    pluginSettingsAllowed.delete(pluginId);
-    pluginSettingsSnapshots.delete(pluginId);
-    const settingsSubs = pluginSettingsListeners.get(pluginId);
-    if (settingsSubs) {
-      settingsSubs.clear();
-      pluginSettingsListeners.delete(pluginId);
-    }
-    return true;
   }
 
   function disposePlugin(pluginId, token) {
@@ -216,9 +261,12 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     const hasSettingsBridge = Boolean(pluginMeta.hasSettingsBridge && effectiveTrustLevel === 'trusted');
     let disposed = false;
 
+    _MapSet(pluginTrustLevels, pluginId, effectiveTrustLevel);
+
     if (hasSettingsBridge) {
-      pluginSettingsAllowed.add(pluginId);
-      pluginSettingsSnapshots.set(
+      _SetAdd(pluginSettingsAllowed, pluginId);
+      _MapSet(
+        pluginSettingsSnapshots,
         pluginId,
         initialSettingsSnapshot && typeof initialSettingsSnapshot === 'object'
           ? deepFreezeClone(initialSettingsSnapshot)
@@ -226,12 +274,12 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       );
     }
 
-    let markers = pluginMarkDisposed.get(pluginId);
+    let markers = _MapGet(pluginMarkDisposed, pluginId);
     if (!markers) {
-      markers = new Set();
-      pluginMarkDisposed.set(pluginId, markers);
+      markers = new _Set();
+      _MapSet(pluginMarkDisposed, pluginId, markers);
     }
-    markers.add(() => {
+    _SetAdd(markers, () => {
       disposed = true;
     });
 
@@ -290,10 +338,10 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       registerAction(actionId, spec = {}) {
         assertActive();
         if (!actionId || typeof actionId !== 'string') throw new Error('ERR_INVALID_ACTION_ID');
-        let map = pluginActions.get(pluginId);
+        let map = _MapGet(pluginActions, pluginId);
         if (!map) {
-          map = new Map();
-          pluginActions.set(pluginId, map);
+          map = new _Map();
+          _MapSet(pluginActions, pluginId, map);
         }
         const entry = {
           pluginId,
@@ -301,18 +349,23 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
           label: String(spec.label || actionId),
           run: typeof spec.run === 'function' ? spec.run : null,
         };
-        map.set(actionId, entry);
-        return Object.freeze({
+        _MapSet(map, actionId, entry);
+        return _ObjectFreeze({
           unregister() {
-            map.delete(actionId);
+            _MapDelete(map, actionId);
           },
         });
       },
 
       listActions() {
+        assertActive();
         const out = [];
-        for (const map of pluginActions.values()) {
-          for (const a of map.values()) {
+        for (const map of _MapValues(pluginActions)) {
+          for (const a of _MapValues(map)) {
+            const ownerTrust = _MapGet(pluginTrustLevels, a.pluginId) || 'restricted';
+            if (effectiveTrustLevel !== 'trusted' && ownerTrust === 'trusted' && a.pluginId !== pluginId) {
+              continue;
+            }
             out.push({ pluginId: a.pluginId, actionId: a.actionId, label: a.label });
           }
         }
@@ -321,8 +374,12 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
       invokeAction(targetPluginId, actionId, ...args) {
         assertActive();
-        const map = pluginActions.get(targetPluginId);
-        const a = map && map.get(actionId);
+        const targetTrust = _MapGet(pluginTrustLevels, targetPluginId) || 'restricted';
+        if (effectiveTrustLevel !== 'trusted' && targetTrust === 'trusted' && targetPluginId !== pluginId) {
+          throw new Error(`ERR_ACTION_TRUST_FORBIDDEN:${targetPluginId}:${actionId}`);
+        }
+        const map = _MapGet(pluginActions, targetPluginId);
+        const a = map && _MapGet(map, actionId);
         if (!a || !a.run) throw new Error(`ERR_ACTION_NOT_FOUND:${targetPluginId}:${actionId}`);
         return a.run(...args);
       },
@@ -337,7 +394,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       getSettings() {
         assertActive();
         if (!hasSettingsBridge) return null;
-        return pluginSettingsSnapshots.get(pluginId) || null;
+        return _MapGet(pluginSettingsSnapshots, pluginId) || null;
       },
 
       onSettingsChange(callback) {
@@ -348,14 +405,14 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         if (!hasSettingsBridge) {
           throw new Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
         }
-        let subs = pluginSettingsListeners.get(pluginId);
+        let subs = _MapGet(pluginSettingsListeners, pluginId);
         if (!subs) {
-          subs = new Set();
-          pluginSettingsListeners.set(pluginId, subs);
+          subs = new _Set();
+          _MapSet(pluginSettingsListeners, pluginId, subs);
         }
-        subs.add(callback);
+        _SetAdd(subs, callback);
         return () => {
-          subs.delete(callback);
+          _SetDelete(subs, callback);
         };
       },
 
@@ -411,7 +468,6 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
       dispose() {
         if (disposed) return;
-        disposed = true;
         disposePluginInternal(pluginId);
       },
     });
@@ -423,7 +479,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     assertHostToken(token);
     const handle = createPluginHandle(pluginMeta, token, initialSettingsSnapshot);
     const runNonce = generateRunNonce();
-    stagedHandles.set(runNonce, { pluginId: pluginMeta.pluginId, handle });
+    _MapSet(stagedHandles, runNonce, { pluginId: pluginMeta.pluginId, handle });
     return { ok: true, runNonce };
   }
 
@@ -432,17 +488,17 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     if (!booted) {
       return { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED', delivered: 0 };
     }
-    if (!pluginSettingsAllowed.has(pluginId)) {
+    if (!_SetHas(pluginSettingsAllowed, pluginId)) {
       return { ok: false, reason: 'ERR_SETTINGS_BRIDGE_NOT_BOUND', delivered: 0 };
     }
     const frozen = snapshot && typeof snapshot === 'object' ? deepFreezeClone(snapshot) : null;
-    pluginSettingsSnapshots.set(pluginId, frozen);
-    const subs = pluginSettingsListeners.get(pluginId);
+    _MapSet(pluginSettingsSnapshots, pluginId, frozen);
+    const subs = _MapGet(pluginSettingsListeners, pluginId);
     if (!subs || subs.size === 0) {
       return { ok: true, delivered: 0 };
     }
     let delivered = 0;
-    for (const cb of Array.from(subs)) {
+    for (const cb of _ArrayFrom(_SetValues(subs))) {
       delivered += 1;
       try {
         const ret = cb(frozen);
@@ -457,18 +513,18 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   }
 
   function consumeStagedHandle(runNonce) {
-    if (typeof runNonce !== 'string' || !stagedHandles.has(runNonce)) {
+    if (typeof runNonce !== 'string' || !_MapHas(stagedHandles, runNonce)) {
       throw new Error('ERR_INVALID_OR_CONSUMED_RUN_NONCE');
     }
-    const entry = stagedHandles.get(runNonce);
-    stagedHandles.delete(runNonce);
+    const entry = _MapGet(stagedHandles, runNonce);
+    _MapDelete(stagedHandles, runNonce);
     return entry.handle;
   }
 
   function clearStagedHandle(runNonce, token) {
     assertHostToken(token);
     if (typeof runNonce !== 'string') return false;
-    return stagedHandles.delete(runNonce);
+    return _MapDelete(stagedHandles, runNonce);
   }
 
   const api = Object.freeze({

@@ -108,7 +108,7 @@ function createHostRuntimeController(cfg, deps = {}) {
       pluginsRootDir: cfg.pluginsRootDir,
       checkFilesExist: true,
       hostProfileId: profile.id || null,
-      hostVersion: cfg.hostVersion || '2.1.0',
+      hostVersion: cfg.hostVersion || '2.1.1',
       strictTrustPolicy,
       fsPort,
       isEnabled: (pluginId) => isPluginEnabledInConfig(cfg.configJsonPath, pluginId),
@@ -255,7 +255,7 @@ function createHostRuntimeController(cfg, deps = {}) {
           recordDiag('error', 'MAIN_READY_RECONCILE_ERR', err && err.message ? err.message : String(err));
         }
       });
-      app.on('before-quit', () => {
+      app.on('will-quit', () => {
         settingsBridge.dispose();
         portalArbiter.dispose();
         mainHookRunner.disposeAll();

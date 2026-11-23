@@ -82,7 +82,7 @@ function buildHostLoaderScriptSource(
   paths,
   profile,
   {
-    hostVersion = '2.1.0',
+    hostVersion = '2.1.1',
     strictTrustPolicy = true,
     mainHookTimeoutMs = 5000,
     rendererExecTimeoutMs = 10000,
@@ -138,7 +138,7 @@ function buildHostLoaderScriptSource(
     : serializeSafeInlineJson(path.resolve(runtimeEntryDir || path.resolve(__dirname, '..', '..', '..', 'dist', 'runtime')));
 
   return `'use strict';
-// Auto-generated thin v2.0.0 entry shim (${profile.patchMarker}, build ${buildSha8}).
+// Auto-generated thin v${hostCfg.hostVersion} entry shim (${profile.patchMarker}, build ${buildSha8}).
 // ZERO development repo paths and ZERO runtime npm dependencies.
 const path = require('node:path');
 

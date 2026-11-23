@@ -62,7 +62,45 @@ function createRendererInjector({
   const hostTokensByWcId = new Map(); // wcId -> per-document-generation CSPRNG kernel auth token (SEC-02)
   const injectedPluginsByWcId = new Map(); // wcId -> Set<pluginId>
   const trustedSettingsByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, fileName, maxBytes }>
+  const deliveredSettingsKeyByWcId = new Map(); // wcId -> Map<pluginId, string> (I1: per-window delivery dedup)
+  const lifecycleStatesByWcId = new Map(); // wcId -> Map<pluginId, state> (I10: multi-window state isolation)
   const navAttemptSeqByWcId = new Map(); // wcId -> incremented on did-start-navigation to abort in-flight loops without bricking live doc (R-1)
+
+  function settingsDeliveryKey(snap) {
+    if (!snap || typeof snap !== 'object') return 'null';
+    return `${snap.revision || 0}:${snap.status || ''}:${snap.sha256 || ''}:${snap.reason || ''}`;
+  }
+
+  function setDeliveredSettingsKey(wcId, pluginId, snap) {
+    let map = deliveredSettingsKeyByWcId.get(wcId);
+    if (!map) {
+      map = new Map();
+      deliveredSettingsKeyByWcId.set(wcId, map);
+    }
+    map.set(pluginId, settingsDeliveryKey(snap));
+  }
+
+  function setWindowLifecycleState(wcId, pluginId, state) {
+    let wcMap = lifecycleStatesByWcId.get(wcId);
+    if (!wcMap) {
+      wcMap = new Map();
+      lifecycleStatesByWcId.set(wcId, wcMap);
+    }
+    wcMap.set(pluginId, state);
+    // Aggregate across active windows: ACTIVE wins over FAILED/DISPOSED so Window 2 errors cannot mask Window 1's active status
+    let aggregated = state;
+    for (const m of lifecycleStatesByWcId.values()) {
+      const s = m.get(pluginId);
+      if (s === LIFECYCLE_STATES.ACTIVE) {
+        aggregated = LIFECYCLE_STATES.ACTIVE;
+        break;
+      }
+      if (s === LIFECYCLE_STATES.FAILED && aggregated !== LIFECYCLE_STATES.ACTIVE) {
+        aggregated = LIFECYCLE_STATES.FAILED;
+      }
+    }
+    lifecycleStates.set(pluginId, aggregated);
+  }
   const rendererErrors = [];
 
   function syncSettingsBridgeBindings() {
@@ -195,7 +233,9 @@ function createRendererInjector({
             );
             injectedSet.delete(oldId);
             trustedSettingsMap.delete(oldId);
-            lifecycleStates.set(oldId, LIFECYCLE_STATES.DISPOSED);
+            const delivMap = deliveredSettingsKeyByWcId.get(wcId);
+            if (delivMap) delivMap.delete(oldId);
+            setWindowLifecycleState(wcId, oldId, LIFECYCLE_STATES.DISPOSED);
           } catch (err) {
             if (!isStillCurrent()) return;
             recordRendererError(oldId, err && err.message ? err.message : String(err));
@@ -218,7 +258,7 @@ function createRendererInjector({
           strictTrustPolicy,
         });
         if (!verified.ok) {
-          lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
+          setWindowLifecycleState(wcId, addon.pluginId, LIFECYCLE_STATES.FAILED);
           recordDiag('warn', 'RENDERER_TRUST_REJECTED', `${addon.pluginId}: ${verified.reason}`);
           continue;
         }
@@ -261,7 +301,7 @@ function createRendererInjector({
         } catch (stageErr) {
           if (!isStillCurrent()) return;
           injectedSet.add(addon.pluginId);
-          lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
+          setWindowLifecycleState(wcId, addon.pluginId, LIFECYCLE_STATES.FAILED);
           recordRendererError(addon.pluginId, stageErr && stageErr.message ? stageErr.message : String(stageErr));
           continue;
         }
@@ -281,7 +321,7 @@ function createRendererInjector({
 
         if (!stageRes || !stageRes.ok || typeof stageRes.runNonce !== 'string') {
           injectedSet.add(addon.pluginId);
-          lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
+          setWindowLifecycleState(wcId, addon.pluginId, LIFECYCLE_STATES.FAILED);
           recordRendererError(addon.pluginId, (stageRes && stageRes.reason) || 'ERR_STAGE_HANDLE_FAILED');
           continue;
         }
@@ -321,29 +361,28 @@ ${verified.source}
                 fileName: settingsSpec.fileName,
                 maxBytes: settingsSpec.maxBytes,
               });
+              setDeliveredSettingsKey(wcId, addon.pluginId, initialSettingsSnapshot);
               // F1: Reconcile any settings file edit that arrived while async plugin startup ran
               if (settingsBridge && typeof settingsBridge.readSnapshotForPlugin === 'function') {
                 const postSnap = settingsBridge.readSnapshotForPlugin(addon.pluginId, settingsSpec);
                 if (
                   postSnap &&
-                  (!initialSettingsSnapshot ||
-                    postSnap.revision !== initialSettingsSnapshot.revision ||
-                    postSnap.sha256 !== initialSettingsSnapshot.sha256 ||
-                    postSnap.status !== initialSettingsSnapshot.status)
+                  settingsDeliveryKey(postSnap) !== settingsDeliveryKey(initialSettingsSnapshot)
                 ) {
                   await execInWorld(
                     contents,
                     `globalThis.__addonHostKernel && globalThis.__addonHostKernel.pushPluginSettings(${JSON.stringify(addon.pluginId)}, ${serializeSafeInlineJson(postSnap)}, ${JSON.stringify(hostToken)})`,
                     `settings-catchup:${addon.pluginId}`
                   );
+                  setDeliveredSettingsKey(wcId, addon.pluginId, postSnap);
                 }
               }
             }
-            lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.ACTIVE);
+            setWindowLifecycleState(wcId, addon.pluginId, LIFECYCLE_STATES.ACTIVE);
           } else {
             injectedSet.add(addon.pluginId);
             trustedSettingsMap.delete(addon.pluginId);
-            lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
+            setWindowLifecycleState(wcId, addon.pluginId, LIFECYCLE_STATES.FAILED);
             recordRendererError(addon.pluginId, (execRes && execRes.error) || 'ERR_PLUGIN_EXEC');
             try {
               await execInWorld(
@@ -357,7 +396,7 @@ ${verified.source}
           if (!isStillCurrent()) return;
           injectedSet.add(addon.pluginId);
           trustedSettingsMap.delete(addon.pluginId);
-          lifecycleStates.set(addon.pluginId, LIFECYCLE_STATES.FAILED);
+          setWindowLifecycleState(wcId, addon.pluginId, LIFECYCLE_STATES.FAILED);
           recordRendererError(addon.pluginId, err && err.message ? err.message : String(err));
           try {
             await execInWorld(
@@ -376,6 +415,7 @@ ${verified.source}
   }
 
   function pushSettingsUpdate(pluginId, snapshot) {
+    const nextKey = settingsDeliveryKey(snapshot);
     const tasks = [];
     for (const [wcId, map] of trustedSettingsByWcId.entries()) {
       if (!map || !map.has(pluginId)) continue;
@@ -386,6 +426,8 @@ ${verified.source}
           if (typeof contents.isDestroyed === 'function' && contents.isDestroyed()) return;
           const activeMap = trustedSettingsByWcId.get(wcId);
           if (!activeMap || !activeMap.has(pluginId)) return;
+          const delivMap = deliveredSettingsKeyByWcId.get(wcId);
+          if (delivMap && delivMap.get(pluginId) === nextKey) return;
           const genId = kernelGenByWcId.get(wcId);
           const hostToken = hostTokensByWcId.get(wcId);
           const latest = originResolver.getState(wcId);
@@ -398,6 +440,7 @@ ${verified.source}
               `globalThis.__addonHostKernel && globalThis.__addonHostKernel.pushPluginSettings(${JSON.stringify(pluginId)}, ${serializeSafeInlineJson(snapshot)}, ${JSON.stringify(hostToken)})`,
               `settings-push:${pluginId}`
             );
+            setDeliveredSettingsKey(wcId, pluginId, snapshot);
           } catch (err) {
             recordDiag('warn', 'SETTINGS_PUSH_ERR', `${pluginId}@wc${wcId}: ${err && err.message ? err.message : String(err)}`);
           }
@@ -451,6 +494,8 @@ ${verified.source}
       hostTokensByWcId.delete(wcId);
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
+      deliveredSettingsKeyByWcId.delete(wcId);
+      lifecycleStatesByWcId.delete(wcId);
       syncSettingsBridgeBindings();
       originResolver.rotateGeneration(wcId, url);
     });
@@ -461,6 +506,8 @@ ${verified.source}
       hostTokensByWcId.delete(wcId);
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
+      deliveredSettingsKeyByWcId.delete(wcId);
+      lifecycleStatesByWcId.delete(wcId);
       syncSettingsBridgeBindings();
       originResolver.rotateGeneration(wcId, '');
     });
@@ -485,6 +532,8 @@ ${verified.source}
       hostTokensByWcId.delete(wcId);
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
+      deliveredSettingsKeyByWcId.delete(wcId);
+      lifecycleStatesByWcId.delete(wcId);
       navAttemptSeqByWcId.delete(wcId);
       syncSettingsBridgeBindings();
       originResolver.clearWebContents(wcId);
