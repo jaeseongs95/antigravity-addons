@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "048eb2bb",
-  "buildSha256": "048eb2bb626408792e91dfafcc9fa680de0782d963252b060598a0c4dad10344",
+  "buildSha8": "b7419fa0",
+  "buildSha256": "b7419fa005b1c91b5b231232d4f76670e42f57e835c56a91af332a07f59811f3",
   "fileCount": 28,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
@@ -25,10 +25,10 @@
     "src/core/trust-policy-port.js": "fb7ff34735e31bee3a159ccb6efe29f8c4dc2d1e6057f38a190baa9935f3e976",
     "src/runtime/main/host-origin-resolver.js": "faed20a13ba9d26139743b9e79a0bbdf5c9e80c2103f81ee9e7b2a693fd0ad44",
     "src/runtime/main/init-main.js": "7a05f441d698ec0a81db9d74a150aad89c21f1f97bd6b66c55bb60b442ecf59e",
-    "src/runtime/main/main-hook-runner.js": "fb15cc2e8dd9f951cd6d712e7a66b9c8c455ff4bd984e8259293fa82bd4b9ff2",
+    "src/runtime/main/main-hook-runner.js": "7aaa3ea2b8cf3664592eed241b1521e7fbffa1a49d7bc35ff3f298cb4a4a9682",
     "src/runtime/main/portal-arbiter.js": "3dbb4c85ada7a7d9046956aef130d655ce1b05c8dfb196bb4230b12f7a473704",
     "src/runtime/main/preload-registrar.js": "c323aa7c2a4da31091fe57ca66e0d90b4c549883b739dcbed513fae766a79c47",
-    "src/runtime/main/renderer-injector.js": "5023ce97c50c6c318ad4549fe93ed4df60e524c62973f9510ab3c0c9ba2092ce",
+    "src/runtime/main/renderer-injector.js": "86b808649f0943fb3e53a1e7de2175f7da99fde883798f9036ad306361e76b5e",
     "src/runtime/main/trust-verifier.js": "633d7347af79c997ba3ebe25f407baa9a02145064004c1bfcba86a07d2924f34",
     "src/runtime/shared/constants.js": "3aa18a1a6e222c84af2304ce0758565ff4051c4e795efccf66a4777d4bb6777b",
     "src/runtime/shared/safe-json.js": "b425cf930ffff78271c76a665f710e07809506b551dead0c6a9aa6b01f24e4d9"

@@ -19,12 +19,12 @@ const { readVerifiedRendererScript } = require('./trust-verifier');
 function withExecTimeout(promise, timeoutMs, label) {
   return new Promise((resolve, reject) => {
     let done = false;
+    // Keep timeout ref'd until promise settles (clearTimeout always runs on resolve/reject; unref breaks Node 22 awaits on hanging promises)
     const t = setTimeout(() => {
       if (done) return;
       done = true;
       reject(new Error(`ERR_RENDERER_EXEC_TIMEOUT:${label}:${timeoutMs}ms`));
     }, timeoutMs);
-    if (t && typeof t.unref === 'function') t.unref();
     Promise.resolve(promise).then(
       (v) => {
         if (done) return;

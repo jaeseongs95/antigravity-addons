@@ -12,12 +12,12 @@ const { loadVerifiedMainHookModule } = require('./trust-verifier');
 function withTimeout(promiseOrVal, timeoutMs, label) {
   return new Promise((resolve, reject) => {
     let settled = false;
+    // Keep timeout ref'd until promise settles (clearTimeout always runs on resolve/reject; unref breaks Node 22 awaits on hanging promises)
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       reject(new Error(`ERR_MAIN_HOOK_TIMEOUT:${label}:${timeoutMs}ms`));
     }, timeoutMs);
-    if (timer && typeof timer.unref === 'function') timer.unref();
 
     Promise.resolve()
       .then(() => promiseOrVal)
