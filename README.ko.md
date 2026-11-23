@@ -5,7 +5,14 @@
 
 > **언어**: [English (README.md)](./README.md) | 한국어
 
-**무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, SHA-256 신뢰 핀닝, 단방향 읽기 전용 `settingsBridge` 설정 푸시를 제공하는 벤더 중립 데스크톱 애드온 호스트 프레임워크(`v2.1.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+**무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, SHA-256 신뢰 핀닝, 단방향 읽기 전용 `settingsBridge` 설정 푸시를 제공하는 벤더 중립 데스크톱 애드온 호스트 프레임워크(`v2.1.1`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+
+## v2.1.1 주요 보완 사항 (다중 창 안정성 및 World 998 보안 경화)
+
+- **다중 창 `settingsBridge` 동기화 레이스 해소 (`I1`)**: 신규 창 진입(`readSnapshotForPlugin`) 중 설정 파일 변경을 감지하면 이미 활성화된 기존 창에도 즉시 변경 이벤트를 전파하고, 창(`wcId`)별 전달 키 추적으로 중복 푸시를 방지합니다.
+- **Windows 일시 파일 잠금 유예 및 `fs.watch` 자동 복구 (`I2`)**: `EBUSY`/`EPERM`/`EACCES` 순간 잠금 시 제한 백오프 재시도(`80ms → 160ms → 320ms`) 후 Fail-Closed 전환 및 자가 복구를 수행하며, 디렉터리 미존재·`watcher` 오류 발생 시 지수 백오프(`500ms → 5000ms`)로 감시를 자동 재연결합니다.
+- **World `998` 원시 객체 완전 캡처 및 `invokeAction` 신뢰 경계 (`I4`)**: `kernel.js` 로드 시점에 핵심 JS 원시 객체(`Object.freeze`, `Map`/`Set`/`WeakMap`, `Set.prototype.size`, `forEach`, `Reflect.apply`, `Error`, `String`, `Uint8Array`, `crypto.getRandomValues`)를 사전 캡처해 프로토타입·이터레이터 오염을 차단하고, `listActions()`·`invokeAction()`에 `trustLevel` 경계(`ERR_ACTION_TRUST_FORBIDDEN`)를 적용했습니다.
+- **수명 주기·스타일 정리 (`I10`)**: `dispose` 시 `onDispose` 콜백 실행 후 핸들 폐기 마킹, 다중 창 `lifecycleStates` 집계 및 창 종료 시 재집계, `before-quit` → `will-quit` 전환, `[attr]` 소유자 셀렉터 보존을 반영했습니다.
 
 ## v2.1.0 주요 추가 사항 (v2.0.0 하위 호환 확장)
 

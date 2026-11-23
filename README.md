@@ -5,7 +5,14 @@
 
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)
 
-**Single, vendor-independent native desktop addon host framework (`v2.1.0`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, SHA-256 trust pinning, and unidirectional read-only `settingsBridge` push (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent native desktop addon host framework (`v2.1.1`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, SHA-256 trust pinning, and unidirectional read-only `settingsBridge` push (`AddonManifest.v2` with full `v1` backward compatibility).**
+
+## Key Updates in v2.1.1 (Hardening & Multi-Window Reliability)
+
+- **Multi-Window `settingsBridge` Sync (`I1`)**: Joining windows calling `readSnapshotForPlugin` now propagate detected file updates to already-active windows while per-`wcId` delivery deduplication prevents duplicate pushes.
+- **Windows Transient File-Lock & Watcher Self-Healing (`I2`)**: Transient `EBUSY`/`EPERM`/`EACCES` locks retry with bounded backoff (`80ms → 160ms → 320ms`) before failing closed, and `fs.watch` automatically reconnects with exponential backoff (`500ms → 5000ms`) after directory creation or watcher errors.
+- **World `998` Primordial Hardening & `invokeAction` Trust Boundary (`I4`)**: `kernel.js` captures all critical JS primordials (`Object.freeze`, `Map`/`Set`/`WeakMap`, `Set.prototype.size`, `forEach`, `Reflect.apply`, `Error`, `String`, `Uint8Array`, `crypto.getRandomValues`) before plugin execution, eliminates iterator-protocol calls in privileged paths, and enforces `trustLevel` isolation on `listActions()` / `invokeAction()` (`ERR_ACTION_TRUST_FORBIDDEN`).
+- **Lifecycle & CSS Cleanups (`I10`)**: `onDispose` callbacks run before marking handles disposed, `lifecycleStates` aggregates per-window state cleanly on window close, `will-quit` replaces cancellable `before-quit`, and `style-manager` preserves `[attr]` owner-prefixed selectors.
 
 ## Key Capabilities in v2.1.0 (additive over v2.0.0)
 
