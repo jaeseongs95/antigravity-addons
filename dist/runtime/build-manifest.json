@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "e9e1771f",
-  "buildSha256": "e9e1771f08db8353279693dbdb854c51166db3462b2d69efaa89169f93eea26a",
+  "buildSha8": "5bbfc007",
+  "buildSha256": "5bbfc007a30a6735ada68ac03f800d486f32996f0d7285fe6ffc950213bc23fa",
   "fileCount": 30,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
@@ -23,7 +23,7 @@
     "src/core/manifest-validator.js": "2e16e76829e2a43886a01bbd40f59b0d0bfc4b322c9293d23d5401abd7834f20",
     "src/core/slot-registry.js": "e17349af5514e088fb786b63229ec25f23de3b16cc2285b7828cb15d81b5832e",
     "src/core/trust-policy-port.js": "b7f00db398e17cdfaa7b22b75d88fa7b32b3a1077955557c6c525e63f88b2e3b",
-    "src/runtime/main/config-bridge.js": "84c4a65282b614eae5faa9000e85528e0834d21f07366915c0026f006fd26bf0",
+    "src/runtime/main/config-bridge.js": "758b00c117a1c9384b12ee3d0be6a0bab900c5bce8a52f95e827b5f5501a5347",
     "src/runtime/main/host-origin-resolver.js": "faed20a13ba9d26139743b9e79a0bbdf5c9e80c2103f81ee9e7b2a693fd0ad44",
     "src/runtime/main/init-main.js": "e1ccda51625c9378cd8c942d987b8b8faf3d02dc03b0ad1ee1f690881791e4d9",
     "src/runtime/main/main-hook-runner.js": "7aaa3ea2b8cf3664592eed241b1521e7fbffa1a49d7bc35ff3f298cb4a4a9682",

@@ -47,16 +47,18 @@ function createRemoteWebHostLifecyclePort() {
           buildManifest = { corrupt: true };
         }
       }
+      const manifestCorrupt = Boolean(buildManifest && buildManifest.corrupt);
       return {
-        installed: Boolean(buildManifest && !buildManifest.corrupt && buildManifest.buildSha8),
+        installed: Boolean(buildManifest && !manifestCorrupt && buildManifest.buildSha8),
+        manifestCorrupt,
         mode: 'remote-web',
         hostProfileId: activeProfile.id,
         compatibleHostProfiles: activeProfile.compatibleHostProfiles || [],
         supportedCapabilities: activeProfile.supportedCapabilities || ['renderer'],
         allowedOrigins: activeProfile.allowedOrigins || [],
         remoteDistDir: distDir,
-        buildSha8: buildManifest && !buildManifest.corrupt ? buildManifest.buildSha8 || null : null,
-        bundleMode: buildManifest && !buildManifest.corrupt ? buildManifest.mode || null : null,
+        buildSha8: buildManifest && !manifestCorrupt ? buildManifest.buildSha8 || null : null,
+        bundleMode: buildManifest && !manifestCorrupt ? buildManifest.mode || null : null,
       };
     },
 
@@ -65,8 +67,10 @@ function createRemoteWebHostLifecyclePort() {
       const { paths } = ctx;
       const addonsDirExists = Boolean(paths && paths.ADDONS_DIR && fs.existsSync(paths.ADDONS_DIR));
       const pluginsRootExists = Boolean(paths && paths.PLUGINS_ROOT_DIR && fs.existsSync(paths.PLUGINS_ROOT_DIR));
+      const healthy = !status.manifestCorrupt && (addonsDirExists || pluginsRootExists || status.installed);
       return {
-        healthy: addonsDirExists || pluginsRootExists || status.installed,
+        healthy,
+        manifestCorrupt: status.manifestCorrupt,
         mode: 'remote-web',
         addonsDirExists,
         pluginsRootExists,

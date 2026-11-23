@@ -204,13 +204,86 @@ function buildUserscriptSource(runtimeSource, { profile = ANTIGRAVITY_REMOTE_WEB
   return `${header}${toLf(runtimeSource)}\n${autoBoot}`;
 }
 
+function stripJsCommentsWithAcorn(source) {
+  const text = toLf(source);
+  const comments = [];
+  acorn.parse(text, {
+    ecmaVersion: 'latest',
+    sourceType: 'script',
+    allowReturnOutsideFunction: true,
+    onComment: comments,
+  });
+  if (comments.length === 0) return text;
+  comments.sort((a, b) => a.start - b.start);
+  const parts = [];
+  let cursor = 0;
+  for (let i = 0; i < comments.length; i += 1) {
+    const c = comments[i];
+    if (c.start < cursor) continue;
+    parts.push(text.slice(cursor, c.start));
+    if (c.type === 'Block') {
+      const raw = text.slice(c.start, c.end);
+      parts.push(raw.includes('\n') ? '\n' : ' ');
+    }
+    cursor = c.end;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join('');
+}
+
 function buildBookmarkletText(userscriptBodyWithoutHeader) {
-  const compact = toLf(userscriptBodyWithoutHeader)
-    .replace(/^\s*\/\/.*$/gm, '')
-    .replace(/\n+/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-  return `javascript:${encodeURIComponent(compact)}\n`;
+  const stripped = stripJsCommentsWithAcorn(userscriptBodyWithoutHeader).trim();
+  return `javascript:${encodeURIComponent(stripped)}\n`;
+}
+
+function getStaticMemberName(memberExpr) {
+  if (!memberExpr || memberExpr.type !== 'MemberExpression' || !memberExpr.property) return null;
+  if (!memberExpr.computed && memberExpr.property.type === 'Identifier') {
+    return memberExpr.property.name;
+  }
+  if (memberExpr.computed && memberExpr.property.type === 'Literal' && typeof memberExpr.property.value === 'string') {
+    return memberExpr.property.value;
+  }
+  if (
+    memberExpr.computed &&
+    memberExpr.property.type === 'TemplateLiteral' &&
+    memberExpr.property.expressions.length === 0 &&
+    memberExpr.property.quasis.length === 1
+  ) {
+    return memberExpr.property.quasis[0].value.cooked;
+  }
+  return null;
+}
+
+const GLOBAL_SCOPE_IDENTIFIERS = new Set(['window', 'globalThis', 'self', 'top', 'parent', 'frames']);
+
+function isGlobalScopeObject(node) {
+  return Boolean(node && node.type === 'Identifier' && GLOBAL_SCOPE_IDENTIFIERS.has(node.name));
+}
+
+function isDocumentObject(node) {
+  if (!node) return false;
+  if (node.type === 'Identifier' && node.name === 'document') return true;
+  if (node.type === 'MemberExpression' && isGlobalScopeObject(node.object) && getStaticMemberName(node) === 'document') {
+    return true;
+  }
+  return false;
+}
+
+function isFunctionConstructorRef(node) {
+  if (!node) return false;
+  if (node.type === 'Identifier' && node.name === 'Function') return true;
+  if (node.type === 'MemberExpression' && getStaticMemberName(node) === 'Function') return true;
+  return false;
+}
+
+function isEvalRef(node) {
+  if (!node) return false;
+  if (node.type === 'Identifier' && node.name === 'eval') return true;
+  if (node.type === 'MemberExpression' && isGlobalScopeObject(node.object) && getStaticMemberName(node) === 'eval') {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -218,7 +291,7 @@ function buildBookmarkletText(userscriptBodyWithoutHeader) {
  * Checks syntax, zero HTML sinks, zero dynamic eval/Function, zero external Node requires,
  * and zero forbidden 'default' TrustedTypes policy creation.
  */
-function verifyRemoteBundleAst(code, { checkEmbeddedAddons = false } = {}) {
+function verifyRemoteBundleAst(code) {
   const violations = [];
   let ast;
   try {
@@ -241,29 +314,20 @@ function verifyRemoteBundleAst(code, { checkEmbeddedAddons = false } = {}) {
       violations.push('FORBIDDEN_DYNAMIC_IMPORT');
     }
 
-    if (node.type === 'NewExpression' && node.callee && node.callee.type === 'Identifier' && node.callee.name === 'Function') {
+    if (node.type === 'NewExpression' && isFunctionConstructorRef(node.callee)) {
       violations.push('FORBIDDEN_NEW_FUNCTION');
     }
 
-    if (node.type === 'MemberExpression' && !node.computed && node.property && node.property.type === 'Identifier') {
-      const prop = node.property.name;
-      if (FORBIDDEN_HTML_SINK_PROPERTIES.has(prop)) {
-        violations.push(`FORBIDDEN_HTML_SINK:${prop}`);
+    if (node.type === 'MemberExpression') {
+      const prop = getStaticMemberName(node);
+      if (prop) {
+        if (FORBIDDEN_HTML_SINK_PROPERTIES.has(prop)) {
+          violations.push(`FORBIDDEN_HTML_SINK:${prop}`);
+        }
+        if (prop === 'createRequire' || prop === 'dlopen') {
+          violations.push(`FORBIDDEN_NODE_CAPABILITY:${prop}`);
+        }
       }
-      if (prop === 'createRequire' || prop === 'dlopen') {
-        violations.push(`FORBIDDEN_NODE_CAPABILITY:${prop}`);
-      }
-    }
-
-    if (
-      node.type === 'MemberExpression' &&
-      node.computed &&
-      node.property &&
-      node.property.type === 'Literal' &&
-      typeof node.property.value === 'string' &&
-      FORBIDDEN_HTML_SINK_PROPERTIES.has(node.property.value)
-    ) {
-      violations.push(`FORBIDDEN_HTML_SINK:${node.property.value}`);
     }
 
     if (node.type === 'CallExpression') {
@@ -285,21 +349,41 @@ function verifyRemoteBundleAst(code, { checkEmbeddedAddons = false } = {}) {
         }
       }
 
-      if (
-        node.callee &&
-        node.callee.type === 'MemberExpression' &&
-        !node.callee.computed &&
-        node.callee.property &&
-        node.callee.property.type === 'Identifier'
-      ) {
-        const methodName = node.callee.property.name;
-        if (FORBIDDEN_DOC_METHODS.has(methodName) && node.callee.object && node.callee.object.name === 'document') {
-          violations.push(`FORBIDDEN_DOCUMENT_SINK:document.${methodName}`);
-        }
-        if (methodName === 'createPolicy' && node.arguments[0] && node.arguments[0].type === 'Literal') {
-          const polName = String(node.arguments[0].value || '').toLowerCase();
-          if (polName === 'default') {
-            violations.push('FORBIDDEN_DEFAULT_TRUSTED_TYPES_POLICY');
+      if (node.callee && node.callee.type === 'MemberExpression') {
+        const methodName = getStaticMemberName(node.callee);
+        if (methodName) {
+          if (FORBIDDEN_DOC_METHODS.has(methodName) && isDocumentObject(node.callee.object)) {
+            violations.push(`FORBIDDEN_DOCUMENT_SINK:document.${methodName}`);
+          }
+          if (FORBIDDEN_GLOBAL_CALLS.has(methodName) && isGlobalScopeObject(node.callee.object)) {
+            violations.push(`FORBIDDEN_GLOBAL_CALL:${methodName}`);
+          }
+          if (methodName === 'Function' && isGlobalScopeObject(node.callee.object)) {
+            violations.push('FORBIDDEN_FUNCTION_CONSTRUCTOR');
+          }
+          if (
+            methodName === 'construct' &&
+            node.callee.object &&
+            node.callee.object.type === 'Identifier' &&
+            node.callee.object.name === 'Reflect' &&
+            isFunctionConstructorRef(node.arguments[0])
+          ) {
+            violations.push('FORBIDDEN_REFLECT_CONSTRUCT_FUNCTION');
+          }
+          if (
+            methodName === 'apply' &&
+            node.callee.object &&
+            node.callee.object.type === 'Identifier' &&
+            node.callee.object.name === 'Reflect' &&
+            (isEvalRef(node.arguments[0]) || isFunctionConstructorRef(node.arguments[0]))
+          ) {
+            violations.push('FORBIDDEN_REFLECT_APPLY_EVAL');
+          }
+          if (methodName === 'createPolicy' && node.arguments[0] && node.arguments[0].type === 'Literal') {
+            const polName = String(node.arguments[0].value || '').toLowerCase();
+            if (polName === 'default') {
+              violations.push('FORBIDDEN_DEFAULT_TRUSTED_TYPES_POLICY');
+            }
           }
         }
       }
@@ -317,9 +401,6 @@ function verifyRemoteBundleAst(code, { checkEmbeddedAddons = false } = {}) {
   }
 
   walk(ast);
-  if (!checkEmbeddedAddons) {
-    // Same strict policy applies to host-only bundles.
-  }
   return { ok: violations.length === 0, violations };
 }
 
@@ -378,16 +459,26 @@ function buildDistRemote({
     version: effectiveVersion,
   });
 
-  const runtimeAst = verifyRemoteBundleAst(runtimeSource, { checkEmbeddedAddons: !noAddons });
+  const runtimeAst = verifyRemoteBundleAst(runtimeSource);
   if (!runtimeAst.ok) {
     throw new Error(`REMOTE_RUNTIME_AST_VIOLATIONS:${JSON.stringify(runtimeAst.violations)}`);
   }
-  const userscriptAst = verifyRemoteBundleAst(userscriptSource, { checkEmbeddedAddons: !noAddons });
+  const userscriptAst = verifyRemoteBundleAst(userscriptSource);
   if (!userscriptAst.ok) {
     throw new Error(`REMOTE_USERSCRIPT_AST_VIOLATIONS:${JSON.stringify(userscriptAst.violations)}`);
   }
 
-  const bookmarkletText = buildBookmarkletText(runtimeSource + '\nglobalThis.__addonHostRemoteRuntime&&globalThis.__addonHostRemoteRuntime.bootRemoteWebHost();');
+  const bookmarkletText = buildBookmarkletText(
+    runtimeSource + '\nglobalThis.__addonHostRemoteRuntime&&globalThis.__addonHostRemoteRuntime.bootRemoteWebHost();'
+  );
+  if (!bookmarkletText.startsWith('javascript:')) {
+    throw new Error('REMOTE_BOOKMARKLET_INVALID_PREFIX');
+  }
+  const decodedBookmarklet = decodeURIComponent(bookmarkletText.trim().slice('javascript:'.length));
+  const bookmarkletAst = verifyRemoteBundleAst(decodedBookmarklet);
+  if (!bookmarkletAst.ok) {
+    throw new Error(`REMOTE_BOOKMARKLET_AST_VIOLATIONS:${JSON.stringify(bookmarkletAst.violations)}`);
+  }
 
   fs.rmSync(targetDir, { recursive: true, force: true });
   fs.mkdirSync(targetDir, { recursive: true });
@@ -480,14 +571,18 @@ function main() {
       }
 
       const committedManifestPath = path.join(opts.outDir, 'build-manifest.json');
+      let comparedCommittedManifest = false;
       if (fs.existsSync(committedManifestPath)) {
         const committed = JSON.parse(fs.readFileSync(committedManifestPath, 'utf8'));
-        if (committed.buildSha256 !== resA.buildManifest.buildSha256) {
-          process.stderr.write(
-            `REMOTE_BUILD_DRIFT_DETECTED: expected=${resA.buildManifest.buildSha256} actual=${committed.buildSha256}\n`
-          );
-          process.exitCode = 1;
-          return;
+        if (committed && committed.mode === resA.buildManifest.mode) {
+          comparedCommittedManifest = true;
+          if (committed.buildSha256 !== resA.buildManifest.buildSha256) {
+            process.stderr.write(
+              `REMOTE_BUILD_DRIFT_DETECTED: expected=${resA.buildManifest.buildSha256} actual=${committed.buildSha256}\n`
+            );
+            process.exitCode = 1;
+            return;
+          }
         }
       }
 
@@ -499,6 +594,7 @@ function main() {
           buildSha8: resA.buildManifest.buildSha8,
           buildSha256: resA.buildManifest.buildSha256,
           addonCount: resA.buildManifest.addonCount,
+          comparedCommittedManifest,
           astViolations: 0,
         }) + '\n'
       );

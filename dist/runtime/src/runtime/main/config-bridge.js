@@ -725,6 +725,7 @@ function acquireAdvisoryLock(lockPath, { staleLockMs = DEFAULT_STALE_LOCK_MS, fs
       if (err && err.code === 'EEXIST') {
         try {
           const st = fsImpl.lstatSync(lockPath);
+          // ceiling: single-user advisory lock; stale unlink race is bounded by O_EXCL ('wx') reopen below.
           if (!st.isSymbolicLink() && Date.now() - st.mtimeMs > staleLockMs) {
             fsImpl.unlinkSync(lockPath);
             continue;
@@ -746,7 +747,15 @@ function acquireAdvisoryLock(lockPath, { staleLockMs = DEFAULT_STALE_LOCK_MS, fs
   return { ok: false, reason: 'ERR_CONFIG_LOCK_BUSY' };
 }
 
-function writePrivateBackup(targetPath, baseName, backupDir, maxBackups, effectiveMaxBytes, fsImpl = fs) {
+function writePrivateBackup(
+  targetPath,
+  baseName,
+  backupDir,
+  maxBackups,
+  effectiveMaxBytes,
+  fsImpl = fs,
+  ancestorSymlinkDepth = DEFAULT_ANCESTOR_SYMLINK_DEPTH
+) {
   if (!backupDir || typeof backupDir !== 'string') return { ok: true, backupFileName: null };
   const existingRead = readRegularFileBounded(targetPath, effectiveMaxBytes, fsImpl);
   if (!existingRead.ok) {
@@ -757,6 +766,17 @@ function writePrivateBackup(targetPath, baseName, backupDir, maxBackups, effecti
   }
 
   const resolvedBackupDir = path.resolve(backupDir);
+  const ancestorCheck = checkAncestorSymlinks(resolvedBackupDir, ancestorSymlinkDepth, fsImpl);
+  if (!ancestorCheck.ok) {
+    return {
+      ok: false,
+      reason:
+        ancestorCheck.reason === 'ERR_CONFIG_ANCESTOR_SYMLINK_FORBIDDEN'
+          ? 'ERR_CONFIG_BACKUP_SYMLINK_FORBIDDEN'
+          : ancestorCheck.reason,
+      backupFileName: null,
+    };
+  }
   try {
     const bStat = fsImpl.lstatSync(resolvedBackupDir);
     if (bStat.isSymbolicLink()) {
@@ -900,9 +920,10 @@ function writeFileScopeSnapshot(scopeId, hostScope, effectiveMaxBytes, rawJson, 
   }
 
   const tmpPath = path.join(realParent, `.${baseName}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`);
+  let currentSnap = null;
   try {
     // Re-read current state strictly inside the advisory lock for CAS & symlink enforcement
-    const currentSnap = readFileScopeSnapshot(scopeId, hostScope, effectiveMaxBytes, { reservedKeys, fsImpl });
+    currentSnap = readFileScopeSnapshot(scopeId, hostScope, effectiveMaxBytes, { reservedKeys, fsImpl });
     if (currentSnap.status === 'error') {
       return {
         ok: false,
@@ -944,7 +965,8 @@ function writeFileScopeSnapshot(scopeId, hostScope, effectiveMaxBytes, rawJson, 
       hostScope.backupDir || null,
       hostScope.maxBackups,
       effectiveMaxBytes,
-      fsImpl
+      fsImpl,
+      hostScope.ancestorSymlinkDepth
     );
     if (!backupRes.ok) {
       return {
@@ -1008,7 +1030,12 @@ function writeFileScopeSnapshot(scopeId, hostScope, effectiveMaxBytes, rawJson, 
       },
     };
   } catch (_writeErr) {
-    return { ok: false, reason: 'ERR_CONFIG_WRITE_FAILED', currentSha256: null, snapshot: null };
+    return {
+      ok: false,
+      reason: 'ERR_CONFIG_WRITE_FAILED',
+      currentSha256: currentSnap ? currentSnap.sha256 : null,
+      snapshot: currentSnap || null,
+    };
   } finally {
     try {
       if (fsImpl.existsSync(tmpPath)) {

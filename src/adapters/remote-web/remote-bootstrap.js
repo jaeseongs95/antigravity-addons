@@ -15,12 +15,53 @@
 const { assertAllowedOrigin } = require('./origin-guard');
 const { createScopedTrustedTypesGuard } = require('./trusted-types-guard');
 const {
+  isSafeExtraAttrName,
   createElementSafe,
   clearChildrenSafe,
   setTextSafe,
   createShadowContainer,
 } = require('./dom-guard');
 const { createRemoteHostBridge } = require('./remote-host-bridge');
+
+const KERNEL_BOOT_STATE = new WeakMap();
+
+function createSwappableBridgePort(kernelState, docGenId, profileId) {
+  function activePort() {
+    return kernelState.currentBridge ? kernelState.currentBridge.port : null;
+  }
+  return Object.freeze({
+    docGenId,
+    profileId,
+    setPortalClaim(claimId, active) {
+      const p = activePort();
+      return p ? p.setPortalClaim(claimId, active) : { ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' };
+    },
+    saveSettings(pluginId, rawJson) {
+      const p = activePort();
+      return p ? p.saveSettings(pluginId, rawJson) : Promise.resolve({ ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
+    reportError(pluginId, detail) {
+      const p = activePort();
+      return p ? p.reportError(pluginId, detail) : { ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' };
+    },
+    ping() {
+      const p = activePort();
+      return p ? p.ping() : Promise.resolve({ ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
+    readConfigScope(pluginId, scopeId) {
+      const p = activePort();
+      return p
+        ? p.readConfigScope(pluginId, scopeId)
+        : Promise.resolve({ ok: false, scopeId, status: 'error', reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
+    writeConfigScope(pluginId, scopeId, rawJson, opts) {
+      const p = activePort();
+      return p
+        ? p.writeConfigScope(pluginId, scopeId, rawJson, opts)
+        : Promise.resolve({ ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
+  });
+}
 
 const FALLBACK_ANCHOR_KEYS = Object.freeze([
   'status-bar',
@@ -236,7 +277,7 @@ function mountFallbackSlotDock(doc, noTranslateAttrs) {
 
   for (let i = 0; i < noTranslateAttrs.length; i += 1) {
     const attr = String(noTranslateAttrs[i] || '').trim();
-    if (attr && !attr.toLowerCase().startsWith('on')) {
+    if (isSafeExtraAttrName(attr)) {
       dock.setAttribute(attr, 'true');
     }
   }
@@ -539,7 +580,8 @@ async function bootRemoteWebHost({
     allowLoopbackHttp,
   });
 
-  const hostToken = generateHostToken(win);
+  const existingKernelState = KERNEL_BOOT_STATE.get(activeKernel);
+  const hostToken = existingKernelState ? existingKernelState.hostToken : generateHostToken(win);
   const addonStates = [];
   let drawerUi = null;
 
@@ -561,18 +603,27 @@ async function bootRemoteWebHost({
     },
   });
 
+  const kernelState = existingKernelState || { hostToken, currentBridge: null };
+  const prevBridge = kernelState.currentBridge;
+  kernelState.currentBridge = bridge;
+
   const bootRes = activeKernel.boot({
     docGenId,
     hostToken,
     hostProfileId: profile.id,
-    hostBridge: bridge.port,
+    hostBridge: existingKernelState ? undefined : createSwappableBridgePort(kernelState, docGenId, profile.id),
     uiAnchors: profile.uiAnchors || {},
     extraNoTranslateAttributes: Array.isArray(profile.extraNoTranslateAttributes)
       ? profile.extraNoTranslateAttributes
       : [],
   });
   if (!bootRes || bootRes.ok !== true) {
+    kernelState.currentBridge = prevBridge;
+    bridge.dispose();
     return { ok: false, reason: (bootRes && bootRes.reason) || 'ERR_KERNEL_BOOT_FAILED' };
+  }
+  if (!existingKernelState) {
+    KERNEL_BOOT_STATE.set(activeKernel, kernelState);
   }
 
   let fallbackDockEl = null;
@@ -694,6 +745,9 @@ async function bootRemoteWebHost({
       }
       if (fallbackDockEl && fallbackDockEl.parentNode && typeof fallbackDockEl.parentNode.removeChild === 'function') {
         fallbackDockEl.parentNode.removeChild(fallbackDockEl);
+      }
+      if (kernelState.currentBridge === bridge) {
+        kernelState.currentBridge = null;
       }
       bridge.dispose();
     },

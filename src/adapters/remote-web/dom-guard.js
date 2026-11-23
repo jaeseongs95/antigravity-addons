@@ -13,7 +13,21 @@ const { SecurityPolicyError } = require('./origin-guard');
 
 const FORBIDDEN_TAGS = new Set(['script', 'iframe', 'object', 'embed', 'base', 'link', 'meta', 'style']);
 const URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'formaction', 'action']);
-const FORBIDDEN_URL_SCHEME_RE = /^\s*(?:javascript|vbscript|data):/i;
+const FORBIDDEN_URL_SCHEME_RE = /^(?:javascript|vbscript|data):/i;
+const SAFE_EXTRA_ATTR_NAME_RE = /^[a-z][a-z0-9-]*$/i;
+
+function hasForbiddenUrlScheme(value) {
+  const normalized = String(value || '').replace(/[\u0000-\u0020]+/g, '');
+  return FORBIDDEN_URL_SCHEME_RE.test(normalized);
+}
+
+function isSafeExtraAttrName(attr) {
+  if (typeof attr !== 'string') return false;
+  const trimmed = attr.trim();
+  if (!trimmed || !SAFE_EXTRA_ATTR_NAME_RE.test(trimmed)) return false;
+  if (trimmed.toLowerCase().startsWith('on')) return false;
+  return true;
+}
 
 function createElementSafe(doc, tagName, attrs = null, text = null) {
   if (!doc || typeof doc.createElement !== 'function') {
@@ -35,7 +49,7 @@ function createElementSafe(doc, tagName, attrs = null, text = null) {
         throw new SecurityPolicyError('ERR_FORBIDDEN_INLINE_HANDLER_ATTR', `Forbidden event attribute: ${k}`);
       }
       const strVal = String(v);
-      if (URL_ATTRS.has(lowerKey) && FORBIDDEN_URL_SCHEME_RE.test(strVal)) {
+      if (URL_ATTRS.has(lowerKey) && hasForbiddenUrlScheme(strVal)) {
         throw new SecurityPolicyError('ERR_FORBIDDEN_URL_ATTR_SCHEME', `Forbidden URL scheme in attribute ${k}`);
       }
       el.setAttribute(k, strVal);
@@ -94,7 +108,7 @@ function createShadowContainer(
   });
   for (let i = 0; i < noTranslateAttrs.length; i += 1) {
     const attr = String(noTranslateAttrs[i] || '').trim();
-    if (attr && !attr.toLowerCase().startsWith('on')) {
+    if (isSafeExtraAttrName(attr)) {
       hostEl.setAttribute(attr, 'true');
     }
   }
@@ -116,6 +130,8 @@ function createShadowContainer(
 
 module.exports = {
   FORBIDDEN_TAGS,
+  hasForbiddenUrlScheme,
+  isSafeExtraAttrName,
   createElementSafe,
   clearChildrenSafe,
   setTextSafe,

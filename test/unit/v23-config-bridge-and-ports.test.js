@@ -913,6 +913,104 @@ test('TC-V23-006: CLI --profile remote-web, --build-remote, and src/index.js int
     assert.equal(buildJson.mode, 'check');
     assert.equal(buildJson.addonCount, 0);
     assert.equal(buildJson.astViolations, 0);
+
+    // 4. F6 regression: corrupt build-manifest.json marks remote-web diagnoseHost unhealthy
+    fs.mkdirSync(remoteDistDir, { recursive: true });
+    fs.writeFileSync(path.join(remoteDistDir, 'build-manifest.json'), '{ corrupt json', 'utf8');
+    const diagRes = spawnSync(process.execPath, [binPath, '--profile', 'remote-web', '--doctor'], {
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(diagRes.status, 0, diagRes.stderr);
+    const diagJson = JSON.parse(diagRes.stdout);
+    assert.equal(diagJson.host.manifestCorrupt, true);
+    assert.equal(diagJson.host.healthy, false);
+    assert.equal(diagJson.healthy, false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-V23-007: F5 regressions — custom backupDir ancestor symlink blocked & ERR_CONFIG_WRITE_FAILED preserves currentSha256', () => {
+  const tmpDir = makeTmpDir();
+  try {
+    const targetPath = path.join(tmpDir, 'mcp_config.json');
+    fs.writeFileSync(targetPath, '{"mcpServers":{"init":{}}}\n', 'utf8');
+
+    // 1. Ancestor symlink above custom backupDir is rejected
+    const outsideReal = path.join(tmpDir, 'outside-backup-real');
+    fs.mkdirSync(outsideReal, { recursive: true });
+    const junctionParent = path.join(tmpDir, 'backup-junction');
+    fs.symlinkSync(outsideReal, junctionParent, process.platform === 'win32' ? 'junction' : 'dir');
+    const nestedBackupDir = path.join(junctionParent, 'nested-backups');
+
+    const symBackupBridge = createConfigBridge({
+      configScopes: {
+        'test:backup-ancestor-sym': {
+          kind: 'file',
+          access: 'rw',
+          maxBytes: 65536,
+          path: targetPath,
+          backupDir: nestedBackupDir,
+          maxBackups: 3,
+          ancestorSymlinkDepth: 3,
+        },
+      },
+    });
+    const binding = {
+      pluginId: 'mcp-manager',
+      scopes: [{ scopeId: 'test:backup-ancestor-sym', access: 'rw', maxBytes: 65536 }],
+    };
+    const symWrite = symBackupBridge.writeScopeForPlugin(
+      'mcp-manager',
+      binding,
+      'test:backup-ancestor-sym',
+      '{"mcpServers":{"updated":{}}}'
+    );
+    assert.equal(symWrite.ok, false);
+    assert.equal(symWrite.reason, 'ERR_CONFIG_BACKUP_SYMLINK_FORBIDDEN');
+    assert.equal(fs.existsSync(nestedBackupDir), false);
+
+    // 2. ERR_CONFIG_WRITE_FAILED preserves currentSha256 & snapshot
+    const failingFs = {
+      ...fs,
+      renameSync() {
+        const err = new Error('Simulated EACCES on rename');
+        err.code = 'EACCES';
+        throw err;
+      },
+    };
+    const failWriteBridge = createConfigBridge({
+      configScopes: {
+        'test:write-fail': {
+          kind: 'file',
+          access: 'rw',
+          maxBytes: 65536,
+          path: targetPath,
+          ancestorSymlinkDepth: 2,
+        },
+      },
+      fsImpl: failingFs,
+    });
+    const failBinding = {
+      pluginId: 'mcp-manager',
+      scopes: [{ scopeId: 'test:write-fail', access: 'rw', maxBytes: 65536 }],
+    };
+    const beforeSnap = failWriteBridge.readScopeForPlugin('mcp-manager', failBinding, 'test:write-fail');
+    assert.equal(beforeSnap.ok, true);
+    assert.ok(beforeSnap.sha256);
+
+    const failRes = failWriteBridge.writeScopeForPlugin(
+      'mcp-manager',
+      failBinding,
+      'test:write-fail',
+      '{"mcpServers":{"next":{}}}',
+      { expectedSha256: beforeSnap.sha256 }
+    );
+    assert.equal(failRes.ok, false);
+    assert.equal(failRes.reason, 'ERR_CONFIG_WRITE_FAILED');
+    assert.equal(failRes.currentSha256, beforeSnap.sha256);
+    assert.equal(failRes.snapshot.sha256, beforeSnap.sha256);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

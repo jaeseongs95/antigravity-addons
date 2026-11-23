@@ -6,6 +6,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const vm = require('node:vm');
+const { spawnSync } = require('node:child_process');
+const acorn = require('acorn');
 
 const { validateHostProfile } = require('../../src/core/host-profile-port');
 const { isValidHostBridgePort, wrapHostBridgePort } = require('../../src/runtime/renderer/host-bridge-port');
@@ -621,14 +624,23 @@ test('TC-RW-008: bootRemoteWebHost aborts fail-closed on disallowed origin and r
 });
 
 test('TC-RW-009: build-remote.js produces deterministic host-only bundles and enforces Acorn AST security gate', () => {
-  // Negative AST security checks
+  // Negative AST security checks (direct + computed + global/Reflect variants — F3)
   assert.equal(verifyRemoteBundleAst('el.innerHTML = "<b>x</b>";').ok, false);
   assert.equal(verifyRemoteBundleAst('el["outerHTML"] = "x";').ok, false);
   assert.equal(verifyRemoteBundleAst('document.write("x");').ok, false);
+  assert.equal(verifyRemoteBundleAst('document["write"]("x");').ok, false);
+  assert.equal(verifyRemoteBundleAst('document["writeln"]("x");').ok, false);
+  assert.equal(verifyRemoteBundleAst('window.document["write"]("x");').ok, false);
   assert.equal(verifyRemoteBundleAst('eval("1+1");').ok, false);
+  assert.equal(verifyRemoteBundleAst('window.eval("1+1");').ok, false);
+  assert.equal(verifyRemoteBundleAst('globalThis["eval"]("1+1");').ok, false);
   assert.equal(verifyRemoteBundleAst('new Function("return 1")();').ok, false);
+  assert.equal(verifyRemoteBundleAst('new window.Function("return 1")();').ok, false);
+  assert.equal(verifyRemoteBundleAst('Reflect.construct(Function, ["return 1"]);').ok, false);
+  assert.equal(verifyRemoteBundleAst('Reflect.apply(eval, null, ["1"]);').ok, false);
   assert.equal(verifyRemoteBundleAst('require("node:fs");').ok, false);
   assert.equal(verifyRemoteBundleAst('trustedTypes.createPolicy("default", {});').ok, false);
+  assert.equal(verifyRemoteBundleAst('trustedTypes["createPolicy"]("default", {});').ok, false);
 
   const dirA = makeTmpDir('agy-v23-dist-a-');
   const dirB = makeTmpDir('agy-v23-dist-b-');
@@ -644,10 +656,146 @@ test('TC-RW-009: build-remote.js produces deterministic host-only bundles and en
     assert.ok(userJs.includes('// @match        https://antigravity.google.com/*'));
     assert.ok(userJs.includes('// @grant        none'));
 
-    const bookmarklet = fs.readFileSync(path.join(dirA, 'bookmarklet.txt'), 'utf8');
+    // F1 regression: bookmarklet.txt MUST decode to syntactically valid, AST-clean, executable JS
+    const bookmarklet = fs.readFileSync(path.join(dirA, 'bookmarklet.txt'), 'utf8').trim();
     assert.ok(bookmarklet.startsWith('javascript:'));
+    assert.equal(bookmarklet.includes('\n'), false);
+    const decodedBookmarklet = decodeURIComponent(bookmarklet.slice('javascript:'.length));
+    const bmAst = verifyRemoteBundleAst(decodedBookmarklet);
+    assert.equal(bmAst.ok, true, `bookmarklet AST failed: ${JSON.stringify(bmAst.violations)}`);
+    assert.doesNotThrow(() => acorn.parse(decodedBookmarklet, { ecmaVersion: 'latest', sourceType: 'script' }));
+
+    const { doc, win } = makeMockDom('https://antigravity.google.com/workspace');
+    const sandbox = {
+      window: win,
+      document: doc,
+      console,
+      setTimeout,
+      clearTimeout,
+      MutationObserver: undefined,
+      URL,
+    };
+    sandbox.globalThis = sandbox;
+    sandbox.self = sandbox;
+    vm.runInNewContext(decodedBookmarklet, sandbox, { filename: 'bookmarklet.js' });
+    assert.ok(sandbox.__addonHostRemoteRuntime);
+    assert.equal(typeof sandbox.__addonHostRemoteRuntime.bootRemoteWebHost, 'function');
   } finally {
     fs.rmSync(dirA, { recursive: true, force: true });
     fs.rmSync(dirB, { recursive: true, force: true });
   }
+});
+
+test('TC-RW-010: Audit regressions F2 (check:remote mode mismatch), F3 (control-char URL & extra attr), F4 (re-boot after dispose)', async () => {
+  // F3: control-char URL obfuscation & invalid extraNoTranslateAttributes
+  const { doc: guardDoc } = makeMockDom('https://antigravity.google.com/workspace');
+  assert.throws(
+    () => createElementSafe(guardDoc, 'a', { href: '\u0000javascript:alert(1)' }),
+    (err) => err instanceof SecurityPolicyError && err.code === 'ERR_FORBIDDEN_URL_ATTR_SCHEME'
+  );
+  assert.throws(
+    () => createElementSafe(guardDoc, 'a', { href: 'java\tscript:alert(1)' }),
+    (err) => err instanceof SecurityPolicyError && err.code === 'ERR_FORBIDDEN_URL_ATTR_SCHEME'
+  );
+  assert.throws(
+    () => createElementSafe(guardDoc, 'a', { href: '\u0001data:text/html,boom' }),
+    (err) => err instanceof SecurityPolicyError && err.code === 'ERR_FORBIDDEN_URL_ATTR_SCHEME'
+  );
+  const { hostEl } = createShadowContainer(guardDoc, 'rw-attr-check-host', {
+    noTranslateAttrs: ['data-valid-attr', 'onclick', 'bad attr', 'x"y', '123-invalid'],
+  });
+  assert.equal(hostEl.getAttribute('data-valid-attr'), 'true');
+  assert.equal(hostEl.getAttribute('onclick'), null);
+  assert.equal(hostEl.getAttribute('bad attr'), null);
+  assert.equal(hostEl.getAttribute('x"y'), null);
+  assert.equal(hostEl.getAttribute('123-invalid'), null);
+
+  // F2: --no-addons --check skips drift comparison when on-disk manifest is packed mode, but still detects host-only drift
+  const tmpOutDir = makeTmpDir('agy-v23-f2-check-');
+  try {
+    const buildRemoteScript = path.join(REPO_ROOT, 'scripts', 'build-remote.js');
+    fs.writeFileSync(
+      path.join(tmpOutDir, 'build-manifest.json'),
+      JSON.stringify({ schemaVersion: 1, mode: 'packed', buildSha256: 'deadbeef' }),
+      'utf8'
+    );
+    const packedCheck = spawnSync(process.execPath, [buildRemoteScript, '--no-addons', '--check', '--out-dir', tmpOutDir], {
+      encoding: 'utf8',
+    });
+    assert.equal(packedCheck.status, 0, packedCheck.stderr);
+    const packedOut = JSON.parse(packedCheck.stdout);
+    assert.equal(packedOut.ok, true);
+    assert.equal(packedOut.comparedCommittedManifest, false);
+
+    fs.writeFileSync(
+      path.join(tmpOutDir, 'build-manifest.json'),
+      JSON.stringify({ schemaVersion: 1, mode: 'host-only', buildSha256: 'deadbeef' }),
+      'utf8'
+    );
+    const driftedCheck = spawnSync(process.execPath, [buildRemoteScript, '--no-addons', '--check', '--out-dir', tmpOutDir], {
+      encoding: 'utf8',
+    });
+    assert.equal(driftedCheck.status, 1);
+    assert.ok(driftedCheck.stderr.includes('REMOTE_BUILD_DRIFT_DETECTED'));
+  } finally {
+    fs.rmSync(tmpOutDir, { recursive: true, force: true });
+  }
+
+  // F4: Re-booting after controller.dispose() against the same singleton kernel succeeds & swaps active bridge
+  const { doc, win } = makeMockDom('https://antigravity.google.com/workspace');
+  const sharedKernel = createRendererKernel(doc, win);
+  function makeMemStore() {
+    const m = new Map();
+    return {
+      getItem: (k) => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => m.set(k, String(v)),
+      removeItem: (k) => m.delete(k),
+    };
+  }
+  const store1 = makeMemStore();
+  const store2 = makeMemStore();
+  const addonSpec = {
+    pluginMeta: {
+      pluginId: 'reboot-addon',
+      displayName: 'Reboot Addon',
+      version: '1.0.0',
+      trustLevel: 'trusted',
+      hasSettingsBridge: true,
+      uiSlots: [],
+      capabilities: ['renderer'],
+      skippedCapabilities: [],
+    },
+    settingsSpec: { maxBytes: 4096 },
+    async run(handle) {
+      await handle.saveSettings({ bootRun: handle.hostProfileId, ts: 1 });
+    },
+  };
+
+  const settingsKey = `${ANTIGRAVITY_REMOTE_WEB_PROFILE.storageNamespace}:settings:reboot-addon`;
+  const boot1 = await bootRemoteWebHost({
+    profile: ANTIGRAVITY_REMOTE_WEB_PROFILE,
+    doc,
+    win,
+    kernel: sharedKernel,
+    storage: store1,
+    packedAddons: [addonSpec],
+  });
+  assert.equal(boot1.ok, true);
+  assert.equal(boot1.controller.getAddonStates()[0].status, 'active');
+  assert.ok(store1.getItem(settingsKey));
+  boot1.controller.dispose();
+
+  const boot2 = await bootRemoteWebHost({
+    profile: ANTIGRAVITY_REMOTE_WEB_PROFILE,
+    doc,
+    win,
+    kernel: sharedKernel,
+    storage: store2,
+    packedAddons: [addonSpec],
+  });
+  assert.equal(boot2.ok, true, `re-boot after dispose failed: ${boot2.reason}`);
+  assert.equal(boot2.alreadyBooted, false);
+  assert.equal(boot2.controller.getAddonStates()[0].status, 'active');
+  assert.ok(store2.getItem(settingsKey));
+  boot2.controller.dispose();
 });
