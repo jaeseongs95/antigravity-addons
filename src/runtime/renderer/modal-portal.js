@@ -37,24 +37,51 @@ function createModalPortal(
   const stack = []; // LIFO: { id, kind: 'modal'|'popover', pluginId, slotId, el, bodyEl, shadowRoot, prevFocus, ignoreOutsideClickEls, onClose }
   let seq = 0;
   let globalListenersInstalled = false;
+  let portalClaimActive = false;
 
-  function notifyPortalState(prevCount, nextCount) {
-    if (prevCount === 0 && nextCount > 0) {
+  function notifyPortalState(_prevCount, nextCount) {
+    const nextActive = nextCount > 0;
+    if (nextActive === portalClaimActive) return;
+    portalClaimActive = nextActive;
+    try {
+      onPortalClaimChange('host-modal-portal-stack', nextActive);
+    } catch (_e) {}
+  }
+
+  function isNestedInside(parentEl, childEl) {
+    if (!parentEl || !childEl || parentEl === childEl) return false;
+    if (childEl.parentNode === parentEl) return true;
+    if (typeof parentEl.contains === 'function') {
       try {
-        onPortalClaimChange('host-modal-portal-stack', true);
-      } catch (_e) {}
-    } else if (prevCount > 0 && nextCount === 0) {
-      try {
-        onPortalClaimChange('host-modal-portal-stack', false);
+        return Boolean(parentEl.contains(childEl));
       } catch (_e) {}
     }
+    let cur = childEl.parentNode;
+    let guard = 0;
+    while (cur && guard < 64) {
+      guard++;
+      if (cur === parentEl) return true;
+      cur = cur.parentNode;
+    }
+    return false;
   }
 
   function closeEntry(entry) {
     const idx = stack.indexOf(entry);
     if (idx === -1) return false;
     const prevCount = stack.length;
-    stack.splice(idx, 1);
+
+    // F2: Cascade-close any nested child entries (e.g. R-2 popovers mounted inside a closing <dialog>)
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const candidate = stack[i];
+      if (candidate !== entry && isNestedInside(entry.el, candidate.el)) {
+        closeEntry(candidate);
+      }
+    }
+
+    const curIdx = stack.indexOf(entry);
+    if (curIdx === -1) return true;
+    stack.splice(curIdx, 1);
 
     if (entry.shadowRoot && styleManager) {
       styleManager.unregisterShadowRoot(entry.pluginId, entry.slotId, entry.shadowRoot);

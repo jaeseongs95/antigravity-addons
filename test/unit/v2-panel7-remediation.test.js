@@ -366,6 +366,16 @@ test('TC-V2-008b (S-2): closes all 4 owner-CSS isolation bypasses', () => {
   const r4 = validateSafeCssText('.a { background: url("java\\\nscript:alert(1)"); }', { scope: 'owner' });
   assert.equal(r4.ok, false);
   assert.equal(r4.reason, 'ERR_UNSAFE_CSS_CONSTRUCT');
+
+  // (e) Audit F1a: CSS Syntax L3 Form Feed (\f, U+000C) bad-string token bypass
+  const r5 = validateSafeCssText('.a { content: "\f} body { display: none !important; } /*"; }', { scope: 'owner' });
+  assert.equal(r5.ok, false);
+  assert.equal(r5.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+
+  // (f) Audit F1b: :is(&) ~ * sibling combinator escape in Light DOM
+  const r6 = validateSafeCssText('[data-addon-host-owner="evil"] { :is(&) ~ * { color: red; } }', { scope: 'owner' });
+  assert.equal(r6.ok, false);
+  assert.equal(r6.reason, 'ERR_FORBIDDEN_CSS_NESTING');
 });
 
 test('TC-V2-008c (S-3 & S-4): pre-trust mainHook OOM DoS guards + fail-closed verifyClaimedEvent & error cap', () => {
@@ -628,6 +638,28 @@ test('TC-V2-008e (R-2, R-3, R-5, R-6): popover-in-dialog, mountSlot isConnected,
   assert.equal(modalPortal.getStackSize(), 0);
   assert.equal(portalClaims[0].active, true);
   assert.equal(portalClaims[portalClaims.length - 1].active, false);
+
+  // Audit F2: Closing parent modal <dialog> directly MUST cascade-close R-2 child popover,
+  // run pop.onClose, unregister child ShadowRoot, and release PortalArbiter once (no wedged stack!)
+  const claimsBeforeF2 = portalClaims.length;
+  let childPopClosed = 0;
+  const m3 = modalPortal.openModal(restrictedMeta, 'p-ui.mod');
+  const childPop = modalPortal.openPopover(restrictedMeta, 'p-ui.pop', {
+    onClose: () => {
+      childPopClosed++;
+    },
+  });
+  styleManager.injectStyle(restrictedMeta, 'pop-css', '.p { color: blue; }', { slotId: 'p-ui.pop' });
+  const childPopSr = childPop.element.shadowRoot;
+  assert.equal(childPopSr.children.filter((c) => c.tagName === 'STYLE').length, 1);
+  assert.equal(modalPortal.getStackSize(), 2);
+
+  m3.close();
+  assert.equal(modalPortal.getStackSize(), 0, 'F2: parent modal close must cascade-close child popover');
+  assert.equal(childPopClosed, 1, 'F2: child popover onClose must fire');
+  assert.equal(childPopSr.children.filter((c) => c.tagName === 'STYLE').length, 0, 'F2: child popover ShadowRoot must be unregistered');
+  const f2Claims = portalClaims.slice(claimsBeforeF2).map((c) => c.active);
+  assert.deepEqual(f2Claims, [true, false], 'F2: PortalArbiter must transition true -> false cleanly once');
 });
 
 test('TC-V2-008f (O-1, O-2, O-3, O-4, S-5, O-5): CI flags, fail-closed dist/runtime, corrupt restage, doctor/status health, zero resources/ write, and docs sync', () => {

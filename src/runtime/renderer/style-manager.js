@@ -98,8 +98,8 @@ function validateCssSyntaxBalanced(cssText) {
         i++;
         continue;
       }
-      if (ch === '\n' || ch === '\r') {
-        return false; // unescaped newline inside CSS string (bad-string token bypass)
+      if (ch === '\n' || ch === '\r' || ch === '\f') {
+        return false; // unescaped newline/form-feed inside CSS string (CSS Syntax L3 bad-string token bypass)
       }
       if (ch === quote) quote = null;
       continue;
@@ -152,7 +152,7 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
     if (/(?:\[data-addon-host-owner\s*=|\b(?:html|body|:root)\b)[^,{};]*[+~]/i.test(decoded)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SELECTOR' };
     }
-    if (/(?:&\s*[+~]|:\s*has\s*\()/i.test(decoded)) {
+    if (/(?:&[^;{}]*[+~]|:\s*has\s*\()/i.test(decoded)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_NESTING' };
     }
   }

@@ -225,6 +225,13 @@ function executeInMemoryMainHookBundle(snapshot, entryRelPosix) {
 function readVerifiedRendererScript(scriptPath, manifest, policy, { strictTrustPolicy = true } = {}) {
   let buf;
   try {
+    const st = fs.statSync(scriptPath);
+    if (!st.isFile()) {
+      return { ok: false, reason: 'ERR_RENDERER_SCRIPT_NOT_FILE' };
+    }
+    if (st.size > MAX_BUNDLE_TOTAL_BYTES) {
+      return { ok: false, reason: 'ERR_RENDERER_SCRIPT_SIZE_LIMIT_EXCEEDED' };
+    }
     buf = fs.readFileSync(scriptPath);
   } catch (err) {
     return { ok: false, reason: 'ERR_RENDERER_SCRIPT_READ_FAILED', error: err && err.message ? err.message : String(err) };
