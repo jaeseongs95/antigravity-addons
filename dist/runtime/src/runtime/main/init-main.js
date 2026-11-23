@@ -19,6 +19,7 @@ const { createHostOriginResolver } = require('./host-origin-resolver');
 const { createPortalArbiter } = require('./portal-arbiter');
 const { loadTrustPolicyFile } = require('./trust-verifier');
 const { createMainHookRunner } = require('./main-hook-runner');
+const { createSettingsBridge } = require('./settings-bridge');
 const { createRendererInjector } = require('./renderer-injector');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
 const { createNodeFileSystemPort } = require('../../adapters/node-fs-port');
@@ -107,7 +108,7 @@ function createHostRuntimeController(cfg, deps = {}) {
       pluginsRootDir: cfg.pluginsRootDir,
       checkFilesExist: true,
       hostProfileId: profile.id || null,
-      hostVersion: cfg.hostVersion || '2.0.0',
+      hostVersion: cfg.hostVersion || '2.1.0',
       strictTrustPolicy,
       fsPort,
       isEnabled: (pluginId) => isPluginEnabledInConfig(cfg.configJsonPath, pluginId),
@@ -142,6 +143,21 @@ function createHostRuntimeController(cfg, deps = {}) {
     lifecycleStates,
   });
 
+  const settingsDataDir =
+    cfg.settingsDataDir || (cfg.addonsDir ? path.dirname(path.resolve(cfg.addonsDir)) : null);
+  let rendererInjectorRef = null;
+  const settingsBridge = createSettingsBridge({
+    settingsDataDir,
+    reservedFilePaths: [cfg.trustPolicyPath, cfg.configJsonPath].filter(Boolean),
+    debounceMs: cfg.settingsWatchDebounceMs,
+    onSnapshotChange: (pluginId, snapshot) => {
+      if (rendererInjectorRef) {
+        rendererInjectorRef.pushSettingsUpdate(pluginId, snapshot);
+      }
+    },
+    recordDiag,
+  });
+
   const rendererInjector = createRendererInjector({
     kernelBundleSource: readKernelSource,
     originResolver,
@@ -151,9 +167,11 @@ function createHostRuntimeController(cfg, deps = {}) {
     rendererExecTimeoutMs: cfg.rendererExecTimeoutMs || 10000,
     planProvider: planCurrentAddons,
     policyProvider: readCurrentPolicy,
+    settingsBridge,
     recordDiag,
     lifecycleStates,
   });
+  rendererInjectorRef = rendererInjector;
 
   let ipcRegistered = false;
   function registerIpcHandlers() {
@@ -238,6 +256,7 @@ function createHostRuntimeController(cfg, deps = {}) {
         }
       });
       app.on('before-quit', () => {
+        settingsBridge.dispose();
         portalArbiter.dispose();
         mainHookRunner.disposeAll();
       });
@@ -255,7 +274,10 @@ function createHostRuntimeController(cfg, deps = {}) {
     getAddonLifecycleStates: () => Object.fromEntries(lifecycleStates.entries()),
     getPortalArbiterStatus: () => portalArbiter.getStatus(),
     getPreloadStatus: () => preloadRegistrar.getStatus(),
+    getSettingsBridgeStatus: () => settingsBridge.getStatus(),
+    refreshSettingsBridge: () => settingsBridge.refreshNow(),
     dispose: () => {
+      settingsBridge.dispose();
       portalArbiter.dispose();
       return mainHookRunner.disposeAll();
     },

@@ -5,7 +5,11 @@
 
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)
 
-**Single, vendor-independent native desktop addon host framework (`v2.0.0`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent native desktop addon host framework (`v2.1.0`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, SHA-256 trust pinning, and unidirectional read-only `settingsBridge` push (`AddonManifest.v2` with full `v1` backward compatibility).**
+
+## Key Capabilities in v2.1.0 (additive over v2.0.0)
+
+- **Unidirectional Read-Only `settingsBridge` (`AddonManifest.v2`)**: Trusted (`trustLevel: "trusted"` + `trust-policy.json` SHA-256 pinned) renderer plugins can declare an optional `settingsBridge: { fileName, maxBytes }` bound to a flat JSON file inside the host-owned data directory (`HOST_DATA_DIR`, never `~/.gemini/config/plugins/`). The Main process enforces symlink rejection (`lstatSync`), `realpathSync` confinement, reserved host file blocking (`trust-policy.json`, `config.json`, `*.orig.json`, etc.), pre/post-read `maxBytes` caps, `parseSafeJson` prototype-pollution protection, and SHA-256 deduplication over a single debounced `fs.watch`, pushing deep-frozen snapshots to World `998` via `addonHost.getSettings()` / `addonHost.onSettingsChange(cb)` with zero renderer-to-main write IPC and zero `app.asar` re-patching on upgrade from `v2.0.0`.
 
 ## Key Capabilities in v2.0.0
 
@@ -19,7 +23,7 @@
 ## Security & Isolation Threat Model
 
 - **Renderer Isolation (World `998` — Coexistence + Defense-in-Depth)**: Plugins execute in Electron Isolated World `998` (separated from Page World `0` and Electron preload World `999`) with a non-writable, host-token-authenticated kernel, Option B2 Shadow DOM slots, and strict CSS sanitization. This provides strong coexistence and defense-in-depth between well-behaved or buggy plugins and the host app; it is **not** a hostile multi-tenant OS sandbox between plugins sharing the same renderer process.
-- **`mainHook` Trust Boundary (SHA-256 Pinned Node Code)**: `mainHook` is strictly Default-Deny (`strictTrustPolicy: true`). Only explicitly user-approved (`addon-host trust approve <pluginId>`), SHA-256-pinned bundles execute in the Main process via the memory-backed CommonJS loader (eliminating disk TOCTOU tampering and accidental external requires). Full OS-process isolation for out-of-process services (`SidecarBridge`) is intentionally deferred to **`v2.1.0`** (`Option S1`).
+- **`mainHook` Trust Boundary (SHA-256 Pinned Node Code)**: `mainHook` is strictly Default-Deny (`strictTrustPolicy: true`). Only explicitly user-approved (`addon-host trust approve <pluginId>`), SHA-256-pinned bundles execute in the Main process via the memory-backed CommonJS loader (eliminating disk TOCTOU tampering and accidental external requires). In **`v2.1.0`**, plugins that only need host-persisted settings can drop `mainHook` completely and use the unidirectional read-only `settingsBridge` (full multi-process RPC `SidecarBridge` remains deferred to a future minor release).
 
 ## Quick Start
 
@@ -61,6 +65,7 @@ if (rootEl) {
 
 ## Documentation
 
+- [Release Notes (`v2.1.0` EN/KO)](./RELEASE_NOTES_v2.1.0.md)
 - [Release Notes (`v2.0.0` EN/KO)](./RELEASE_NOTES_v2.0.0.md)
 - [한국어 문서 (`README.ko.md`)](./README.ko.md)
 - [JSON Schema v2 (`schemas/addon-manifest.v2.schema.json`)](./schemas/addon-manifest.v2.schema.json)

@@ -20,7 +20,26 @@ const { getPrivilegedRequirements } = require('./trust-policy-port');
 
 const MANIFEST_SCHEMA = MANIFEST_SCHEMA_V1;
 const FORBIDDEN_IDS = new Set(['__proto__', 'constructor', 'prototype']);
+const RESERVED_SETTINGS_BRIDGE_FILES = new Set([
+  'trust-policy.json',
+  'config.json',
+  'index.json',
+  'build-manifest.json',
+  'package.json',
+]);
+const SETTINGS_FILE_RE = /^[a-z0-9][a-z0-9._-]{1,63}\.json$/;
+const WINDOWS_DOS_DEVICE_RE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
+
+function isReservedSettingsFileName(fileName) {
+  if (typeof fileName !== 'string' || !SETTINGS_FILE_RE.test(fileName)) return true;
+  if (fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) return true;
+  const lower = fileName.toLowerCase();
+  if (RESERVED_SETTINGS_BRIDGE_FILES.has(lower)) return true;
+  if (lower.endsWith('.orig.json')) return true;
+  if (WINDOWS_DOS_DEVICE_RE.test(lower)) return true;
+  return false;
+}
 const SEMVER_RE =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
@@ -320,14 +339,30 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       }
     }
 
+    if (manifest.settingsBridge && typeof manifest.settingsBridge === 'object') {
+      if (isReservedSettingsFileName(manifest.settingsBridge.fileName)) {
+        return {
+          ok: false,
+          reason: 'ERR_RESERVED_SETTINGS_BRIDGE_FILE',
+          errors: [`settingsBridge.fileName "${String(manifest.settingsBridge.fileName || '')}" is reserved or invalid`],
+        };
+      }
+    }
+
     // Declarative trust validation (v2 Default-Deny):
     // - `strictTrustPolicy` defaults to `true`.
-    // - Omitting `trustLevel` under strict mode defaults to `restricted`, blocking `mainHook` and `document-transform`.
+    // - Omitting `trustLevel` under strict mode defaults to `restricted`, blocking `mainHook`, `document-transform`, and `settingsBridge`.
     // - Declaring `trustLevel: "trusted"` passes static manifest validation with `requiresTrustApproval: true`;
     //   actual runtime execution STILL requires host `trust-policy.json` SHA-256 pinning (TrustPolicyPort / TrustVerifier).
     const declaredTrust = manifest.trustLevel || null;
     const reqs = getPrivilegedRequirements(manifest);
-    const effectiveTrustLevel = declaredTrust || (strictTrustPolicy ? 'restricted' : reqs.hasMainHook || reqs.hasDocumentTransform ? 'trusted' : 'restricted');
+    const effectiveTrustLevel =
+      declaredTrust ||
+      (strictTrustPolicy
+        ? 'restricted'
+        : reqs.hasMainHook || reqs.hasDocumentTransform || reqs.hasSettingsBridge
+          ? 'trusted'
+          : 'restricted');
     if (effectiveTrustLevel === 'restricted') {
       if (caps.has('mainHook')) {
         return {
@@ -341,6 +376,13 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
           ok: false,
           reason: 'ERR_RESTRICTED_DOCUMENT_TRANSFORM_FORBIDDEN',
           errors: ['Restricted plugins cannot declare "document-transform" slot; requires trustLevel: "trusted" and host trust approval'],
+        };
+      }
+      if (reqs.hasSettingsBridge) {
+        return {
+          ok: false,
+          reason: 'ERR_RESTRICTED_SETTINGS_BRIDGE_FORBIDDEN',
+          errors: ['Restricted plugins cannot declare "settingsBridge"; requires trustLevel: "trusted" and host trust approval'],
         };
       }
     }
@@ -391,6 +433,7 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       requiresTrustApproval: reqs.requiresTrustApproval,
       privilegedCapabilities: reqs.privilegedCapabilities,
       hasDocumentTransformSlot,
+      hasSettingsBridge: reqs.hasSettingsBridge,
       resolvedEntries,
       manifest: normalizedManifest,
       rawManifest: manifest,
@@ -411,7 +454,10 @@ module.exports = {
   MANIFEST_SCHEMA_V1,
   MANIFEST_SCHEMA_V2,
   FORBIDDEN_IDS,
+  RESERVED_SETTINGS_BRIDGE_FILES,
+  SETTINGS_FILE_RE,
   PLUGIN_ID_RE,
+  isReservedSettingsFileName,
   validatePluginId,
   compareSemver,
   resolveConfinedScriptPath,

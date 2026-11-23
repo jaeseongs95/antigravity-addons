@@ -143,6 +143,12 @@ exports.onMainReady = (broker) => {
     fs.writeFileSync(
       p2Renderer,
       `'use strict';
+const initSettings = addonHost.getSettings();
+window.__E2E_SETTINGS_HISTORY = [initSettings];
+window.__E2E_SETTINGS_FROZEN = Boolean(initSettings && Object.isFrozen(initSettings) && Object.isFrozen(initSettings.data));
+addonHost.onSettingsChange((snap) => {
+  window.__E2E_SETTINGS_HISTORY.push(snap);
+});
 const root = addonHost.mountSlot('mock-v2.panel');
 if (root) {
   root.style.padding = '2px';
@@ -169,6 +175,8 @@ if (root) {
 `,
       'utf8'
     );
+    const p2SettingsPath = path.join(hostDataDir, 'mock_v2_settings.json');
+    fs.writeFileSync(p2SettingsPath, JSON.stringify({ enabled: false, provider: 'local-llm' }), 'utf8');
     fs.writeFileSync(
       path.join(addonsDir, 'mock-v2-addon.json'),
       JSON.stringify(
@@ -176,10 +184,11 @@ if (root) {
           schemaVersion: 2,
           pluginId: 'mock-v2-addon',
           displayName: 'Mock V2 Addon',
-          version: '2.0.0',
+          version: '2.1.0',
           trustLevel: 'trusted',
           capabilities: ['renderer', 'mainHook'],
           entry: { rendererScript: 'renderer.js', mainHookScript: 'main-hook.js' },
+          settingsBridge: { fileName: 'mock_v2_settings.json', maxBytes: 16384 },
           uiSlots: [
             { slot: 'overview-pane', slotId: 'mock-v2.panel', anchor: 'overview-pane' },
             { slot: 'custom', slotId: 'mock-v2.missing', anchor: 'automation-page' },
@@ -234,7 +243,7 @@ if (root) {
           approved: {
             'mock-v2-addon': {
               pluginId: 'mock-v2-addon',
-              version: '2.0.0',
+              version: '2.1.0',
               rendererSha256: p2RendererSha,
               mainHookBundleSha256: p2BundleSha,
               approvedAt: new Date().toISOString(),
@@ -270,7 +279,7 @@ if (root) {
       RUNTIME_DIR: path.join(hostDataDir, 'runtime'),
     };
     const shimSrc = buildHostLoaderScriptSource(paths, ANTIGRAVITY_HOST_PROFILE, {
-      hostVersion: '2.0.0',
+      hostVersion: '2.1.0',
       strictTrustPolicy: true,
       runtimeEntryDir: runtimeStagedDir,
       buildSha8: buildInfo.buildSha8,
@@ -283,24 +292,32 @@ if (root) {
     // Write isolated Electron app entry inside tmpRoot (ZERO repo references!)
     const electronMainPath = path.join(tmpRoot, 'app-main.cjs');
     const electronMainCode = `'use strict';
+const fs = require('node:fs');
 const http = require('node:http');
 const { app, BaseWindow, WebContentsView, session, ipcMain } = require('electron');
 
 // 1. Load generated shim BEFORE app.whenReady() (exact pre-L339 sequence)
 const loader = require(${JSON.stringify(loaderScriptPath)});
+const SETTINGS_FILE = ${JSON.stringify(p2SettingsPath)};
 const controller1 = loader.initMain(app);
 const controller2 = loader.initMain(app); // must be idempotent!
 
 const nativePortalEvents = [];
 app.on('window-all-closed', (e) => e.preventDefault());
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(\`<!doctype html><html><body style="background:rgb(255,255,255)">
+const htmlDoc = \`<!doctype html><html><body style="background:rgb(255,255,255)">
     <div data-testid="status-bar"></div>
     <div data-testid="overview-panel"></div>
     <iframe src="about:blank"></iframe>
-  </body></html>\`);
+  </body></html>\`;
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(htmlDoc);
+});
+const server2 = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(htmlDoc);
 });
 
 function waitFor(fn, timeoutMs = 8000) {
@@ -326,8 +343,11 @@ app.whenReady().then(async () => {
   });
 
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  await new Promise((r) => server2.listen(0, '127.0.0.1', r));
   const port = server.address().port;
+  const port2 = server2.address().port;
   const baseUrl = 'http://127.0.0.1:' + port;
+  const baseUrl2 = 'http://127.0.0.1:' + port2;
 
   const win = new BaseWindow({ width: 900, height: 650, show: false });
   const hubView = new WebContentsView({
@@ -402,6 +422,39 @@ app.whenReady().then(async () => {
     { code: 'typeof window.__addonHostBootstrap' },
   ]);
 
+  // Verify v2.1.0 settingsBridge: initial snapshot, live fs.watch push, and origin port rotation persistence
+  const settingsInitial = await hubView.webContents.executeJavaScriptInIsolatedWorld(998, [{
+    code: \`({ frozen: window.__E2E_SETTINGS_FROZEN, history: window.__E2E_SETTINGS_HISTORY })\`,
+  }]);
+  // Put a canary in localStorage on port 1 to verify port 2 wipes localStorage while settingsBridge persists
+  await hubView.webContents.executeJavaScriptInIsolatedWorld(998, [{ code: \`localStorage.setItem('port1_canary', '1')\` }]);
+
+  // Live settings write on disk -> must push into World 998 without reload
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ enabled: false, provider: 'custom-v2' }), 'utf8');
+  const settingsAfterLivePush = await waitFor(() =>
+    hubView.webContents.executeJavaScriptInIsolatedWorld(998, [{
+      code: \`(() => {
+        const h = window.__E2E_SETTINGS_HISTORY || [];
+        return h.length >= 2 ? h[h.length - 1] : null;
+      })()\`,
+    }])
+  );
+
+  // Rotate to second loopback port (simulating Antigravity dynamic LS port change)
+  await hubView.webContents.loadURL(baseUrl2 + '/home');
+  const settingsAfterPortRotation = await waitFor(() =>
+    hubView.webContents.executeJavaScriptInIsolatedWorld(998, [{
+      code: \`(() => {
+        const h = window.__E2E_SETTINGS_HISTORY || [];
+        if (h.length < 1) return null;
+        return {
+          lsCanary: localStorage.getItem('port1_canary'),
+          initialOnPort2: h[0],
+        };
+      })()\`,
+    }])
+  );
+
   await waitFor(() => globalThis.__E2E_MAIN_HOOK_TOKEN === 'MEM_CJS_OK', 3000);
 
   console.log('ISOLATED_E2E_RESULT:' + JSON.stringify({
@@ -409,6 +462,10 @@ app.whenReady().then(async () => {
     buildInfo: loader.getBuildInfo(),
     preloadStatus: controller1.getPreloadStatus(),
     portalStatus: controller1.getPortalArbiterStatus(),
+    settingsBridgeStatus: controller1.getSettingsBridgeStatus(),
+    settingsInitial,
+    settingsAfterLivePush,
+    settingsAfterPortRotation,
     isolatedPreloadsCount: isolatedSes.getPreloadScripts().length,
     world0Bootstrap,
     isolatedWorld998Bootstrap,
@@ -423,6 +480,7 @@ app.whenReady().then(async () => {
   }));
 
   server.close();
+  server2.close();
   if (!isolatedWin.isDestroyed()) isolatedWin.destroy();
   win.destroy();
   app.quit();
@@ -483,6 +541,17 @@ app.whenReady().then(async () => {
     );
     assert.equal(out.mainHookToken, 'MEM_CJS_OK');
     assert.equal(out.unapprovedMainHookRan, false, 'Unapproved trusted mainHook MUST be blocked by Default-Deny');
+    assert.equal(out.settingsInitial.frozen, true, 'Initial settings snapshot must be deep-frozen');
+    assert.equal(out.settingsInitial.history[0].status, 'ok');
+    assert.equal(out.settingsInitial.history[0].data.provider, 'local-llm');
+    assert.equal(out.settingsInitial.history[0].data.enabled, false);
+    assert.equal(out.settingsAfterLivePush.status, 'ok');
+    assert.equal(out.settingsAfterLivePush.data.provider, 'custom-v2');
+    assert.equal(out.settingsAfterLivePush.revision, 2);
+    assert.equal(out.settingsAfterPortRotation.lsCanary, null, 'Port rotation must partition localStorage');
+    assert.equal(out.settingsAfterPortRotation.initialOnPort2.status, 'ok');
+    assert.equal(out.settingsAfterPortRotation.initialOnPort2.data.provider, 'custom-v2');
+    assert.equal(out.settingsAfterPortRotation.initialOnPort2.data.enabled, false);
     assert.deepEqual(out.rendererErrors, []);
 
     // Verify ZERO runtime writes inside plugins/

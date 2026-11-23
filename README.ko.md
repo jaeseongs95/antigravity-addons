@@ -5,7 +5,11 @@
 
 > **언어**: [English (README.md)](./README.md) | 한국어
 
-**무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, SHA-256 신뢰 핀닝을 제공하는 벤더 중립 데스크톱 애드온 호스트 프레임워크(`v2.0.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+**무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, SHA-256 신뢰 핀닝, 단방향 읽기 전용 `settingsBridge` 설정 푸시를 제공하는 벤더 중립 데스크톱 애드온 호스트 프레임워크(`v2.1.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+
+## v2.1.0 주요 추가 사항 (v2.0.0 하위 호환 확장)
+
+- **단방향 읽기 전용 `settingsBridge` (`AddonManifest.v2`)**: `trustLevel: "trusted"` 및 `trust-policy.json` SHA-256 승인을 받은 렌더러 플러그인이 호스트 소유 데이터 디렉터리(`HOST_DATA_DIR`, `~/.gemini/config/plugins/` 제외) 내 단일 JSON 파일을 선언(`settingsBridge: { fileName, maxBytes }`)할 수 있습니다. 메인 프로세스가 심볼릭 링크 거부(`lstatSync`), `realpathSync` 경로 격리, 호스트 예약 파일(`trust-policy.json`, `config.json`, `*.orig.json` 등) 차단, `maxBytes` 상한, `parseSafeJson` 프로토타입 오염 차단, 단일 디바운스 `fs.watch` + SHA-256 중복 제거를 수행한 뒤 World `998`에 `addonHost.getSettings()` / `addonHost.onSettingsChange(cb)`로 deep-frozen 스냅샷을 푸시합니다. Renderer → Main 쓰기 IPC는 열지 않으며, `v2.0.0`에서의 업그레이드 시 `app.asar` 재패치(쓰기)는 0바이트입니다.
 
 ## v2.0.0 주요 변경 사항
 
@@ -19,7 +23,7 @@
 ## 보안 및 격리 위협 모델
 
 - **렌더러 격리 (World `998` — 공존 및 심층 방어)**: 플러그인은 Page World `0` 및 Electron 프리로드 World `999`와 분리된 Isolated World `998`에서 호스트 토큰으로 보호되는 비가변 커널, Option B2 Shadow DOM 슬롯, 엄격한 CSS 살균기와 함께 실행됩니다. 이는 호스트 앱과 플러그인 간의 공존 및 심층 방어(Coexistence + Defense-in-Depth)를 제공하며, 동일 렌더러 프로세스 내 적대적 멀티테넌트 OS 샌드박스를 대체하지는 않습니다.
-- **`mainHook` 신뢰 경계 (SHA-256 핀닝 기반 신뢰 코드)**: `mainHook`은 기본 거부(`strictTrustPolicy: true`) 정책을 따르며, 사용자가 `addon-host trust approve <pluginId>`로 명시적 승인한 SHA-256 핀닝 번들만 메모리 기반 CJS 로더로 메인 프로세스에서 실행됩니다(디스크 TOCTOU 변조 및 비인가 외부 `require` 차단). 별도 프로세스 수준의 완전 격리(`SidecarBridge`)는 `Option S1` 결정에 따라 **`v2.1.0`**으로 이월되었습니다.
+- **`mainHook` 신뢰 경계 (SHA-256 핀닝 기반 신뢰 코드)**: `mainHook`은 기본 거부(`strictTrustPolicy: true`) 정책을 따르며, 사용자가 `addon-host trust approve <pluginId>`로 명시적 승인한 SHA-256 핀닝 번들만 메모리 기반 CJS 로더로 메인 프로세스에서 실행됩니다(디스크 TOCTOU 변조 및 비인가 외부 `require` 차단). **`v2.1.0`**에서는 호스트 설정 전달만 필요한 플러그인이 `mainHook`을 완전히 제거하고 단방향 읽기 전용 `settingsBridge`를 사용할 수 있으며, 양방향 OS 프로세스 RPC(`SidecarBridge`)는 향후 마이너 버전으로 이연되어 있습니다.
 
 ## 빠른 시작
 
@@ -49,6 +53,7 @@ node ./bin/addon-host.js --rollback
 
 ## 문서
 
+- [릴리스 노트 (`v2.1.0` 영문/국문)](./RELEASE_NOTES_v2.1.0.md)
 - [릴리스 노트 (`v2.0.0` 영문/국문)](./RELEASE_NOTES_v2.0.0.md)
 - [English README (`README.md`)](./README.md)
 - [JSON Schema v2 (`schemas/addon-manifest.v2.schema.json`)](./schemas/addon-manifest.v2.schema.json)
