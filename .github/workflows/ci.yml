@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Pre-download Electron binary (prevents parallel test worker ETXTBSY/EBUSY race)
+        run: node -e "require('electron')"
+
       - name: Run full v2 verification suite (Linux headless Electron via xvfb-run)
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:all

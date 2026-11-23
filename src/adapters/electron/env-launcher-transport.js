@@ -48,7 +48,11 @@ function scrubOwnRequireFromNodeOptions(rawNodeOptions, targetPath) {
       ? s.slice(1, -1)
       : s;
   const normalizeForCompare = (p) => {
-    const resolved = path.resolve(p);
+    const raw = String(p || '');
+    if (/^[A-Za-z]:[\\/]/.test(raw)) {
+      return path.win32.normalize(raw).replace(/\\/g, '/').toLowerCase();
+    }
+    const resolved = path.resolve(raw).replace(/\\/g, '/');
     return process.platform === 'win32' || process.platform === 'darwin' ? resolved.toLowerCase() : resolved;
   };
   const normTarget = normalizeForCompare(targetPath);
@@ -70,7 +74,8 @@ function scrubOwnRequireFromNodeOptions(rawNodeOptions, targetPath) {
 }
 
 function buildNodeOptionsWithRequire(existingNodeOptions, bootstrapFilePath) {
-  const absPath = path.resolve(bootstrapFilePath);
+  const raw = String(bootstrapFilePath || '');
+  const absPath = /^[A-Za-z]:[\\/]/.test(raw) ? path.win32.normalize(raw) : path.resolve(raw);
   if (/["\r\n\0]/.test(absPath)) {
     throw new Error('ERR_INVALID_BOOTSTRAP_PATH_CHARS');
   }
