@@ -40,14 +40,23 @@ function getPrivilegedRequirements(manifest) {
       typeof manifest.settingsBridge.fileName === 'string' &&
       manifest.settingsBridge.fileName.length > 0
   );
+  const hasConfigBridge = Boolean(
+    manifest &&
+      manifest.configBridge &&
+      typeof manifest.configBridge === 'object' &&
+      Array.isArray(manifest.configBridge.scopes) &&
+      manifest.configBridge.scopes.length > 0
+  );
   const required = [];
   if (hasMainHook) required.push('mainHook');
   if (hasDocumentTransform) required.push('document-transform');
   if (hasSettingsBridge) required.push('settingsBridge');
+  if (hasConfigBridge) required.push('configBridge');
   return {
     hasMainHook,
     hasDocumentTransform,
     hasSettingsBridge,
+    hasConfigBridge,
     requiresTrustApproval: required.length > 0 || (manifest && manifest.trustLevel === 'trusted'),
     privilegedCapabilities: required,
   };

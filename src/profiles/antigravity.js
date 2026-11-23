@@ -28,8 +28,12 @@ const MAIN_ANCHOR_REPLACEMENT =
 function resolveAntigravityPaths(env = process.env) {
   const home = env.USERPROFILE || env.HOME || os.homedir();
   const agyDir = path.join(home, '.gemini', 'antigravity');
-  const pluginsRoot = path.join(home, '.gemini', 'config', 'plugins');
-  const configJsonPath = path.join(home, '.gemini', 'config', 'config.json');
+  const configDir = path.join(home, '.gemini', 'config');
+  const pluginsRoot = path.join(configDir, 'plugins');
+  const configJsonPath = path.join(configDir, 'config.json');
+  const mcpConfigPath = path.join(configDir, 'mcp_config.json');
+  const mcpConfigLegacyPath = path.join(agyDir, 'mcp_config.json');
+  const configBackupsDir = path.join(configDir, '.mcp-manager-backups');
   const addonsDir = path.join(agyDir, 'addons.d');
   const addonsLockPath = path.join(agyDir, 'addon-host-addons.lock');
   const loaderScriptPath = path.join(agyDir, 'addon-host-loader.js');
@@ -65,6 +69,9 @@ function resolveAntigravityPaths(env = process.env) {
     HOST_DATA_DIR: agyDir,
     PLUGINS_ROOT_DIR: pluginsRoot,
     CONFIG_JSON_PATH: configJsonPath,
+    MCP_CONFIG_PATH: mcpConfigPath,
+    MCP_CONFIG_LEGACY_PATH: mcpConfigLegacyPath,
+    CONFIG_BACKUPS_DIR: configBackupsDir,
     ADDONS_DIR: addonsDir,
     ADDONS_LOCK_PATH: addonsLockPath,
     LOADER_SCRIPT_PATH: loaderScriptPath,
@@ -77,8 +84,49 @@ function resolveAntigravityPaths(env = process.env) {
   };
 }
 
+function resolveAntigravityConfigScopes(paths = {}) {
+  const home = paths.HOME_DIR || os.homedir();
+  const configDir = paths.CONFIG_JSON_PATH ? path.dirname(paths.CONFIG_JSON_PATH) : path.join(home, '.gemini', 'config');
+  const hostDataDir = paths.HOST_DATA_DIR || path.join(home, '.gemini', 'antigravity');
+  const mcpConfigPath = paths.MCP_CONFIG_PATH || path.join(configDir, 'mcp_config.json');
+  const mcpConfigLegacyPath = paths.MCP_CONFIG_LEGACY_PATH || path.join(hostDataDir, 'mcp_config.json');
+  const backupDir = paths.CONFIG_BACKUPS_DIR || path.join(configDir, '.mcp-manager-backups');
+  const pluginsRootDir = paths.PLUGINS_ROOT_DIR || path.join(configDir, 'plugins');
+
+  return Object.freeze({
+    'antigravity:mcp-config': Object.freeze({
+      kind: 'file',
+      access: 'rw',
+      maxBytes: 262144,
+      path: mcpConfigPath,
+      backupDir,
+      maxBackups: 10,
+      allowRawRecovery: true,
+      ancestorSymlinkDepth: 2,
+    }),
+    'antigravity:plugin-mcp-configs': Object.freeze({
+      kind: 'plugin-files',
+      access: 'ro',
+      maxBytes: 262144,
+      rootDir: pluginsRootDir,
+      fileName: 'mcp_config.json',
+      maxPlugins: 128,
+      allowRawRecovery: true,
+    }),
+    'antigravity:mcp-config-legacy': Object.freeze({
+      kind: 'file',
+      access: 'ro',
+      maxBytes: 262144,
+      path: mcpConfigLegacyPath,
+      allowRawRecovery: true,
+      ancestorSymlinkDepth: 2,
+    }),
+  });
+}
+
 const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
   id: 'antigravity-desktop',
+  supportedCapabilities: Object.freeze(['renderer', 'mainHook']),
   patchMarker: PATCH_MARKER,
   priorHostMarkers: PRIOR_HOST_MARKERS,
   loaderEnvVar: LOADER_ENV_VAR,
@@ -113,6 +161,7 @@ const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
     'ui-extensions-loader',
   ]),
   resolvePaths: resolveAntigravityPaths,
+  resolveConfigScopes: resolveAntigravityConfigScopes,
 });
 
 module.exports = {
@@ -124,5 +173,6 @@ module.exports = {
   MAIN_ANCHOR_TARGET,
   MAIN_ANCHOR_REPLACEMENT,
   resolveAntigravityPaths,
+  resolveAntigravityConfigScopes,
   ANTIGRAVITY_HOST_PROFILE,
 };

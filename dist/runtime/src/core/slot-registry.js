@@ -13,6 +13,7 @@ function createSlotRegistry() {
   const ownersByStorageNs = new Map();
   const ownersByIpcPrefix = new Map();
   const ownersBySettingsFile = new Map();
+  const writersByConfigScope = new Map();
 
   function registerManifestSlots(manifest) {
     const pluginId = manifest && manifest.pluginId;
@@ -135,6 +136,30 @@ function createSlotRegistry() {
       }
     }
 
+    // 6) Config bridge write-scope exclusivity (at most ONE active rw writer per named scopeId; multiple ro readers allowed)
+    const configScopes =
+      manifest && manifest.configBridge && Array.isArray(manifest.configBridge.scopes)
+        ? manifest.configBridge.scopes
+        : [];
+    const rwScopeIds = [];
+    for (const sc of configScopes) {
+      if (!sc || typeof sc.scopeId !== 'string' || !sc.scopeId.trim()) continue;
+      if (sc.access === 'rw') {
+        const key = sc.scopeId.trim();
+        const exWriter = writersByConfigScope.get(key);
+        if (exWriter && exWriter !== pluginId) {
+          conflicts.push({
+            code: 'ERR_DUPLICATE_CONFIG_SCOPE_WRITER',
+            kind: 'DUPLICATE_CONFIG_SCOPE_WRITER',
+            scopeId: key,
+            existingPluginId: exWriter,
+            incomingPluginId: pluginId,
+          });
+        }
+        rwScopeIds.push(key);
+      }
+    }
+
     if (conflicts.length > 0) {
       return { ok: false, reason: conflicts[0].code, conflicts };
     }
@@ -155,6 +180,7 @@ function createSlotRegistry() {
     if (storageNs) ownersByStorageNs.set(storageNs, pluginId);
     if (ipcPrefix) ownersByIpcPrefix.set(ipcPrefix, pluginId);
     if (settingsFileKey) ownersBySettingsFile.set(settingsFileKey, pluginId);
+    for (const key of rwScopeIds) writersByConfigScope.set(key, pluginId);
 
     return { ok: true, conflicts: [] };
   }
@@ -170,7 +196,9 @@ function createSlotRegistry() {
     for (const [k, v] of ownersByIpcPrefix.entries()) ipcPrefixes[k] = v;
     const settingsBridgeFiles = Object.create(null);
     for (const [k, v] of ownersBySettingsFile.entries()) settingsBridgeFiles[k] = v;
-    return { bySlotId, bySlot, storageNamespaces, ipcPrefixes, settingsBridgeFiles };
+    const configScopeWriters = Object.create(null);
+    for (const [k, v] of writersByConfigScope.entries()) configScopeWriters[k] = v;
+    return { bySlotId, bySlot, storageNamespaces, ipcPrefixes, settingsBridgeFiles, configScopeWriters };
   }
 
   return {
