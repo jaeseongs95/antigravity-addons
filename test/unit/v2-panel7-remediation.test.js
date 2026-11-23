@@ -446,9 +446,51 @@ test('TC-V2-008b (S-2): closes all 4 owner-CSS isolation bypasses', () => {
     assert.equal(rNested.reason, 'ERR_FORBIDDEN_CSS_NESTING');
   }
 
-  // Valid @media, @keyframes, quoted brace in content, and unquoted data: URL remain allowed
+  // (k) Audit F11: Full LIFO {}/()/[] block stack & paren/bracket-aware top-level char/brace scanning
+  // 1) Forgiving `:is(...)` / `:where(...)` with inner `;` MUST stay fully prefixed under ownerPrefix
   assert.equal(
-    validateSafeCssText('@media (max-width: 600px) { .btn { content: "{"; background: url(data:image/png;base64,AAAA); } }', { scope: 'owner' }).ok,
+    scopeCssToOwner(':is(body, a;) { background: rgb(255, 0, 0) !important; }', 'evil'),
+    '[data-addon-host-owner="evil"] :is(body, a;) { background: rgb(255, 0, 0) !important; }'
+  );
+  assert.equal(
+    scopeCssToOwner(':where(*, [x=;]) { display: none !important; }', 'evil'),
+    '[data-addon-host-owner="evil"] :where(*, [x=;]) { display: none !important; }'
+  );
+  assert.equal(
+    scopeCssToOwner('@media all { :is(body, a;) { background: rgb(255, 0, 0) !important; } }', 'evil'),
+    '@media all {[data-addon-host-owner="evil"] :is(body, a;) { background: rgb(255, 0, 0) !important; } }'
+  );
+  // 2) Sibling-combinator bypass via `{x}` or `;` inside `:is(...)` MUST be rejected
+  for (const f11Sib of [
+    '[data-addon-host-owner="evil"]:is(*, a{x}) ~ * { background: rgb(255, 0, 0) !important; }',
+    'body:is(*, a{x}) ~ * { background: rgb(255, 0, 0) !important; }',
+    '[data-addon-host-owner="evil"]:is(a;, *) ~ * { background: rgb(255, 0, 0) !important; }',
+  ]) {
+    const rF11Sib = validateSafeCssText(f11Sib, { scope: 'owner' });
+    assert.equal(rF11Sib.ok, false, `Expected F11 sibling escape rejection for: ${f11Sib}`);
+    assert.equal(rF11Sib.reason, 'ERR_FORBIDDEN_CSS_SELECTOR');
+  }
+  // 3) Unbalanced/mismatched ()/[] and unquoted CDO/CDC tokens MUST be rejected
+  for (const badSyntax of [
+    '.a { width: calc((100% - 20px); }',
+    ':is(body, [x=1) { color: red; }',
+    '.a { content: "ok"; width: [10px); }',
+    '<!-- body { color: red; }',
+    'body { color: red; } -->',
+  ]) {
+    const rBad = validateSafeCssText(badSyntax, { scope: 'owner' });
+    assert.equal(rBad.ok, false, `Expected F11 syntax rejection for: ${badSyntax}`);
+    assert.equal(rBad.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+  }
+  // 4) NB-7: Hyphenated custom element tag starting with body- is NOT mangled into ownerPrefix
+  assert.equal(
+    scopeCssToOwner('body-panel { color: green; }', 'evil'),
+    '[data-addon-host-owner="evil"] body-panel { color: green; }'
+  );
+
+  // Valid @media, @keyframes, nested calc(), :is(), quoted ";"/brace in content, and unquoted data: URL remain allowed
+  assert.equal(
+    validateSafeCssText('@media (max-width: 600px) { .btn { content: "{;"; width: calc((100% - 20px) / 2); background: url(data:image/png;base64,AAAA); } }', { scope: 'owner' }).ok,
     true
   );
   assert.equal(

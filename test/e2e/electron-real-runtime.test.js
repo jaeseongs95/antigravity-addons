@@ -86,13 +86,19 @@ test(
           '.a { background: url(http://x/*); } .b { background: url("\\\\6a avascript:alert(1)"); } /* */); }',
           '[data-addon-host-owner="e2e-first"]:is(*, .x) ~ * { color: red }',
           'body:is(*, .x) ~ * { color: red }',
+          '[data-addon-host-owner="e2e-first"]:is(*, a{x}) ~ * { background: rgb(255, 0, 0) !important; }',
+          'body:is(*, a{x}) ~ * { background: rgb(255, 0, 0) !important; }',
+          '[data-addon-host-owner="e2e-first"]:is(a;, *) ~ * { background: rgb(255, 0, 0) !important; }',
           'body { ~ * { color: red } }',
           '[data-addon-host-owner="e2e-first"] { + * { color: red } }',
         ]) {
           try { addonHost.injectStyle('bad', badCss); } catch (e) { blockedErrors.push(e.message); }
         }
-        // F8 live Chromium proof: inject into Light DOM head; space-replaced comment prevents comment coalescence so body stays rgb(255,255,255)
+        // F8 & F11 live Chromium proof: inject into Light DOM head; owner scoping & space-replaced comment keep body rgb(255,255,255)
         addonHost.injectStyle('f8-neutralized', '.a { x: //**/* "*/ } body { background: rgb(255, 0, 0) !important; } /* "; }');
+        addonHost.injectStyle('f11-is-semi', ':is(body, a;) { background: rgb(255, 0, 0) !important; }');
+        addonHost.injectStyle('f11-where-bracket', ':where(*, [x=;]) { background: rgb(255, 0, 0) !important; }');
+        addonHost.injectStyle('f11-media-is', '@media all { :is(body, a;) { background: rgb(255, 0, 0) !important; } }');
         document.documentElement.setAttribute('data-e2e-f1-blocked', String(blockedErrors.length));
         addonHost.registerAction('e2e-act', {
           label: 'E2E_ACT',
@@ -404,7 +410,7 @@ test(
       assert.equal(res.initial.autoInShadow, true);
       assert.equal(res.initial.autoColor, 'rgb(10, 120, 40)');
       assert.equal(res.initial.bodyBg, 'rgb(255, 255, 255)');
-      assert.equal(res.initial.f1BlockedCount, '15');
+      assert.equal(res.initial.f1BlockedCount, '18');
       assert.equal(res.initial.actionFired, 'yes');
       assert.equal(res.initial.secondText, 'E2E_SECOND_READY');
       assert.equal(res.initial.dlgOpen, true);

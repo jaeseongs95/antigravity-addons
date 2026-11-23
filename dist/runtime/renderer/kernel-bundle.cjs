@@ -242,7 +242,8 @@ function decodeIdentEscapesForUrlCheck(css) {
 
 function validateCssSyntaxBalanced(cssText) {
   const s = preprocessCssInput(cssText);
-  let depth = 0;
+  // F11: Enforce full W3C CSS Syntax L3 LIFO block stack (`{}`, `()`, `[]`) and reject unquoted CDO/CDC (`<!--`/`-->`)
+  const stack = [];
   let quote = null;
   let inComment = false;
   for (let i = 0; i < s.length; i++) {
@@ -282,13 +283,18 @@ function validateCssSyntaxBalanced(cssText) {
       quote = ch;
       continue;
     }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth < 0) return false;
+    if ((ch === '<' && s.slice(i, i + 4) === '<!--') || (ch === '-' && s.slice(i, i + 3) === '-->')) {
+      return false;
+    }
+    if (ch === '{') stack.push('}');
+    else if (ch === '(') stack.push(')');
+    else if (ch === '[') stack.push(']');
+    else if (ch === '}' || ch === ')' || ch === ']') {
+      if (stack.length === 0 || stack[stack.length - 1] !== ch) return false;
+      stack.pop();
     }
   }
-  return !quote && !inComment && depth === 0;
+  return !quote && !inComment && stack.length === 0;
 }
 
 const DANGEROUS_UNQUOTED_ESCAPED_CHARS = new Set([
@@ -298,6 +304,8 @@ const DANGEROUS_UNQUOTED_ESCAPED_CHARS = new Set([
   '}',
   '(',
   ')',
+  '[',
+  ']',
   '/',
   '*',
   '\\',
@@ -450,12 +458,13 @@ function hasInvalidUnquotedUrlToken(str) {
 }
 
 function splitTopLevelSelectorList(selList) {
-  // F7: Split on top-level commas ONLY (parenDepth === 0 && bracketDepth === 0, quote & backslash safe)
+  // F7 + F11: Split on top-level commas ONLY (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0, quote & backslash safe)
   const out = [];
   let start = 0;
   let quote = null;
   let parenDepth = 0;
   let bracketDepth = 0;
+  let braceDepth = 0;
   for (let i = 0; i < selList.length; i++) {
     const ch = selList[i];
     if (quote) {
@@ -478,7 +487,9 @@ function splitTopLevelSelectorList(selList) {
     else if (ch === ')' && parenDepth > 0) parenDepth--;
     else if (ch === '[') bracketDepth++;
     else if (ch === ']' && bracketDepth > 0) bracketDepth--;
-    else if (ch === ',' && parenDepth === 0 && bracketDepth === 0) {
+    else if (ch === '{') braceDepth++;
+    else if (ch === '}' && braceDepth > 0) braceDepth--;
+    else if (ch === ',' && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
       out.push(selList.slice(start, i));
       start = i + 1;
     }
@@ -488,11 +499,12 @@ function splitTopLevelSelectorList(selList) {
 }
 
 function getFirstTopLevelCombinator(selector) {
-  // F7: Return the first top-level combinator ('+', '~', '>', ' ') outside quotes/parens/brackets
+  // F7 + F11: Return the first top-level combinator ('+', '~', '>', ' ') outside quotes/parens/brackets/braces
   const s = selector.trim();
   let quote = null;
   let parenDepth = 0;
   let bracketDepth = 0;
+  let braceDepth = 0;
   let sawSpace = false;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
@@ -505,17 +517,17 @@ function getFirstTopLevelCombinator(selector) {
       continue;
     }
     if (ch === '\\') {
-      if (sawSpace) return ' ';
+      if (sawSpace && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) return ' ';
       i++;
       continue;
     }
     if (ch === '"' || ch === "'") {
-      if (sawSpace) return ' ';
+      if (sawSpace && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) return ' ';
       quote = ch;
       continue;
     }
     if (ch === '(') {
-      if (sawSpace) return ' ';
+      if (sawSpace && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) return ' ';
       parenDepth++;
       continue;
     }
@@ -524,7 +536,7 @@ function getFirstTopLevelCombinator(selector) {
       continue;
     }
     if (ch === '[') {
-      if (sawSpace) return ' ';
+      if (sawSpace && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) return ' ';
       bracketDepth++;
       continue;
     }
@@ -532,7 +544,16 @@ function getFirstTopLevelCombinator(selector) {
       bracketDepth--;
       continue;
     }
-    if (parenDepth > 0 || bracketDepth > 0) continue;
+    if (ch === '{') {
+      if (sawSpace && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) return ' ';
+      braceDepth++;
+      continue;
+    }
+    if (ch === '}' && braceDepth > 0) {
+      braceDepth--;
+      continue;
+    }
+    if (parenDepth > 0 || bracketDepth > 0 || braceDepth > 0) continue;
     if (/\s/.test(ch)) {
       sawSpace = true;
       continue;
@@ -570,7 +591,7 @@ function hasForbiddenOwnerSiblingSelector(cleanCss) {
         const trimmed = selectors[sIdx].trim();
         if (!trimmed) continue;
         if (trimmed[0] === '+' || trimmed[0] === '~') return true;
-        if (/^(?:\[data-addon-host-owner\b|(?:html|body|:root)\b)/i.test(trimmed)) {
+        if (/^(?:\[\s*data-addon-host-owner\b|(?:html|body|:root)(?![a-z0-9_-]))/i.test(trimmed)) {
           const firstComb = getFirstTopLevelCombinator(trimmed);
           if (firstComb === '+' || firstComb === '~') return true;
         }
@@ -672,7 +693,11 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
 }
 
 function findNextTopLevelChar(str, startIdx, targetChar) {
+  // F11: Match targetChar ONLY at top level (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0)
   let quote = null;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
   for (let i = startIdx; i < str.length; i++) {
     const ch = str[i];
     if (quote) {
@@ -691,13 +716,24 @@ function findNextTopLevelChar(str, startIdx, targetChar) {
       quote = ch;
       continue;
     }
-    if (ch === targetChar) return i;
+    if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && ch === targetChar) {
+      return i;
+    }
+    if (ch === '(') parenDepth++;
+    else if (ch === ')' && parenDepth > 0) parenDepth--;
+    else if (ch === '[') bracketDepth++;
+    else if (ch === ']' && bracketDepth > 0) bracketDepth--;
+    else if (ch === '{') braceDepth++;
+    else if (ch === '}' && braceDepth > 0) braceDepth--;
   }
   return -1;
 }
 
 function findMatchingCloseBrace(str, openBraceIdx) {
+  // F11: Track parenDepth & bracketDepth so braces inside `(...)` or `[...]` never desync block matching
   let depth = 1;
+  let parenDepth = 0;
+  let bracketDepth = 0;
   let quote = null;
   for (let j = openBraceIdx + 1; j < str.length; j++) {
     const ch = str[j];
@@ -717,10 +753,28 @@ function findMatchingCloseBrace(str, openBraceIdx) {
       quote = ch;
       continue;
     }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return j;
+    if (ch === '(') {
+      parenDepth++;
+      continue;
+    }
+    if (ch === ')' && parenDepth > 0) {
+      parenDepth--;
+      continue;
+    }
+    if (ch === '[') {
+      bracketDepth++;
+      continue;
+    }
+    if (ch === ']' && bracketDepth > 0) {
+      bracketDepth--;
+      continue;
+    }
+    if (parenDepth === 0 && bracketDepth === 0) {
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) return j;
+      }
     }
   }
   return str.length;
@@ -744,8 +798,8 @@ function scopeCssToOwner(cssText, pluginId) {
         if (trimmed === ownerPrefix || trimmed.startsWith(`${ownerPrefix} `) || trimmed.startsWith(`${ownerPrefix}>`) || trimmed.startsWith(`${ownerPrefix}.`) || trimmed.startsWith(`${ownerPrefix}#`) || trimmed.startsWith(`${ownerPrefix}:`)) {
           return trimmed;
         }
-        if (/^(?:html|body|:root)\b/i.test(trimmed)) {
-          return trimmed.replace(/^(?:html|body|:root)\b/i, ownerPrefix);
+        if (/^(?:html|body|:root)(?![a-z0-9_-])/i.test(trimmed)) {
+          return trimmed.replace(/^(?:html|body|:root)(?![a-z0-9_-])/i, ownerPrefix);
         }
         return `${ownerPrefix} ${trimmed}`;
       })
