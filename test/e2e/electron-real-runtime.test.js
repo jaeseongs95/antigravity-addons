@@ -79,6 +79,9 @@ test(
           '.a { content: "\\n} body { color: red } }',
           '[data-addon-host-owner="e2e-first"] { & ~ * { color: red } }',
           '[data-addon-host-owner="e2e-first"] { body:has(&) { color: red } }',
+          '.a { background: url(x") } body { display: none !important; } /* "); }',
+          'body { ~ * { color: red } }',
+          '[data-addon-host-owner="e2e-first"] { + * { color: red } }',
         ]) {
           try { addonHost.injectStyle('bad', badCss); } catch (e) { blockedErrors.push(e.message); }
         }
@@ -393,7 +396,7 @@ test(
       assert.equal(res.initial.autoInShadow, true);
       assert.equal(res.initial.autoColor, 'rgb(10, 120, 40)');
       assert.equal(res.initial.bodyBg, 'rgb(255, 255, 255)');
-      assert.equal(res.initial.f1BlockedCount, '6');
+      assert.equal(res.initial.f1BlockedCount, '9');
       assert.equal(res.initial.actionFired, 'yes');
       assert.equal(res.initial.secondText, 'E2E_SECOND_READY');
       assert.equal(res.initial.dlgOpen, true);

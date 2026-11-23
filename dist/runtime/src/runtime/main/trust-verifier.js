@@ -233,6 +233,9 @@ function readVerifiedRendererScript(scriptPath, manifest, policy, { strictTrustP
       return { ok: false, reason: 'ERR_RENDERER_SCRIPT_SIZE_LIMIT_EXCEEDED' };
     }
     buf = fs.readFileSync(scriptPath);
+    if (buf.length > MAX_BUNDLE_TOTAL_BYTES) {
+      return { ok: false, reason: 'ERR_RENDERER_SCRIPT_SIZE_LIMIT_EXCEEDED' };
+    }
   } catch (err) {
     return { ok: false, reason: 'ERR_RENDERER_SCRIPT_READ_FAILED', error: err && err.message ? err.message : String(err) };
   }

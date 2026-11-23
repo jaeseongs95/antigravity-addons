@@ -71,10 +71,9 @@ function createModalPortal(
     if (idx === -1) return false;
     const prevCount = stack.length;
 
-    // F2: Cascade-close any nested child entries (e.g. R-2 popovers mounted inside a closing <dialog>)
-    for (let i = stack.length - 1; i >= 0; i--) {
-      const candidate = stack[i];
-      if (candidate !== entry && isNestedInside(entry.el, candidate.el)) {
+    // F2: Cascade-close nested child entries using a snapshot so re-entrant onClose() mutations cannot skip or throw
+    for (const candidate of stack.slice().reverse()) {
+      if (candidate && candidate !== entry && stack.includes(candidate) && isNestedInside(entry.el, candidate.el)) {
         closeEntry(candidate);
       }
     }

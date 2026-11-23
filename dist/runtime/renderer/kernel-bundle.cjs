@@ -201,6 +201,105 @@ function validateCssSyntaxBalanced(cssText) {
   return !quote && !inComment && depth === 0;
 }
 
+function hasInvalidUnquotedUrlToken(str) {
+  let quote = null;
+  let inComment = false;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    const next = str[i + 1];
+    if (inComment) {
+      if (ch === '*' && next === '/') {
+        inComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      inComment = true;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (
+      (ch === 'u' || ch === 'U') &&
+      str.slice(i, i + 4).toLowerCase() === 'url(' &&
+      (i === 0 || !/[a-z0-9_-]/i.test(str[i - 1]))
+    ) {
+      let k = i + 4;
+      while (k < str.length && /[\s\f]/.test(str[k])) k++;
+      if (k >= str.length) return true;
+      if (str[k] === '"' || str[k] === "'") {
+        i += 3;
+        continue;
+      }
+      // F4: W3C CSS Syntax L3 §4.3.6 unquoted <url-token> — reject any <bad-url-token> / quote / brace desync chars
+      let closed = false;
+      for (; k < str.length; k++) {
+        const c = str[k];
+        if (c === ')') {
+          closed = true;
+          break;
+        }
+        if (/[\s\f]/.test(c)) {
+          while (k < str.length && /[\s\f]/.test(str[k])) k++;
+          if (k < str.length && str[k] === ')') {
+            closed = true;
+            break;
+          }
+          return true; // whitespace-split remnant inside unquoted url(...)
+        }
+        const code = c.charCodeAt(0);
+        if (c === '"' || c === "'" || c === '(' || c === '\\' || c === '{' || c === '}' || code <= 0x1f || code === 0x7f) {
+          return true;
+        }
+      }
+      if (!closed) return true;
+      i = k;
+    }
+  }
+  return false;
+}
+
+function hasForbiddenOwnerNesting(cleanCss, inKeyframes = false) {
+  let i = 0;
+  const len = cleanCss.length;
+  while (i < len) {
+    const braceIdx = findNextTopLevelChar(cleanCss, i, '{');
+    if (braceIdx === -1) break;
+    const semiIdx = findNextTopLevelChar(cleanCss, i, ';');
+    if (semiIdx !== -1 && semiIdx < braceIdx) {
+      i = semiIdx + 1;
+      continue;
+    }
+    const prelude = cleanCss.slice(i, braceIdx).trim().toLowerCase();
+    const closeIdx = findMatchingCloseBrace(cleanCss, braceIdx);
+    const body = cleanCss.slice(braceIdx + 1, closeIdx);
+    if (inKeyframes) {
+      if (findNextTopLevelChar(body, 0, '{') !== -1) return true;
+    } else if (prelude.startsWith('@media') || prelude.startsWith('@supports') || prelude.startsWith('@layer')) {
+      if (hasForbiddenOwnerNesting(body, false)) return true;
+    } else if (prelude.startsWith('@keyframes') || prelude.startsWith('@-webkit-keyframes')) {
+      if (hasForbiddenOwnerNesting(body, true)) return true;
+    } else {
+      // F5: Structurally disallow CSS Nesting Level 1 (`{` inside any non-@ style rule body) in owner scope
+      if (findNextTopLevelChar(body, 0, '{') !== -1) return true;
+    }
+    i = closeIdx + 1;
+  }
+  return false;
+}
+
 function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
   if (typeof cssText !== 'string') {
     return { ok: false, reason: 'ERR_CSS_NOT_STRING' };
@@ -213,6 +312,10 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
     if (DANGEROUS_CSS_PATTERNS[i].test(decoded) || DANGEROUS_CSS_PATTERNS[i].test(cssText)) {
       return { ok: false, reason: 'ERR_UNSAFE_CSS_CONSTRUCT' };
     }
+  }
+  // F4: Reject unquoted <bad-url-token> quote/brace desynchronization after dangerous-construct classification
+  if (hasInvalidUnquotedUrlToken(cssText) || hasInvalidUnquotedUrlToken(decoded)) {
+    return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SYNTAX' };
   }
   if (scope === 'owner') {
     // S-2: Reject backslash escapes inside @-rule identifiers (prevents @\media / @\6d edia scoping bypass)
@@ -227,11 +330,11 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
         return { ok: false, reason: 'ERR_FORBIDDEN_CSS_AT_RULE' };
       }
     }
-    // Reject sibling-combinator escape out of owner/body/root, :has() relational host-escape (including nested parens), and & sibling escapes
+    // Reject sibling-combinator escape out of owner/body/root, :has() relational host-escape, and CSS Nesting blocks
     if (/(?:\[data-addon-host-owner\s*=|\b(?:html|body|:root)\b)[^,{};]*[+~]/i.test(decoded)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SELECTOR' };
     }
-    if (/(?:&[^;{}]*[+~]|:\s*has\s*\()/i.test(decoded)) {
+    if (/(?:&[^;{}]*[+~]|:\s*has\s*\()/i.test(decoded) || hasForbiddenOwnerNesting(strippedRaw) || hasForbiddenOwnerNesting(decoded)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_NESTING' };
     }
   }
@@ -768,10 +871,9 @@ function createModalPortal(
     if (idx === -1) return false;
     const prevCount = stack.length;
 
-    // F2: Cascade-close any nested child entries (e.g. R-2 popovers mounted inside a closing <dialog>)
-    for (let i = stack.length - 1; i >= 0; i--) {
-      const candidate = stack[i];
-      if (candidate !== entry && isNestedInside(entry.el, candidate.el)) {
+    // F2: Cascade-close nested child entries using a snapshot so re-entrant onClose() mutations cannot skip or throw
+    for (const candidate of stack.slice().reverse()) {
+      if (candidate && candidate !== entry && stack.includes(candidate) && isNestedInside(entry.el, candidate.el)) {
         closeEntry(candidate);
       }
     }

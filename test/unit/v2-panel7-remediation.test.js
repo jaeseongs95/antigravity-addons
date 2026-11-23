@@ -40,7 +40,7 @@ const { validateSafeCssText, scopeCssToOwner, createStyleManager } = require('..
 const { createSlotManager } = require('../../src/runtime/renderer/slot-manager');
 const { createModalPortal } = require('../../src/runtime/renderer/modal-portal');
 const { isElementInsideIgnored } = require('../../src/runtime/renderer/ignore-guard');
-const { snapshotPluginBundleInMemory, loadVerifiedMainHookModule } = require('../../src/runtime/main/trust-verifier');
+const { snapshotPluginBundleInMemory, loadVerifiedMainHookModule, readVerifiedRendererScript } = require('../../src/runtime/main/trust-verifier');
 const {
   createElectronHostLifecyclePort,
   resolveElectronPaths,
@@ -376,6 +376,36 @@ test('TC-V2-008b (S-2): closes all 4 owner-CSS isolation bypasses', () => {
   const r6 = validateSafeCssText('[data-addon-host-owner="evil"] { :is(&) ~ * { color: red; } }', { scope: 'owner' });
   assert.equal(r6.ok, false);
   assert.equal(r6.reason, 'ERR_FORBIDDEN_CSS_NESTING');
+
+  // (g) Audit F4: Unquoted <bad-url-token> quote desynchronization escape
+  const r7 = validateSafeCssText('.a { background: url(x") } body { display: none !important; } /* "); }', { scope: 'owner' });
+  assert.equal(r7.ok, false);
+  assert.equal(r7.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+  const r7Esc = validateSafeCssText('.a { background: \\75 rl(x") } body { display: none !important; } /* "); }', { scope: 'owner' });
+  assert.equal(r7Esc.ok, false);
+  assert.equal(r7Esc.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+
+  // (h) Audit F5: CSS Nesting Level 1 implicit-& relative sibling combinators & nested @media inside rule
+  for (const nestedPayload of [
+    'body { ~ * { display: none !important; } }',
+    '[data-addon-host-owner="evil"] { + * { display: none !important; } }',
+    'body { @media all { ~ * { display: none !important; } } }',
+    '@media all { body { .a, ~ * { color: red; } } }',
+  ]) {
+    const rNested = validateSafeCssText(nestedPayload, { scope: 'owner' });
+    assert.equal(rNested.ok, false, `Expected nesting bypass rejection for: ${nestedPayload}`);
+    assert.equal(rNested.reason, 'ERR_FORBIDDEN_CSS_NESTING');
+  }
+
+  // Valid @media, @keyframes, quoted brace in content, and unquoted data: URL remain allowed
+  assert.equal(
+    validateSafeCssText('@media (max-width: 600px) { .btn { content: "{"; background: url(data:image/png;base64,AAAA); } }', { scope: 'owner' }).ok,
+    true
+  );
+  assert.equal(
+    validateSafeCssText('@keyframes fade { from { opacity: 0; } to { opacity: 1; } }', { scope: 'owner' }).ok,
+    true
+  );
 });
 
 test('TC-V2-008c (S-3 & S-4): pre-trust mainHook OOM DoS guards + fail-closed verifyClaimedEvent & error cap', () => {
@@ -401,6 +431,15 @@ test('TC-V2-008c (S-3 & S-4): pre-trust mainHook OOM DoS guards + fail-closed ve
     fs.ftruncateSync(fd, 9 * 1024 * 1024);
     fs.closeSync(fd);
     assert.throws(() => snapshotPluginBundleInMemory(bigDir), /ERR_BUNDLE_SIZE_LIMIT_EXCEEDED/);
+
+    // NB-3: Oversized renderer script rejected by readVerifiedRendererScript before readFileSync
+    const bigRendererCheck = readVerifiedRendererScript(
+      bigFile,
+      { pluginId: 'big-r', trustLevel: 'restricted', capabilities: ['renderer'] },
+      { schemaVersion: 1, approved: {} }
+    );
+    assert.equal(bigRendererCheck.ok, false);
+    assert.equal(bigRendererCheck.reason, 'ERR_RENDERER_SCRIPT_SIZE_LIMIT_EXCEEDED');
 
     // S-3c: Excessive directory count rejected
     const manyDir = path.join(dir, 'many-dirs');
@@ -660,6 +699,21 @@ test('TC-V2-008e (R-2, R-3, R-5, R-6): popover-in-dialog, mountSlot isConnected,
   assert.equal(childPopSr.children.filter((c) => c.tagName === 'STYLE').length, 0, 'F2: child popover ShadowRoot must be unregistered');
   const f2Claims = portalClaims.slice(claimsBeforeF2).map((c) => c.active);
   assert.deepEqual(f2Claims, [true, false], 'F2: PortalArbiter must transition true -> false cleanly once');
+
+  // Audit F2 re-entrancy: closing parent modal when child popB.onClose closes sibling popA OR re-calls parent.close()
+  const claimsBeforeReent = portalClaims.length;
+  const mReent = modalPortal.openModal(restrictedMeta, 'p-ui.mod');
+  const popA = modalPortal.openPopover(restrictedMeta, 'p-ui.pop');
+  modalPortal.openPopover(restrictedMeta, 'p-ui.pop', {
+    onClose: () => {
+      popA.close();
+      mReent.close();
+    },
+  });
+  assert.equal(modalPortal.getStackSize(), 3);
+  assert.doesNotThrow(() => mReent.close());
+  assert.equal(modalPortal.getStackSize(), 0, 'F2 re-entrancy: stack must drain cleanly to 0');
+  assert.deepEqual(portalClaims.slice(claimsBeforeReent).map((c) => c.active), [true, false]);
 });
 
 test('TC-V2-008f (O-1, O-2, O-3, O-4, S-5, O-5): CI flags, fail-closed dist/runtime, corrupt restage, doctor/status health, zero resources/ write, and docs sync', () => {
