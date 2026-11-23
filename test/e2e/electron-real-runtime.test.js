@@ -82,6 +82,8 @@ test(
           '.a { background: url(x") } body { display: none !important; } /* "); }',
           '.a { background: \\\\75\\r\\nrl(x") } body { display: none !important; } /* "); }',
           '.a { x: \\\\"; } body { display: none !important; } /* "; }',
+          '.a { x: \\\\22 ; } .b { background: \\\\75 rl(x") } body { background: rgb(255, 0, 0) !important; } /* "); }',
+          '.a { background: url(http://x/*); } .b { background: url("\\\\6a avascript:alert(1)"); } /* */); }',
           '[data-addon-host-owner="e2e-first"]:is(*, .x) ~ * { color: red }',
           'body:is(*, .x) ~ * { color: red }',
           'body { ~ * { color: red } }',
@@ -89,6 +91,8 @@ test(
         ]) {
           try { addonHost.injectStyle('bad', badCss); } catch (e) { blockedErrors.push(e.message); }
         }
+        // F8 live Chromium proof: inject into Light DOM head; space-replaced comment prevents comment coalescence so body stays rgb(255,255,255)
+        addonHost.injectStyle('f8-neutralized', '.a { x: //**/* "*/ } body { background: rgb(255, 0, 0) !important; } /* "; }');
         document.documentElement.setAttribute('data-e2e-f1-blocked', String(blockedErrors.length));
         addonHost.registerAction('e2e-act', {
           label: 'E2E_ACT',
@@ -400,7 +404,7 @@ test(
       assert.equal(res.initial.autoInShadow, true);
       assert.equal(res.initial.autoColor, 'rgb(10, 120, 40)');
       assert.equal(res.initial.bodyBg, 'rgb(255, 255, 255)');
-      assert.equal(res.initial.f1BlockedCount, '13');
+      assert.equal(res.initial.f1BlockedCount, '15');
       assert.equal(res.initial.actionFired, 'yes');
       assert.equal(res.initial.secondText, 'E2E_SECOND_READY');
       assert.equal(res.initial.dlgOpen, true);

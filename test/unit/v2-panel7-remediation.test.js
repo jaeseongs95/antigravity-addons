@@ -399,6 +399,26 @@ test('TC-V2-008b (S-2): closes all 4 owner-CSS isolation bypasses', () => {
   assert.equal(r8b.ok, false);
   assert.equal(r8b.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
 
+  // (h2) Audit F8: Comment-stripping uses space (' '), NEVER coalescing `//**/*` into a live `/*` comment
+  const f8Css = '.a { x: //**/* "*/ } body { background: rgb(255, 0, 0) !important; } /* "; }';
+  const scopedF8 = scopeCssToOwner(f8Css, 'evil');
+  assert.equal(scopedF8.includes('/ * "*/'), true, 'F8: comment strip must insert space so //**/* becomes / *, never /*');
+  assert.equal(/^\[data-addon-host-owner="evil"\]\s+\.a\s*\{\s*x:\s*\/ \* "\*\/ \}/.test(scopedF8), true);
+
+  // (h3) Audit F9: Unquoted hex-escaped quote (`\22` / `\27`) + `\75 rl(x")` bad-url-token desync
+  const rF9a = validateSafeCssText('.a { x: \\22 ; } .b { background: \\75 rl(x") } body { background: rgb(255, 0, 0) !important; } /* "); }', { scope: 'owner' });
+  assert.equal(rF9a.ok, false);
+  assert.equal(rF9a.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+  const rF9b = validateSafeCssText(".a { x: \\27 ; } .b { background: \\75\r\nrl(x') } body { background: rgb(255, 0, 0) !important; } /* '); }", { scope: 'owner' });
+  assert.equal(rF9b.ok, false);
+  assert.equal(rF9b.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+
+  // (h4) Audit F10: Unquoted `url(http://x/*)` comment desync hiding escaped dangerous constructs in `scope: 'global'`
+  const rF10a = validateSafeCssText('.a { background: url(http://x/*); } .b { background: url("\\6a avascript:alert(1)"); } /* */); }', { scope: 'global' });
+  assert.equal(rF10a.ok, false);
+  const rF10b = validateSafeCssText('.a { background: \\75 rl(http://x/*); } .b { x: \\65 xpression(1); } /* */); }', { scope: 'global' });
+  assert.equal(rF10b.ok, false);
+
   // (i) Audit F7: Functional pseudo-class comma sibling escape (`:is(*, .x) ~ *`) + paren-safe scoping
   for (const sibPayload of [
     '[data-addon-host-owner="evil"]:is(*, .x) ~ #victim { background: red !important; }',

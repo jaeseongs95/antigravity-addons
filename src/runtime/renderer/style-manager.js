@@ -38,8 +38,9 @@ function preprocessCssInput(css) {
     .replace(/\u0000/g, '\uFFFD');
 }
 
-function stripCssComments(css) {
-  // Always remove comments identically ('') so `@im/**/port` collapses to `@import` before checks
+function stripCssComments(css, replacement = ' ') {
+  // F8: Default to `' '` (token separator) so `//**/*` NEVER coalesces into a live `/*` comment.
+  // Callers checking keyword smuggling (`@im/**/port`) explicitly pass `''`.
   let out = '';
   let quote = null;
   const s = preprocessCssInput(css);
@@ -69,6 +70,7 @@ function stripCssComments(css) {
       i += 2;
       while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++;
       i += 1;
+      out += replacement;
       continue;
     }
     out += ch;
@@ -76,9 +78,8 @@ function stripCssComments(css) {
   return out;
 }
 
-function decodeCssEscapesForCheck(css) {
-  // S-2 + F4: Preprocess CRLF/CR/FF per CSS Syntax L3 §3.3, strip comments & string line-continuations, then decode escapes
-  return stripCssComments(preprocessCssInput(css))
+function decodeCssEscapesRaw(s) {
+  return preprocessCssInput(s)
     .replace(/\\\n/g, '')
     .replace(/\\([0-9a-fA-F]{1,6})[ \t\n]?/g, (_m, hex) => {
       const cp = parseInt(hex, 16);
@@ -90,6 +91,74 @@ function decodeCssEscapesForCheck(css) {
       }
     })
     .replace(/\\([^\n0-9a-fA-F])/g, '$1');
+}
+
+function decodeCssEscapesForCheck(css) {
+  // S-2 + F4: Preprocess CRLF/CR/FF per CSS Syntax L3 §3.3, collapse comments (`''`) for `@im/**/port`, then decode escapes
+  return decodeCssEscapesRaw(stripCssComments(preprocessCssInput(css), ''));
+}
+
+function decodeIdentEscapesForUrlCheck(css) {
+  // F9: Decode ONLY ASCII ident escapes ([a-zA-Z0-9_-]) outside strings so hex quotes (\22/\27) NEVER synthesize string delimiters
+  const s = preprocessCssInput(css);
+  let out = '';
+  let quote = null;
+  let inComment = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const next = s[i + 1];
+    if (inComment) {
+      out += ch;
+      if (ch === '*' && next === '/') {
+        out += '/';
+        inComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      out += ch;
+      if (ch === '\\' && i + 1 < s.length) {
+        out += s[++i];
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      out += '/*';
+      inComment = true;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === '\\') {
+      const hexMatch = s.slice(i + 1).match(/^([0-9a-fA-F]{1,6})[ \t\n]?/);
+      if (hexMatch) {
+        const cp = parseInt(hexMatch[1], 16);
+        const decodedCh = Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+        if (/^[a-zA-Z0-9_-]$/.test(decodedCh)) {
+          out += decodedCh;
+          i += hexMatch[0].length;
+          continue;
+        }
+        out += ' ';
+        i += hexMatch[0].length;
+        continue;
+      }
+      if (i + 1 < s.length) {
+        out += /^[a-zA-Z0-9_-]$/.test(next) ? next : ' ';
+        i++;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
 }
 
 function validateCssSyntaxBalanced(cssText) {
@@ -143,7 +212,29 @@ function validateCssSyntaxBalanced(cssText) {
   return !quote && !inComment && depth === 0;
 }
 
+const DANGEROUS_UNQUOTED_ESCAPED_CHARS = new Set([
+  '"',
+  "'",
+  '{',
+  '}',
+  '(',
+  ')',
+  '/',
+  '*',
+  '\\',
+  ';',
+  ':',
+  '@',
+  ',',
+  '+',
+  '~',
+  '>',
+  '<',
+]);
+
 function hasDangerousUnquotedEscape(cssText) {
+  // F6 + F9: Reject both literal (`\"`) and hex (`\22`, `\27`, `\2f`, `\7b`, etc.) unquoted escapes
+  // that decode to syntax/delimiter/control characters.
   const s = preprocessCssInput(cssText);
   let quote = null;
   let inComment = false;
@@ -175,7 +266,16 @@ function hasDangerousUnquotedEscape(cssText) {
       continue;
     }
     if (ch === '\\') {
-      if (next === '"' || next === "'" || next === '{' || next === '}' || next === '/') {
+      const hexMatch = s.slice(i + 1).match(/^([0-9a-fA-F]{1,6})[ \t\n]?/);
+      if (hexMatch) {
+        const cp = parseInt(hexMatch[1], 16);
+        if (!Number.isFinite(cp) || cp <= 0x20 || cp === 0x7f || cp > 0x10ffff) return true;
+        const decodedCh = String.fromCodePoint(cp);
+        if (DANGEROUS_UNQUOTED_ESCAPED_CHARS.has(decodedCh)) return true;
+        i += hexMatch[0].length;
+        continue;
+      }
+      if (i + 1 >= s.length || next === '\n' || DANGEROUS_UNQUOTED_ESCAPED_CHARS.has(next)) {
         return true;
       }
       i++;
@@ -248,7 +348,18 @@ function hasInvalidUnquotedUrlToken(str) {
           return true; // whitespace-split remnant inside unquoted url(...)
         }
         const code = c.charCodeAt(0);
-        if (c === '"' || c === "'" || c === '(' || c === '\\' || c === '{' || c === '}' || code <= 0x1f || code === 0x7f) {
+        // F10: Also reject `/*` inside unquoted url(...) so comment stripping cannot desync from CSS Syntax L3 §4.3.6
+        if (
+          (c === '/' && s[k + 1] === '*') ||
+          c === '"' ||
+          c === "'" ||
+          c === '(' ||
+          c === '\\' ||
+          c === '{' ||
+          c === '}' ||
+          code <= 0x1f ||
+          code === 0x7f
+        ) {
           return true;
         }
       }
@@ -425,23 +536,38 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
     return { ok: false, reason: 'ERR_CSS_NOT_STRING' };
   }
   const normalized = preprocessCssInput(cssText);
-  if (!validateCssSyntaxBalanced(normalized)) {
+  const strippedSpace = stripCssComments(normalized, ' ');
+  // F8: Verify BOTH pre-strip and space-stripped CSS are syntax-balanced (blocks `//**/*` comment synthesis)
+  if (!validateCssSyntaxBalanced(normalized) || !validateCssSyntaxBalanced(strippedSpace)) {
     return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SYNTAX' };
   }
   const decoded = decodeCssEscapesForCheck(normalized);
+  // F10: Also check escape-decoded text WITHOUT comment stripping so unquoted `url(http://x/*)` cannot mask escaped keywords
+  const decodedNoStrip = decodeCssEscapesRaw(normalized);
   for (let i = 0; i < DANGEROUS_CSS_PATTERNS.length; i++) {
-    if (DANGEROUS_CSS_PATTERNS[i].test(decoded) || DANGEROUS_CSS_PATTERNS[i].test(normalized)) {
+    if (
+      DANGEROUS_CSS_PATTERNS[i].test(decoded) ||
+      DANGEROUS_CSS_PATTERNS[i].test(decodedNoStrip) ||
+      DANGEROUS_CSS_PATTERNS[i].test(normalized)
+    ) {
       return { ok: false, reason: 'ERR_UNSAFE_CSS_CONSTRUCT' };
     }
   }
-  // F4 + F6: Reject unquoted <bad-url-token> & dangerous unquoted escapes after dangerous-construct classification
-  if (hasInvalidUnquotedUrlToken(normalized) || hasInvalidUnquotedUrlToken(decoded) || hasDangerousUnquotedEscape(normalized)) {
+  // F4 + F6 + F9 + F10: Reject unquoted <bad-url-token> (using ident-only decode so \22/\27 never open fake quotes),
+  // unquoted `url(.../*...)`, and dangerous literal/hex unquoted escapes.
+  const identDecoded = decodeIdentEscapesForUrlCheck(normalized);
+  if (
+    hasInvalidUnquotedUrlToken(normalized) ||
+    hasInvalidUnquotedUrlToken(strippedSpace) ||
+    hasInvalidUnquotedUrlToken(identDecoded) ||
+    hasDangerousUnquotedEscape(normalized)
+  ) {
     return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SYNTAX' };
   }
   if (scope === 'owner') {
     // S-2: Reject backslash escapes inside @-rule identifiers (prevents @\media / @\6d edia scoping bypass)
-    const strippedRaw = stripCssComments(normalized);
-    if (/@[^;{}\s"'()]*\\/.test(strippedRaw)) {
+    const strippedCollapsed = stripCssComments(normalized, '');
+    if (/@[^;{}\s"'()]*\\/.test(strippedSpace) || /@[^;{}\s"'()]*\\/.test(strippedCollapsed)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_AT_RULE' };
     }
     // Enforce strict lowercased @-rule allowlist (rejects @scope, @property, @starting-style, @font-face, @container, etc.)
@@ -452,10 +578,14 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
       }
     }
     // F7: Paren/bracket-aware sibling-combinator escape check out of owner/body/root (blocks `:is(*, .x) ~ *`)
-    if (hasForbiddenOwnerSiblingSelector(strippedRaw) || hasForbiddenOwnerSiblingSelector(decoded)) {
+    if (hasForbiddenOwnerSiblingSelector(strippedSpace) || hasForbiddenOwnerSiblingSelector(decoded)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SELECTOR' };
     }
-    if (/(?:&[^;{}]*[+~]|:\s*has\s*\()/i.test(decoded) || hasForbiddenOwnerNesting(strippedRaw) || hasForbiddenOwnerNesting(decoded)) {
+    if (
+      /(?:&[^;{}]*[+~]|:\s*has\s*\()/i.test(decoded) ||
+      hasForbiddenOwnerNesting(strippedSpace) ||
+      hasForbiddenOwnerNesting(decoded)
+    ) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_NESTING' };
     }
   }
@@ -519,7 +649,8 @@ function findMatchingCloseBrace(str, openBraceIdx) {
 
 function scopeCssToOwner(cssText, pluginId) {
   const ownerPrefix = `[data-addon-host-owner="${String(pluginId).replace(/"/g, '\\"')}"]`;
-  const clean = stripCssComments(preprocessCssInput(cssText));
+  // F8: Replace comments with a token-separating space (' ') so emitted CSS can NEVER synthesize `/*`
+  const clean = stripCssComments(preprocessCssInput(cssText), ' ');
   let out = '';
   let i = 0;
   const len = clean.length;
