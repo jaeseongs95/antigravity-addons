@@ -5,13 +5,15 @@
 
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)
 
-**Single, vendor-independent native desktop addon host framework (`v2.1.1`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, SHA-256 trust pinning, and unidirectional read-only `settingsBridge` push (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent native desktop addon host framework (`v2.2.0`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, SHA-256 trust pinning, and bidirectional trusted `settingsBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
 
-## Key Updates in v2.1.1 (Hardening & Multi-Window Reliability)
+## Key Updates in v2.2.0 (Trusted `settingsBridge.saveSettings` IPC, Centered Modal Portal & Hardening)
 
+- **Trusted `settingsBridge.saveSettings()` Bidirectional Persistence**: Trusted (`trustLevel: "trusted"` + SHA-256 `trust-policy.json` pinned) plugins with a declared `settingsBridge` can now persist validated JSON settings atomically from World `998` via `addonHost.saveSettings(nextData)`. The Main process enforces `verifyClaimedEvent`, `(wcId, pluginId)` trusted binding, path confinement, reserved-file and symlink rejection, `parseSafeJson` prototype-pollution guards, `maxBytes` limits, atomic temp+rename writes with Windows lock retries, and immediate multi-window broadcast (`zero app.asar re-patch`).
+- **Centered Top-Layer `<dialog>` Modal Portal under App CSS Resets**: `modal-portal.js` now positions `<dialog>` with `position: fixed; inset: 0; top: max(env(titlebar-area-height, 36px), 36px); margin: auto; width: fit-content; height: fit-content;` so all plugin modals center cleanly below the titlebar even under Tailwind Preflight (`* { margin: 0 }`).
 - **Multi-Window `settingsBridge` Sync (`I1`)**: Joining windows calling `readSnapshotForPlugin` now propagate detected file updates to already-active windows while per-`wcId` delivery deduplication prevents duplicate pushes.
 - **Windows Transient File-Lock & Watcher Self-Healing (`I2`)**: Transient `EBUSY`/`EPERM`/`EACCES` locks retry with bounded backoff (`80ms → 160ms → 320ms`) before failing closed, and `fs.watch` automatically reconnects with exponential backoff (`500ms → 5000ms`) after directory creation or watcher errors.
-- **World `998` Primordial Hardening & `invokeAction` Trust Boundary (`I4`)**: `kernel.js` captures all critical JS primordials (`Object.freeze`, `Map`/`Set`/`WeakMap`, `Set.prototype.size`, `forEach`, `Reflect.apply`, `Error`, `String`, `Uint8Array`, `crypto.getRandomValues`) before plugin execution, eliminates iterator-protocol calls in privileged paths, and enforces `trustLevel` isolation on `listActions()` / `invokeAction()` (`ERR_ACTION_TRUST_FORBIDDEN`).
+- **World `998` Primordial Hardening & `invokeAction` Trust Boundary (`I4`)**: `kernel.js` captures all critical JS primordials (`Object.freeze`, `Map`/`Set`/`WeakMap`/`WeakSet`, `Set.prototype.size`, `JSON.stringify`, `Promise`, `forEach`, `Reflect.apply`, `Error`, `String`, `Uint8Array`, `crypto.getRandomValues`) before plugin execution, eliminates iterator-protocol calls in privileged paths, and enforces `trustLevel` isolation on `listActions()` / `invokeAction()` (`ERR_ACTION_TRUST_FORBIDDEN`).
 - **Lifecycle & CSS Cleanups (`I10`)**: `onDispose` callbacks run before marking handles disposed, `lifecycleStates` aggregates per-window state cleanly on window close, `will-quit` replaces cancellable `before-quit`, and `style-manager` preserves `[attr]` owner-prefixed selectors.
 
 ## Key Capabilities in v2.1.0 (additive over v2.0.0)
@@ -72,6 +74,7 @@ if (rootEl) {
 
 ## Documentation
 
+- [Release Notes (`v2.2.0` EN/KO)](./RELEASE_NOTES_v2.2.0.md)
 - [Release Notes (`v2.1.0` EN/KO)](./RELEASE_NOTES_v2.1.0.md)
 - [Release Notes (`v2.0.0` EN/KO)](./RELEASE_NOTES_v2.0.0.md)
 - [한국어 문서 (`README.ko.md`)](./README.ko.md)

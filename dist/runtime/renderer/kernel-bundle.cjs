@@ -1421,7 +1421,19 @@ function createModalPortal(
       dlg.setAttribute(extraNoTranslateAttributes[i], 'true');
     }
     if (dlg.style) {
-      dlg.style.marginTop = 'max(env(titlebar-area-height, 36px), 36px)';
+      // Center <dialog> inside the safe viewport region below the titlebar even under app CSS resets (* { margin: 0 }).
+      dlg.style.position = 'fixed';
+      dlg.style.inset = '0';
+      dlg.style.top = '36px';
+      dlg.style.top = 'max(env(titlebar-area-height, 36px), 36px)';
+      dlg.style.right = '0';
+      dlg.style.bottom = '0';
+      dlg.style.left = '0';
+      dlg.style.margin = 'auto';
+      dlg.style.width = 'fit-content';
+      dlg.style.height = 'fit-content';
+      dlg.style.maxWidth = 'calc(100vw - 24px)';
+      dlg.style.maxHeight = 'calc(100vh - 56px)';
       dlg.style.zIndex = String(2147483000 + stack.length + 1);
     }
 
@@ -1739,6 +1751,7 @@ const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
 const _Error = Error;
 const _String = String;
 const _Number = Number;
+const _NumberIsFinite = Number.isFinite;
 const _ReflectApply = Reflect.apply;
 const _ObjectKeys = Object.keys;
 const _ObjectFreeze = Object.freeze;
@@ -1765,12 +1778,19 @@ const _WeakMap = WeakMap;
 const _WeakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
 const _WeakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
 const _WeakMapHas = Function.prototype.call.bind(WeakMap.prototype.has);
+const _WeakSet = WeakSet;
+const _WeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+const _WeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
+const _WeakSetDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
 const _Uint8Array = Uint8Array;
 const _NumberToString = Function.prototype.call.bind(Number.prototype.toString);
 const _StringPadStart = Function.prototype.call.bind(String.prototype.padStart);
 const _StringSlice = Function.prototype.call.bind(String.prototype.slice);
 const _DateNow = Date.now;
 const _MathRandom = Math.random;
+const _JSONStringify = JSON.stringify;
+const _PromiseResolve = Promise.resolve.bind(Promise);
+const _PromiseReject = Promise.reject.bind(Promise);
 const _GlobalCrypto = typeof globalThis !== 'undefined' && globalThis.crypto ? globalThis.crypto : null;
 const _CryptoGetRandomValues =
   _GlobalCrypto && typeof _GlobalCrypto.getRandomValues === 'function'
@@ -1813,6 +1833,57 @@ function deepFreezeClone(value, seen = new _WeakMap()) {
     });
   }
   return _ObjectFreeze(out);
+}
+
+function sanitizeJsonPayload(value, seen = new _WeakSet()) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return _NumberIsFinite(value) ? value : null;
+  }
+  if (typeof value !== 'object') {
+    return undefined;
+  }
+  if (_WeakSetHas(seen, value)) {
+    throw new _Error('ERR_SETTINGS_INVALID_JSON');
+  }
+  _WeakSetAdd(seen, value);
+  try {
+    if (_ArrayIsArray(value)) {
+      const out = [];
+      for (let i = 0; i < value.length; i++) {
+        const item = sanitizeJsonPayload(value[i], seen);
+        _ObjectDefineProperty(out, i, {
+          value: item === undefined ? null : item,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+      return out;
+    }
+    const out = {};
+    const keys = _ObjectKeys(value);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (_SetHas(FORBIDDEN_CLONE_KEYS, k)) {
+        throw new _Error('ERR_SETTINGS_UNSAFE_PROTO_KEY');
+      }
+      const nextVal = sanitizeJsonPayload(value[k], seen);
+      if (nextVal !== undefined) {
+        _ObjectDefineProperty(out, k, {
+          value: nextVal,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+    }
+    return out;
+  } finally {
+    _WeakSetDelete(seen, value);
+  }
 }
 
 function createRendererKernel(doc = globalThis.document, win = globalThis.window || globalThis) {
@@ -2163,6 +2234,40 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         return () => {
           _SetDelete(subs, callback);
         };
+      },
+
+      saveSettings(nextData) {
+        assertActive();
+        if (!hasSettingsBridge) {
+          return _PromiseReject(new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED'));
+        }
+        if (!nextData || typeof nextData !== 'object' || _ArrayIsArray(nextData)) {
+          return _PromiseReject(new _Error('ERR_SETTINGS_MUST_BE_OBJECT'));
+        }
+        if (!hostBridge || typeof hostBridge.saveSettings !== 'function') {
+          return _PromiseReject(new _Error('ERR_SETTINGS_SAVE_UNAVAILABLE'));
+        }
+        let rawJson;
+        try {
+          const clean = sanitizeJsonPayload(nextData);
+          rawJson = _JSONStringify(clean);
+        } catch (err) {
+          return _PromiseReject(new _Error(err && err.message ? err.message : 'ERR_SETTINGS_INVALID_JSON'));
+        }
+        if (typeof rawJson !== 'string') {
+          return _PromiseReject(new _Error('ERR_SETTINGS_INVALID_JSON'));
+        }
+        return _PromiseResolve(hostBridge.saveSettings(pluginId, rawJson)).then((res) => {
+          if (res && res.ok === true && res.snapshot && typeof res.snapshot === 'object') {
+            const frozen = deepFreezeClone(res.snapshot);
+            return _ObjectFreeze({ ok: true, reason: null, snapshot: frozen });
+          }
+          return _ObjectFreeze({
+            ok: false,
+            reason: (res && res.reason) || 'ERR_SETTINGS_SAVE_FAILED',
+            snapshot: null,
+          });
+        });
       },
 
       addManagedListener(target, type, listener, opts) {

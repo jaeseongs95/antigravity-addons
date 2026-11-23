@@ -214,6 +214,27 @@ function createHostRuntimeController(cfg, deps = {}) {
         return portalArbiter.setPluginClaim(ev.sender, payload.claimId, Boolean(payload.active));
       });
 
+      ipcMain.handle(IPC_CHANNELS.SAVE_SETTINGS, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, reason: 'ERR_INVALID_PAYLOAD', snapshot: null };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, reason: check.reason || 'ERR_INVALID_PAYLOAD', snapshot: null };
+        }
+        const pluginId = typeof payload.pluginId === 'string' ? payload.pluginId : '';
+        const rawJson = typeof payload.rawJson === 'string' ? payload.rawJson : null;
+        if (!pluginId || rawJson === null) {
+          return { ok: false, reason: 'ERR_INVALID_PAYLOAD', snapshot: null };
+        }
+        const wcId = ev && ev.sender && typeof ev.sender.id === 'number' ? ev.sender.id : null;
+        const binding = wcId !== null ? rendererInjector.getTrustedSettingsBinding(wcId, pluginId) : null;
+        if (!binding) {
+          return { ok: false, reason: 'ERR_SETTINGS_BRIDGE_NOT_BOUND', snapshot: null };
+        }
+        return settingsBridge.writeSnapshotForPlugin(binding.pluginId, binding, rawJson);
+      });
+
       ipcMain.handle(IPC_CHANNELS.PING, (ev, payload) => {
         const check = originResolver.verifyClaimedEvent(ev, payload && payload.docGenId);
         if (!check.ok) return { ok: false, reason: check.reason };

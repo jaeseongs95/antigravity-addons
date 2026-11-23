@@ -25,8 +25,20 @@ const DEFAULT_DEBOUNCE_MS = 150;
 const TRANSIENT_LOCK_CODES = new Set(['EBUSY', 'EPERM', 'EACCES']);
 const DEFAULT_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([80, 160, 320]);
 const DEFAULT_POST_ERROR_RETRY_DELAYS_MS = Object.freeze([1000, 2000]);
+const WRITE_RENAME_RETRY_DELAYS_MS = Object.freeze([30, 60, 120, 240]);
 const DEFAULT_WATCHER_RECONNECT_BASE_MS = 500;
 const DEFAULT_WATCHER_RECONNECT_MAX_MS = 5000;
+
+function syncSleepMs(delayMs) {
+  const ms = Math.max(0, Math.floor(Number(delayMs) || 0));
+  if (ms <= 0) return;
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch (_err) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {}
+  }
+}
 
 function isTransientLockError(err) {
   return Boolean(err && typeof err.code === 'string' && TRANSIENT_LOCK_CODES.has(err.code));
@@ -210,6 +222,130 @@ function readSettingsFileSnapshot(settingsDataDir, spec, { reservedFilePaths = [
     reason: null,
     updatedAt,
   };
+}
+
+function writeSettingsFileSnapshot(settingsDataDir, spec, rawJson, { reservedFilePaths = [], fsImpl = fs } = {}) {
+  const fileName = spec && typeof spec.fileName === 'string' ? spec.fileName.trim() : '';
+  const maxBytes = clampMaxBytes(spec && spec.maxBytes);
+
+  if (!settingsDataDir || typeof settingsDataDir !== 'string') {
+    return { ok: false, reason: 'ERR_SETTINGS_DATA_DIR_UNAVAILABLE', sha256: null };
+  }
+  if (!fileName || isReservedSettingsFileName(fileName)) {
+    return { ok: false, reason: 'ERR_SETTINGS_RESERVED_OR_INVALID_FILE', sha256: null };
+  }
+  if (typeof rawJson !== 'string') {
+    return { ok: false, reason: 'ERR_SETTINGS_INVALID_JSON', sha256: null };
+  }
+  if (Buffer.byteLength(rawJson, 'utf8') > maxBytes) {
+    return { ok: false, reason: 'ERR_SETTINGS_FILE_TOO_LARGE', sha256: null };
+  }
+
+  let parsed;
+  try {
+    parsed = parseSafeJson(rawJson);
+  } catch (err) {
+    const code =
+      err && err.message === 'ERR_UNSAFE_JSON_PROTO_KEY' ? 'ERR_SETTINGS_UNSAFE_PROTO_KEY' : 'ERR_SETTINGS_INVALID_JSON';
+    return { ok: false, reason: code, sha256: null };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, reason: 'ERR_SETTINGS_MUST_BE_OBJECT', sha256: null };
+  }
+
+  const formatted = JSON.stringify(parsed, null, 2) + '\n';
+  const formattedBuf = Buffer.from(formatted, 'utf8');
+  if (formattedBuf.length > maxBytes) {
+    return { ok: false, reason: 'ERR_SETTINGS_FILE_TOO_LARGE', sha256: null };
+  }
+
+  const resolvedBase = path.resolve(settingsDataDir);
+  const resolvedTarget = path.resolve(resolvedBase, fileName);
+  if (path.dirname(resolvedTarget) !== resolvedBase) {
+    return { ok: false, reason: 'ERR_SETTINGS_PATH_ESCAPE', sha256: null };
+  }
+
+  const reservedKeys = buildReservedSet(resolvedBase, reservedFilePaths);
+  if (reservedKeys.has(normalizePathKey(resolvedTarget))) {
+    return { ok: false, reason: 'ERR_SETTINGS_RESERVED_PATH', sha256: null };
+  }
+
+  try {
+    fsImpl.mkdirSync(resolvedBase, { recursive: true });
+  } catch (_err) {
+    return { ok: false, reason: 'ERR_SETTINGS_WRITE_FAILED', sha256: null };
+  }
+
+  let realBase;
+  try {
+    realBase = fsImpl.realpathSync(resolvedBase);
+  } catch (_err) {
+    return { ok: false, reason: 'ERR_SETTINGS_REALPATH_FAILED', sha256: null };
+  }
+
+  // If the target already exists, strictly forbid symlinks, non-regular files, realpath escapes, and reserved files
+  let exists = false;
+  try {
+    const lstat = fsImpl.lstatSync(resolvedTarget);
+    exists = true;
+    if (lstat.isSymbolicLink()) {
+      return { ok: false, reason: 'ERR_SETTINGS_SYMLINK_FORBIDDEN', sha256: null };
+    }
+    if (!lstat.isFile()) {
+      return { ok: false, reason: 'ERR_SETTINGS_NOT_REGULAR_FILE', sha256: null };
+    }
+  } catch (err) {
+    if (!err || err.code !== 'ENOENT') {
+      return { ok: false, reason: 'ERR_SETTINGS_STAT_FAILED', sha256: null };
+    }
+  }
+
+  if (exists) {
+    let realTarget;
+    try {
+      realTarget = fsImpl.realpathSync(resolvedTarget);
+    } catch (_err) {
+      return { ok: false, reason: 'ERR_SETTINGS_REALPATH_FAILED', sha256: null };
+    }
+    const rel = path.relative(realBase, realTarget);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || path.dirname(realTarget) !== realBase) {
+      return { ok: false, reason: 'ERR_SETTINGS_REALPATH_ESCAPE', sha256: null };
+    }
+    if (reservedKeys.has(normalizePathKey(realTarget))) {
+      return { ok: false, reason: 'ERR_SETTINGS_RESERVED_PATH', sha256: null };
+    }
+  }
+
+  const finalTarget = path.join(realBase, fileName);
+  const tmpPath = path.join(realBase, `.${fileName}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`);
+  try {
+    fsImpl.writeFileSync(tmpPath, formattedBuf, { mode: 0o600 });
+    let lastRenameErr = null;
+    for (let attempt = 0; attempt <= WRITE_RENAME_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        fsImpl.renameSync(tmpPath, finalTarget);
+        lastRenameErr = null;
+        break;
+      } catch (err) {
+        lastRenameErr = err;
+        if (isTransientLockError(err) && attempt < WRITE_RENAME_RETRY_DELAYS_MS.length) {
+          syncSleepMs(WRITE_RENAME_RETRY_DELAYS_MS[attempt]);
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (lastRenameErr) throw lastRenameErr;
+    return { ok: true, reason: null, sha256: sha256Hex(formattedBuf) };
+  } catch (_err) {
+    return { ok: false, reason: 'ERR_SETTINGS_WRITE_FAILED', sha256: null };
+  } finally {
+    try {
+      if (fsImpl.existsSync(tmpPath)) {
+        fsImpl.unlinkSync(tmpPath);
+      }
+    } catch (_cleanupErr) {}
+  }
 }
 
 function snapshotKey(snap) {
@@ -455,6 +591,37 @@ function createSettingsBridge({
     return res.snapshot;
   }
 
+  function writeSnapshotForPlugin(pluginId, spec, rawJson) {
+    if (disposed) {
+      return { ok: false, reason: 'ERR_SETTINGS_BRIDGE_DISPOSED', snapshot: null };
+    }
+    if (!pluginId || typeof pluginId !== 'string') {
+      return { ok: false, reason: 'ERR_SETTINGS_BRIDGE_NOT_BOUND', snapshot: null };
+    }
+    const fileName = spec && typeof spec.fileName === 'string' ? spec.fileName.trim() : '';
+    const maxBytes = clampMaxBytes(spec && spec.maxBytes);
+    const writeRes = writeSettingsFileSnapshot(settingsDataDir, { fileName, maxBytes }, rawJson, {
+      reservedFilePaths,
+      fsImpl,
+    });
+    if (!writeRes.ok) {
+      return { ok: false, reason: writeRes.reason, snapshot: null };
+    }
+    let entry = bindings.get(pluginId);
+    if (!entry || entry.fileName !== fileName || entry.maxBytes !== maxBytes) {
+      if (entry) clearEntryRetryTimer(entry);
+      entry = createBindingEntry(fileName, maxBytes, entry ? entry.revision : 0);
+      bindings.set(pluginId, entry);
+    }
+    const evalRes = evaluateBinding(pluginId, entry, { emitIfChanged: true });
+    ensureWatcher();
+    return {
+      ok: true,
+      reason: null,
+      snapshot: evalRes.snapshot,
+    };
+  }
+
   function syncPlugins(activeTrustedBindings = []) {
     if (disposed) return;
     const nextIds = new Set();
@@ -509,6 +676,7 @@ function createSettingsBridge({
 
   return Object.freeze({
     readSnapshotForPlugin,
+    writeSnapshotForPlugin,
     syncPlugins,
     refreshNow,
     getStatus,
@@ -522,5 +690,6 @@ module.exports = {
   MAX_MAX_BYTES,
   DEFAULT_DEBOUNCE_MS,
   readSettingsFileSnapshot,
+  writeSettingsFileSnapshot,
   createSettingsBridge,
 };

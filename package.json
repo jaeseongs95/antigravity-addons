@@ -1,6 +1,6 @@
 {
   "name": "antigravity-native-addon-host",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "Vendor-independent native desktop addon host and shared plugin isolation contract (AddonManifest v1/v2) for Electron apps, with Antigravity Desktop as the default profile.",
   "license": "MIT",
   "main": "src/index.js",

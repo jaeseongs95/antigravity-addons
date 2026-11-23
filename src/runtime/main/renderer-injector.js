@@ -563,10 +563,24 @@ ${verified.source}
     return rendererErrors.slice();
   }
 
+  function getTrustedSettingsBinding(wcId, pluginId) {
+    if (typeof pluginId !== 'string' || !pluginId) return null;
+    const map = trustedSettingsByWcId.get(wcId);
+    if (!map) return null;
+    const binding = map.get(pluginId);
+    if (!binding) return null;
+    return {
+      pluginId: binding.pluginId,
+      fileName: binding.fileName,
+      maxBytes: binding.maxBytes,
+    };
+  }
+
   return Object.freeze({
     attachWebContents,
     scheduleSync,
     pushSettingsUpdate,
+    getTrustedSettingsBinding,
     recordRendererError,
     collectRendererErrors,
   });
