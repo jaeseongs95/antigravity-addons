@@ -69,6 +69,8 @@ function createModalPortal(
   function closeEntry(entry) {
     const idx = stack.indexOf(entry);
     if (idx === -1) return false;
+    // NB-4: Mark closing before cascading so any popover opened inside a child onClose() will not mount into this dying <dialog>
+    entry.closing = true;
     const prevCount = stack.length;
 
     // F2: Cascade-close nested child entries using a snapshot so re-entrant onClose() mutations cannot skip or throw
@@ -301,10 +303,10 @@ function createModalPortal(
     const useShadow = resolveUseShadow(pluginMeta, slotDef, opts);
     const { bodyEl, shadowRoot } = createSurfaceBody(pop, pluginMeta, slotId, useShadow);
 
-    // R-2: Mount inside topmost open modal <dialog> when active so Chromium's modal inertness does not disable the popover
+    // R-2 + NB-4: Mount inside topmost non-closing connected modal <dialog> when active
     let mountParent = doc.body || doc.documentElement;
     for (let i = stack.length - 1; i >= 0; i--) {
-      if (stack[i].kind === 'modal' && stack[i].el && stack[i].el.isConnected !== false) {
+      if (stack[i].kind === 'modal' && !stack[i].closing && stack[i].el && stack[i].el.isConnected !== false) {
         mountParent = stack[i].el;
         break;
       }

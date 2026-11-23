@@ -377,15 +377,44 @@ test('TC-V2-008b (S-2): closes all 4 owner-CSS isolation bypasses', () => {
   assert.equal(r6.ok, false);
   assert.equal(r6.reason, 'ERR_FORBIDDEN_CSS_NESTING');
 
-  // (g) Audit F4: Unquoted <bad-url-token> quote desynchronization escape
+  // (g) Audit F4: Unquoted <bad-url-token> quote desynchronization (raw, single-space hex, CRLF hex) + global @import CRLF hex
   const r7 = validateSafeCssText('.a { background: url(x") } body { display: none !important; } /* "); }', { scope: 'owner' });
   assert.equal(r7.ok, false);
   assert.equal(r7.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
   const r7Esc = validateSafeCssText('.a { background: \\75 rl(x") } body { display: none !important; } /* "); }', { scope: 'owner' });
   assert.equal(r7Esc.ok, false);
   assert.equal(r7Esc.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+  const r7Crlf = validateSafeCssText('.a { background: \\75\r\nrl(x") } body { background: red !important; } /* "); }', { scope: 'owner' });
+  assert.equal(r7Crlf.ok, false);
+  assert.equal(r7Crlf.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+  const r7GlobalImportCrlf = validateSafeCssText('@\\69\r\nmport url("https://evil.example/x.css");', { scope: 'global' });
+  assert.equal(r7GlobalImportCrlf.ok, false);
+  assert.equal(r7GlobalImportCrlf.reason, 'ERR_UNSAFE_CSS_CONSTRUCT');
 
-  // (h) Audit F5: CSS Nesting Level 1 implicit-& relative sibling combinators & nested @media inside rule
+  // (h) Audit F6: Unquoted backslash-quote (`\"`) scanner quote desynchronization
+  const r8a = validateSafeCssText('.a { x: \\"; } body { background: red !important; } /* "; }', { scope: 'owner' });
+  assert.equal(r8a.ok, false);
+  assert.equal(r8a.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+  const r8b = validateSafeCssText('.a { x: \\"; } body { background: red !important; } /* "; */', { scope: 'owner' });
+  assert.equal(r8b.ok, false);
+  assert.equal(r8b.reason, 'ERR_FORBIDDEN_CSS_SYNTAX');
+
+  // (i) Audit F7: Functional pseudo-class comma sibling escape (`:is(*, .x) ~ *`) + paren-safe scoping
+  for (const sibPayload of [
+    '[data-addon-host-owner="evil"]:is(*, .x) ~ #victim { background: red !important; }',
+    'body:is(*, .x) ~ * { background: red !important; }',
+    'html:where(.a, .b) + div { display: none; }',
+  ]) {
+    const rSib = validateSafeCssText(sibPayload, { scope: 'owner' });
+    assert.equal(rSib.ok, false, `Expected F7 sibling escape rejection for: ${sibPayload}`);
+    assert.equal(rSib.reason, 'ERR_FORBIDDEN_CSS_SELECTOR');
+  }
+  assert.equal(
+    scopeCssToOwner(':is(.a, .b) { color: blue; }', 'evil'),
+    '[data-addon-host-owner="evil"] :is(.a, .b) { color: blue; }'
+  );
+
+  // (j) Audit F5: CSS Nesting Level 1 implicit-& relative sibling combinators & nested @media inside rule
   for (const nestedPayload of [
     'body { ~ * { display: none !important; } }',
     '[data-addon-host-owner="evil"] { + * { display: none !important; } }',
@@ -714,6 +743,21 @@ test('TC-V2-008e (R-2, R-3, R-5, R-6): popover-in-dialog, mountSlot isConnected,
   assert.doesNotThrow(() => mReent.close());
   assert.equal(modalPortal.getStackSize(), 0, 'F2 re-entrancy: stack must drain cleanly to 0');
   assert.deepEqual(portalClaims.slice(claimsBeforeReent).map((c) => c.active), [true, false]);
+
+  // Audit NB-4: Popover opened inside child onClose() during parent modal teardown mounts onto doc.body (not dying <dialog>)
+  const mOuter = modalPortal.openModal(restrictedMeta, 'p-ui.mod');
+  let spawnedPop = null;
+  modalPortal.openPopover(restrictedMeta, 'p-ui.pop', {
+    onClose: () => {
+      spawnedPop = modalPortal.openPopover(restrictedMeta, 'p-ui.pop');
+    },
+  });
+  mOuter.close();
+  assert.ok(spawnedPop, 'NB-4: child onClose opened a new popover');
+  assert.equal(spawnedPop.element.parentNode, doc.body, 'NB-4: new popover must mount to doc.body, not dying <dialog>');
+  assert.equal(modalPortal.getStackSize(), 1);
+  spawnedPop.close();
+  assert.equal(modalPortal.getStackSize(), 0);
 });
 
 test('TC-V2-008f (O-1, O-2, O-3, O-4, S-5, O-5): CI flags, fail-closed dist/runtime, corrupt restage, doctor/status health, zero resources/ write, and docs sync', () => {

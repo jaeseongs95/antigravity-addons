@@ -30,11 +30,19 @@ const ALLOWED_OWNER_AT_RULES = new Set([
   '@layer',
 ]);
 
+function preprocessCssInput(css) {
+  // F4 (W3C CSS Syntax L3 §3.3): normalize CRLF -> LF, stray CR/FF -> LF, NUL -> U+FFFD
+  return String(css || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[\r\f]/g, '\n')
+    .replace(/\u0000/g, '\uFFFD');
+}
+
 function stripCssComments(css) {
   // Always remove comments identically ('') so `@im/**/port` collapses to `@import` before checks
   let out = '';
   let quote = null;
-  const s = String(css || '');
+  const s = preprocessCssInput(css);
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     const next = s[i + 1];
@@ -45,6 +53,11 @@ function stripCssComments(css) {
         continue;
       }
       if (ch === quote) quote = null;
+      continue;
+    }
+    // F6: Respect unquoted CSS backslash escapes so `\"` never desynchronizes quote state
+    if (ch === '\\' && i + 1 < s.length) {
+      out += ch + s[++i];
       continue;
     }
     if (ch === '"' || ch === "'") {
@@ -64,10 +77,10 @@ function stripCssComments(css) {
 }
 
 function decodeCssEscapesForCheck(css) {
-  // S-2: Strip comments AND CSS string line-continuations (`\<newline>`) before decoding hex/single-char escapes
-  return stripCssComments(css)
-    .replace(/\\(?:\r\n|[\r\n\f])/g, '')
-    .replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_m, hex) => {
+  // S-2 + F4: Preprocess CRLF/CR/FF per CSS Syntax L3 §3.3, strip comments & string line-continuations, then decode escapes
+  return stripCssComments(preprocessCssInput(css))
+    .replace(/\\\n/g, '')
+    .replace(/\\([0-9a-fA-F]{1,6})[ \t\n]?/g, (_m, hex) => {
       const cp = parseInt(hex, 16);
       if (!Number.isFinite(cp) || cp <= 0 || cp > 0x10ffff) return '';
       try {
@@ -76,16 +89,17 @@ function decodeCssEscapesForCheck(css) {
         return '';
       }
     })
-    .replace(/\\([^\r\n\f0-9a-fA-F])/g, '$1');
+    .replace(/\\([^\n0-9a-fA-F])/g, '$1');
 }
 
 function validateCssSyntaxBalanced(cssText) {
+  const s = preprocessCssInput(cssText);
   let depth = 0;
   let quote = null;
   let inComment = false;
-  for (let i = 0; i < cssText.length; i++) {
-    const ch = cssText[i];
-    const next = cssText[i + 1];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const next = s[i + 1];
     if (inComment) {
       if (ch === '*' && next === '/') {
         inComment = false;
@@ -95,13 +109,20 @@ function validateCssSyntaxBalanced(cssText) {
     }
     if (quote) {
       if (ch === '\\') {
+        if (i + 1 >= s.length) return false;
         i++;
         continue;
       }
-      if (ch === '\n' || ch === '\r' || ch === '\f') {
-        return false; // unescaped newline/form-feed inside CSS string (CSS Syntax L3 bad-string token bypass)
+      if (ch === '\n') {
+        return false; // unescaped newline/CR/FF inside CSS string (CSS Syntax L3 bad-string token bypass)
       }
       if (ch === quote) quote = null;
+      continue;
+    }
+    // F6: Respect unquoted backslash escapes (reject trailing EOF `\` or unquoted `\<newline>`)
+    if (ch === '\\') {
+      if (i + 1 >= s.length || next === '\n') return false;
+      i++;
       continue;
     }
     if (ch === '/' && next === '*') {
@@ -122,12 +143,13 @@ function validateCssSyntaxBalanced(cssText) {
   return !quote && !inComment && depth === 0;
 }
 
-function hasInvalidUnquotedUrlToken(str) {
+function hasDangerousUnquotedEscape(cssText) {
+  const s = preprocessCssInput(cssText);
   let quote = null;
   let inComment = false;
-  for (let i = 0; i < str.length; i++) {
-    const ch = str[i];
-    const next = str[i + 1];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const next = s[i + 1];
     if (inComment) {
       if (ch === '*' && next === '/') {
         inComment = false;
@@ -152,29 +174,74 @@ function hasInvalidUnquotedUrlToken(str) {
       quote = ch;
       continue;
     }
+    if (ch === '\\') {
+      if (next === '"' || next === "'" || next === '{' || next === '}' || next === '/') {
+        return true;
+      }
+      i++;
+    }
+  }
+  return false;
+}
+
+function hasInvalidUnquotedUrlToken(str) {
+  const s = preprocessCssInput(str);
+  let quote = null;
+  let inComment = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const next = s[i + 1];
+    if (inComment) {
+      if (ch === '*' && next === '/') {
+        inComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      inComment = true;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
     if (
       (ch === 'u' || ch === 'U') &&
-      str.slice(i, i + 4).toLowerCase() === 'url(' &&
-      (i === 0 || !/[a-z0-9_-]/i.test(str[i - 1]))
+      s.slice(i, i + 4).toLowerCase() === 'url(' &&
+      (i === 0 || !/[a-z0-9_-]/i.test(s[i - 1]))
     ) {
       let k = i + 4;
-      while (k < str.length && /[\s\f]/.test(str[k])) k++;
-      if (k >= str.length) return true;
-      if (str[k] === '"' || str[k] === "'") {
+      while (k < s.length && /\s/.test(s[k])) k++;
+      if (k >= s.length) return true;
+      if (s[k] === '"' || s[k] === "'") {
         i += 3;
         continue;
       }
       // F4: W3C CSS Syntax L3 §4.3.6 unquoted <url-token> — reject any <bad-url-token> / quote / brace desync chars
       let closed = false;
-      for (; k < str.length; k++) {
-        const c = str[k];
+      for (; k < s.length; k++) {
+        const c = s[k];
         if (c === ')') {
           closed = true;
           break;
         }
-        if (/[\s\f]/.test(c)) {
-          while (k < str.length && /[\s\f]/.test(str[k])) k++;
-          if (k < str.length && str[k] === ')') {
+        if (/\s/.test(c)) {
+          while (k < s.length && /\s/.test(s[k])) k++;
+          if (k < s.length && s[k] === ')') {
             closed = true;
             break;
           }
@@ -188,6 +255,138 @@ function hasInvalidUnquotedUrlToken(str) {
       if (!closed) return true;
       i = k;
     }
+  }
+  return false;
+}
+
+function splitTopLevelSelectorList(selList) {
+  // F7: Split on top-level commas ONLY (parenDepth === 0 && bracketDepth === 0, quote & backslash safe)
+  const out = [];
+  let start = 0;
+  let quote = null;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  for (let i = 0; i < selList.length; i++) {
+    const ch = selList[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') parenDepth++;
+    else if (ch === ')' && parenDepth > 0) parenDepth--;
+    else if (ch === '[') bracketDepth++;
+    else if (ch === ']' && bracketDepth > 0) bracketDepth--;
+    else if (ch === ',' && parenDepth === 0 && bracketDepth === 0) {
+      out.push(selList.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(selList.slice(start));
+  return out;
+}
+
+function getFirstTopLevelCombinator(selector) {
+  // F7: Return the first top-level combinator ('+', '~', '>', ' ') outside quotes/parens/brackets
+  const s = selector.trim();
+  let quote = null;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let sawSpace = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\') {
+      if (sawSpace) return ' ';
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      if (sawSpace) return ' ';
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') {
+      if (sawSpace) return ' ';
+      parenDepth++;
+      continue;
+    }
+    if (ch === ')' && parenDepth > 0) {
+      parenDepth--;
+      continue;
+    }
+    if (ch === '[') {
+      if (sawSpace) return ' ';
+      bracketDepth++;
+      continue;
+    }
+    if (ch === ']' && bracketDepth > 0) {
+      bracketDepth--;
+      continue;
+    }
+    if (parenDepth > 0 || bracketDepth > 0) continue;
+    if (/\s/.test(ch)) {
+      sawSpace = true;
+      continue;
+    }
+    if (ch === '+' || ch === '~' || ch === '>') {
+      return ch;
+    }
+    if (sawSpace) {
+      return ' ';
+    }
+  }
+  return null;
+}
+
+function hasForbiddenOwnerSiblingSelector(cleanCss) {
+  let i = 0;
+  const len = cleanCss.length;
+  while (i < len) {
+    const braceIdx = findNextTopLevelChar(cleanCss, i, '{');
+    if (braceIdx === -1) break;
+    const semiIdx = findNextTopLevelChar(cleanCss, i, ';');
+    if (semiIdx !== -1 && semiIdx < braceIdx) {
+      i = semiIdx + 1;
+      continue;
+    }
+    const prelude = cleanCss.slice(i, braceIdx);
+    const closeIdx = findMatchingCloseBrace(cleanCss, braceIdx);
+    const body = cleanCss.slice(braceIdx + 1, closeIdx);
+    const lowerPrelude = prelude.trim().toLowerCase();
+    if (lowerPrelude.startsWith('@media') || lowerPrelude.startsWith('@supports') || lowerPrelude.startsWith('@layer')) {
+      if (hasForbiddenOwnerSiblingSelector(body)) return true;
+    } else if (!lowerPrelude.startsWith('@')) {
+      const selectors = splitTopLevelSelectorList(prelude);
+      for (let sIdx = 0; sIdx < selectors.length; sIdx++) {
+        const trimmed = selectors[sIdx].trim();
+        if (!trimmed) continue;
+        if (trimmed[0] === '+' || trimmed[0] === '~') return true;
+        if (/^(?:\[data-addon-host-owner\b|(?:html|body|:root)\b)/i.test(trimmed)) {
+          const firstComb = getFirstTopLevelCombinator(trimmed);
+          if (firstComb === '+' || firstComb === '~') return true;
+        }
+      }
+    }
+    i = closeIdx + 1;
   }
   return false;
 }
@@ -225,22 +424,23 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
   if (typeof cssText !== 'string') {
     return { ok: false, reason: 'ERR_CSS_NOT_STRING' };
   }
-  if (!validateCssSyntaxBalanced(cssText)) {
+  const normalized = preprocessCssInput(cssText);
+  if (!validateCssSyntaxBalanced(normalized)) {
     return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SYNTAX' };
   }
-  const decoded = decodeCssEscapesForCheck(cssText);
+  const decoded = decodeCssEscapesForCheck(normalized);
   for (let i = 0; i < DANGEROUS_CSS_PATTERNS.length; i++) {
-    if (DANGEROUS_CSS_PATTERNS[i].test(decoded) || DANGEROUS_CSS_PATTERNS[i].test(cssText)) {
+    if (DANGEROUS_CSS_PATTERNS[i].test(decoded) || DANGEROUS_CSS_PATTERNS[i].test(normalized)) {
       return { ok: false, reason: 'ERR_UNSAFE_CSS_CONSTRUCT' };
     }
   }
-  // F4: Reject unquoted <bad-url-token> quote/brace desynchronization after dangerous-construct classification
-  if (hasInvalidUnquotedUrlToken(cssText) || hasInvalidUnquotedUrlToken(decoded)) {
+  // F4 + F6: Reject unquoted <bad-url-token> & dangerous unquoted escapes after dangerous-construct classification
+  if (hasInvalidUnquotedUrlToken(normalized) || hasInvalidUnquotedUrlToken(decoded) || hasDangerousUnquotedEscape(normalized)) {
     return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SYNTAX' };
   }
   if (scope === 'owner') {
     // S-2: Reject backslash escapes inside @-rule identifiers (prevents @\media / @\6d edia scoping bypass)
-    const strippedRaw = stripCssComments(cssText);
+    const strippedRaw = stripCssComments(normalized);
     if (/@[^;{}\s"'()]*\\/.test(strippedRaw)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_AT_RULE' };
     }
@@ -251,8 +451,8 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
         return { ok: false, reason: 'ERR_FORBIDDEN_CSS_AT_RULE' };
       }
     }
-    // Reject sibling-combinator escape out of owner/body/root, :has() relational host-escape, and CSS Nesting blocks
-    if (/(?:\[data-addon-host-owner\s*=|\b(?:html|body|:root)\b)[^,{};]*[+~]/i.test(decoded)) {
+    // F7: Paren/bracket-aware sibling-combinator escape check out of owner/body/root (blocks `:is(*, .x) ~ *`)
+    if (hasForbiddenOwnerSiblingSelector(strippedRaw) || hasForbiddenOwnerSiblingSelector(decoded)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SELECTOR' };
     }
     if (/(?:&[^;{}]*[+~]|:\s*has\s*\()/i.test(decoded) || hasForbiddenOwnerNesting(strippedRaw) || hasForbiddenOwnerNesting(decoded)) {
@@ -272,6 +472,10 @@ function findNextTopLevelChar(str, startIdx, targetChar) {
         continue;
       }
       if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
       continue;
     }
     if (ch === '"' || ch === "'") {
@@ -296,6 +500,10 @@ function findMatchingCloseBrace(str, openBraceIdx) {
       if (ch === quote) quote = null;
       continue;
     }
+    if (ch === '\\') {
+      j++;
+      continue;
+    }
     if (ch === '"' || ch === "'") {
       quote = ch;
       continue;
@@ -311,14 +519,13 @@ function findMatchingCloseBrace(str, openBraceIdx) {
 
 function scopeCssToOwner(cssText, pluginId) {
   const ownerPrefix = `[data-addon-host-owner="${String(pluginId).replace(/"/g, '\\"')}"]`;
-  const clean = stripCssComments(cssText);
+  const clean = stripCssComments(preprocessCssInput(cssText));
   let out = '';
   let i = 0;
   const len = clean.length;
 
   function prefixSelectorList(selList) {
-    return selList
-      .split(',')
+    return splitTopLevelSelectorList(selList)
       .map((s) => {
         const trimmed = s.trim();
         if (!trimmed) return '';
