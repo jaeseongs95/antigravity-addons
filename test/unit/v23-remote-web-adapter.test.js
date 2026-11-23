@@ -641,6 +641,7 @@ test('TC-RW-009: build-remote.js produces deterministic host-only bundles and en
   assert.equal(verifyRemoteBundleAst('require("node:fs");').ok, false);
   assert.equal(verifyRemoteBundleAst('trustedTypes.createPolicy("default", {});').ok, false);
   assert.equal(verifyRemoteBundleAst('trustedTypes["createPolicy"]("default", {});').ok, false);
+  assert.equal(verifyRemoteBundleAst('trustedTypes.createPolicy(`default`, {});').ok, false);
 
   const dirA = makeTmpDir('agy-v23-dist-a-');
   const dirB = makeTmpDir('agy-v23-dist-b-');

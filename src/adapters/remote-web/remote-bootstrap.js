@@ -25,13 +25,17 @@ const { createRemoteHostBridge } = require('./remote-host-bridge');
 
 const KERNEL_BOOT_STATE = new WeakMap();
 
-function createSwappableBridgePort(kernelState, docGenId, profileId) {
+function createSwappableBridgePort(kernelState) {
   function activePort() {
     return kernelState.currentBridge ? kernelState.currentBridge.port : null;
   }
   return Object.freeze({
-    docGenId,
-    profileId,
+    get docGenId() {
+      return kernelState.docGenId;
+    },
+    get profileId() {
+      return kernelState.profileId;
+    },
     setPortalClaim(claimId, active) {
       const p = activePort();
       return p ? p.setPortalClaim(claimId, active) : { ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' };
@@ -603,15 +607,24 @@ async function bootRemoteWebHost({
     },
   });
 
-  const kernelState = existingKernelState || { hostToken, currentBridge: null };
+  const kernelState = existingKernelState || {
+    hostToken,
+    currentBridge: null,
+    docGenId,
+    profileId: profile.id,
+  };
   const prevBridge = kernelState.currentBridge;
+  const prevDocGenId = kernelState.docGenId;
+  const prevProfileId = kernelState.profileId;
   kernelState.currentBridge = bridge;
+  kernelState.docGenId = docGenId;
+  kernelState.profileId = profile.id;
 
   const bootRes = activeKernel.boot({
     docGenId,
     hostToken,
     hostProfileId: profile.id,
-    hostBridge: existingKernelState ? undefined : createSwappableBridgePort(kernelState, docGenId, profile.id),
+    hostBridge: existingKernelState ? undefined : createSwappableBridgePort(kernelState),
     uiAnchors: profile.uiAnchors || {},
     extraNoTranslateAttributes: Array.isArray(profile.extraNoTranslateAttributes)
       ? profile.extraNoTranslateAttributes
@@ -619,6 +632,8 @@ async function bootRemoteWebHost({
   });
   if (!bootRes || bootRes.ok !== true) {
     kernelState.currentBridge = prevBridge;
+    kernelState.docGenId = prevDocGenId;
+    kernelState.profileId = prevProfileId;
     bridge.dispose();
     return { ok: false, reason: (bootRes && bootRes.reason) || 'ERR_KERNEL_BOOT_FAILED' };
   }

@@ -163,7 +163,21 @@ const http = require('node:http');
 const fs = require('node:fs');
 const { app, BrowserWindow } = require('electron');
 
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-dev-shm-usage');
+
 const runtimeCode = fs.readFileSync(${JSON.stringify(runtimeBundlePath)}, 'utf8');
+
+async function waitFor(fn, timeoutMs = 4000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const val = await fn();
+    if (val) return val;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
 
 function startServer(html) {
   return new Promise((resolve) => {
@@ -220,6 +234,7 @@ app.whenReady().then(async () => {
         'const drawerPanel = drawerHost.shadowRoot.querySelector("#rah-drawer-panel");' +
         'const openedAfterClick = !drawerPanel.hasAttribute("hidden");' +
         'const tabs = drawerHost.shadowRoot.querySelectorAll(".rah-tab");' +
+        'tabs[1].focus();' +
         'tabs[1].click();' +
         'const tabLabel = drawerHost.shadowRoot.querySelector(".rah-tab-label");' +
         'const tabText = tabLabel ? tabLabel.textContent : null;' +
@@ -243,17 +258,22 @@ app.whenReady().then(async () => {
     try { win.setOpacity(0); } catch (_e) { /* headless platforms may not support setOpacity */ }
     win.showInactive();
     win.webContents.focus();
-    await new Promise((r) => setTimeout(r, 50));
-    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
-    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
-    await new Promise((r) => setTimeout(r, 120));
-    const drawerClosedByEscape = await win.webContents.executeJavaScript(
-      '(() => {' +
-        'const drawerHost = document.getElementById("remote-addon-host-drawer-root");' +
-        'const drawerPanel = drawerHost && drawerHost.shadowRoot && drawerHost.shadowRoot.querySelector("#rah-drawer-panel");' +
-        'return Boolean(drawerPanel && drawerPanel.hasAttribute("hidden"));' +
-      '})()'
+    await win.webContents.executeJavaScript(
+      'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))'
     );
+    const drawerClosedByEscape = await waitFor(async () => {
+      win.webContents.focus();
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      await new Promise((r) => setTimeout(r, 80));
+      return win.webContents.executeJavaScript(
+        '(() => {' +
+          'const drawerHost = document.getElementById("remote-addon-host-drawer-root");' +
+          'const drawerPanel = drawerHost && drawerHost.shadowRoot && drawerHost.shadowRoot.querySelector("#rah-drawer-panel");' +
+          'return Boolean(drawerPanel && drawerPanel.hasAttribute("hidden"));' +
+        '})()'
+      );
+    }, 3000);
 
     await win.loadURL(allowed.origin + '/workspace');
     await win.webContents.executeJavaScript(runtimeCode);

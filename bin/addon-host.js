@@ -42,7 +42,18 @@ function createRemoteWebHostLifecyclePort() {
       let buildManifest = null;
       if (manifestPath && fs.existsSync(manifestPath)) {
         try {
-          buildManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          if (
+            !parsed ||
+            typeof parsed !== 'object' ||
+            Array.isArray(parsed) ||
+            typeof parsed.buildSha8 !== 'string' ||
+            !parsed.buildSha8
+          ) {
+            buildManifest = { corrupt: true };
+          } else {
+            buildManifest = parsed;
+          }
         } catch (_err) {
           buildManifest = { corrupt: true };
         }

@@ -223,7 +223,7 @@ function stripJsCommentsWithAcorn(source) {
     parts.push(text.slice(cursor, c.start));
     if (c.type === 'Block') {
       const raw = text.slice(c.start, c.end);
-      parts.push(raw.includes('\n') ? '\n' : ' ');
+      parts.push(/[\r\n\u2028\u2029]/.test(raw) ? '\n' : ' ');
     }
     cursor = c.end;
   }
@@ -379,8 +379,14 @@ function verifyRemoteBundleAst(code) {
           ) {
             violations.push('FORBIDDEN_REFLECT_APPLY_EVAL');
           }
-          if (methodName === 'createPolicy' && node.arguments[0] && node.arguments[0].type === 'Literal') {
-            const polName = String(node.arguments[0].value || '').toLowerCase();
+          if (methodName === 'createPolicy' && node.arguments[0]) {
+            const arg0 = node.arguments[0];
+            let polName = null;
+            if (arg0.type === 'Literal') {
+              polName = String(arg0.value || '').toLowerCase();
+            } else if (arg0.type === 'TemplateLiteral' && arg0.expressions.length === 0 && arg0.quasis.length === 1) {
+              polName = String(arg0.quasis[0].value.cooked || '').toLowerCase();
+            }
             if (polName === 'default') {
               violations.push('FORBIDDEN_DEFAULT_TRUSTED_TYPES_POLICY');
             }
