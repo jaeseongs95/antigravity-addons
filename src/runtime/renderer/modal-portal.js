@@ -221,7 +221,19 @@ function createModalPortal(
       dlg.setAttribute(extraNoTranslateAttributes[i], 'true');
     }
     if (dlg.style) {
-      dlg.style.marginTop = 'max(env(titlebar-area-height, 36px), 36px)';
+      // Center <dialog> inside the safe viewport region below the titlebar even under app CSS resets (* { margin: 0 }).
+      dlg.style.position = 'fixed';
+      dlg.style.inset = '0';
+      dlg.style.top = '36px';
+      dlg.style.top = 'max(env(titlebar-area-height, 36px), 36px)';
+      dlg.style.right = '0';
+      dlg.style.bottom = '0';
+      dlg.style.left = '0';
+      dlg.style.margin = 'auto';
+      dlg.style.width = 'fit-content';
+      dlg.style.height = 'fit-content';
+      dlg.style.maxWidth = 'calc(100vw - 24px)';
+      dlg.style.maxHeight = 'calc(100vh - 56px)';
       dlg.style.zIndex = String(2147483000 + stack.length + 1);
     }
 

@@ -736,6 +736,15 @@ test('TC-V2-008e (R-2, R-3, R-5, R-6): popover-in-dialog, mountSlot isConnected,
   // R-6a: Restricted v2 plugin cannot downgrade shadow: true via { shadow: false }
   const m1 = modalPortal.openModal(restrictedMeta, 'p-ui.mod', { shadow: false });
   assert.ok(m1.element.children[0].shadowRoot, 'restricted modal must retain ShadowRoot');
+  assert.equal(m1.element.style.position, 'fixed', 'modal <dialog> must use fixed positioning');
+  assert.equal(
+    m1.element.style.top,
+    'max(env(titlebar-area-height, 36px), 36px)',
+    'modal <dialog> must offset top inset below titlebar instead of overriding marginTop'
+  );
+  assert.equal(m1.element.style.margin, 'auto', 'modal <dialog> must restore margin:auto to defeat app CSS resets');
+  assert.equal(m1.element.style.width, 'fit-content');
+  assert.equal(m1.element.style.height, 'fit-content');
   const m2 = modalPortal.openModal(restrictedMeta, 'p-ui.mod');
   assert.ok(m2.element.children[0].shadowRoot);
 

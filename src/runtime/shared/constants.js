@@ -15,6 +15,7 @@ const IPC_CHANNELS = Object.freeze({
   VERIFY_FRAME: 'addon-host:v2:verify-frame',
   CLAIM_NONCE: 'addon-host:v2:claim-nonce',
   PORTAL_CLAIM: 'addon-host:v2:portal-claim',
+  SAVE_SETTINGS: 'addon-host:v2:save-settings',
   REPORT_ERROR: 'addon-host:v2:report-error',
   PING: 'addon-host:v2:ping',
 });

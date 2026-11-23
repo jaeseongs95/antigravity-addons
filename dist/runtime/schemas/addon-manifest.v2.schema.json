@@ -171,7 +171,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["fileName"],
-      "description": "Optional unidirectional read-only host settings file push bridge (requires trustLevel: trusted and host trust approval).",
+      "description": "Optional host-confined settings file bridge for reading, watching, and saving the plugin's own JSON settings file (requires trustLevel: trusted and host trust approval).",
       "properties": {
         "fileName": {
           "type": "string",

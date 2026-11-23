@@ -795,7 +795,15 @@ function scopeCssToOwner(cssText, pluginId) {
         if (!trimmed) return '';
         if (trimmed.startsWith(':host')) return trimmed;
         // Only treat exact leading ownerPrefix as already rooted (NEVER `includes(ownerPrefix)` which allows `body:not([owner])`)
-        if (trimmed === ownerPrefix || trimmed.startsWith(`${ownerPrefix} `) || trimmed.startsWith(`${ownerPrefix}>`) || trimmed.startsWith(`${ownerPrefix}.`) || trimmed.startsWith(`${ownerPrefix}#`) || trimmed.startsWith(`${ownerPrefix}:`)) {
+        if (
+          trimmed === ownerPrefix ||
+          trimmed.startsWith(`${ownerPrefix} `) ||
+          trimmed.startsWith(`${ownerPrefix}>`) ||
+          trimmed.startsWith(`${ownerPrefix}.`) ||
+          trimmed.startsWith(`${ownerPrefix}#`) ||
+          trimmed.startsWith(`${ownerPrefix}:`) ||
+          trimmed.startsWith(`${ownerPrefix}[`)
+        ) {
           return trimmed;
         }
         if (/^(?:html|body|:root)(?![a-z0-9_-])/i.test(trimmed)) {
@@ -1413,7 +1421,19 @@ function createModalPortal(
       dlg.setAttribute(extraNoTranslateAttributes[i], 'true');
     }
     if (dlg.style) {
-      dlg.style.marginTop = 'max(env(titlebar-area-height, 36px), 36px)';
+      // Center <dialog> inside the safe viewport region below the titlebar even under app CSS resets (* { margin: 0 }).
+      dlg.style.position = 'fixed';
+      dlg.style.inset = '0';
+      dlg.style.top = '36px';
+      dlg.style.top = 'max(env(titlebar-area-height, 36px), 36px)';
+      dlg.style.right = '0';
+      dlg.style.bottom = '0';
+      dlg.style.left = '0';
+      dlg.style.margin = 'auto';
+      dlg.style.width = 'fit-content';
+      dlg.style.height = 'fit-content';
+      dlg.style.maxWidth = 'calc(100vw - 24px)';
+      dlg.style.maxHeight = 'calc(100vh - 56px)';
       dlg.style.zIndex = String(2147483000 + stack.length + 1);
     }
 
@@ -1727,32 +1747,143 @@ const { createModalPortal } = require('./modal-portal');
 const { createRegionObserver } = require('./region-observer');
 const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
 
-const FORBIDDEN_CLONE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+// I4: Capture JS primordials BEFORE any plugin executes in shared Isolated World 998
+const _Error = Error;
+const _String = String;
+const _Number = Number;
+const _NumberIsFinite = Number.isFinite;
+const _ReflectApply = Reflect.apply;
+const _ObjectKeys = Object.keys;
+const _ObjectFreeze = Object.freeze;
+const _ObjectDefineProperty = Object.defineProperty;
+const _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const _ArrayIsArray = Array.isArray;
+const _ArrayPush = Function.prototype.call.bind(Array.prototype.push);
+const _ArrayShift = Function.prototype.call.bind(Array.prototype.shift);
+const _ArraySlice = Function.prototype.call.bind(Array.prototype.slice);
+const _Map = Map;
+const _MapGet = Function.prototype.call.bind(Map.prototype.get);
+const _MapSet = Function.prototype.call.bind(Map.prototype.set);
+const _MapHas = Function.prototype.call.bind(Map.prototype.has);
+const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
+const _MapForEach = Function.prototype.call.bind(Map.prototype.forEach);
+const _Set = Set;
+const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
+const _SetHas = Function.prototype.call.bind(Set.prototype.has);
+const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
+const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
+const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
+const _SetSize = Function.prototype.call.bind(_ObjectGetOwnPropertyDescriptor(Set.prototype, 'size').get);
+const _WeakMap = WeakMap;
+const _WeakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
+const _WeakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
+const _WeakMapHas = Function.prototype.call.bind(WeakMap.prototype.has);
+const _WeakSet = WeakSet;
+const _WeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+const _WeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
+const _WeakSetDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
+const _Uint8Array = Uint8Array;
+const _NumberToString = Function.prototype.call.bind(Number.prototype.toString);
+const _StringPadStart = Function.prototype.call.bind(String.prototype.padStart);
+const _StringSlice = Function.prototype.call.bind(String.prototype.slice);
+const _DateNow = Date.now;
+const _MathRandom = Math.random;
+const _JSONStringify = JSON.stringify;
+const _PromiseResolve = Promise.resolve.bind(Promise);
+const _PromiseReject = Promise.reject.bind(Promise);
+const _GlobalCrypto = typeof globalThis !== 'undefined' && globalThis.crypto ? globalThis.crypto : null;
+const _CryptoGetRandomValues =
+  _GlobalCrypto && typeof _GlobalCrypto.getRandomValues === 'function'
+    ? Function.prototype.bind.call(_GlobalCrypto.getRandomValues, _GlobalCrypto)
+    : null;
 
-function deepFreezeClone(value, seen = new WeakMap()) {
+const FORBIDDEN_CLONE_KEYS = new _Set(['__proto__', 'constructor', 'prototype']);
+
+function deepFreezeClone(value, seen = new _WeakMap()) {
   if (value === null || typeof value !== 'object') {
     return value;
   }
-  if (seen.has(value)) {
-    return seen.get(value);
+  if (_WeakMapHas(seen, value)) {
+    return _WeakMapGet(seen, value);
   }
-  if (Array.isArray(value)) {
+  if (_ArrayIsArray(value)) {
     const out = [];
-    seen.set(value, out);
+    _WeakMapSet(seen, value, out);
     for (let i = 0; i < value.length; i++) {
-      out.push(deepFreezeClone(value[i], seen));
+      _ObjectDefineProperty(out, i, {
+        value: deepFreezeClone(value[i], seen),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
-    return Object.freeze(out);
+    return _ObjectFreeze(out);
   }
   const out = {};
-  seen.set(value, out);
-  const keys = Object.keys(value);
+  _WeakMapSet(seen, value, out);
+  const keys = _ObjectKeys(value);
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
-    if (FORBIDDEN_CLONE_KEYS.has(k)) continue;
-    out[k] = deepFreezeClone(value[k], seen);
+    if (_SetHas(FORBIDDEN_CLONE_KEYS, k)) continue;
+    _ObjectDefineProperty(out, k, {
+      value: deepFreezeClone(value[k], seen),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
-  return Object.freeze(out);
+  return _ObjectFreeze(out);
+}
+
+function sanitizeJsonPayload(value, seen = new _WeakSet()) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return _NumberIsFinite(value) ? value : null;
+  }
+  if (typeof value !== 'object') {
+    return undefined;
+  }
+  if (_WeakSetHas(seen, value)) {
+    throw new _Error('ERR_SETTINGS_INVALID_JSON');
+  }
+  _WeakSetAdd(seen, value);
+  try {
+    if (_ArrayIsArray(value)) {
+      const out = [];
+      for (let i = 0; i < value.length; i++) {
+        const item = sanitizeJsonPayload(value[i], seen);
+        _ObjectDefineProperty(out, i, {
+          value: item === undefined ? null : item,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+      return out;
+    }
+    const out = {};
+    const keys = _ObjectKeys(value);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (_SetHas(FORBIDDEN_CLONE_KEYS, k)) {
+        throw new _Error('ERR_SETTINGS_UNSAFE_PROTO_KEY');
+      }
+      const nextVal = sanitizeJsonPayload(value[k], seen);
+      if (nextVal !== undefined) {
+        _ObjectDefineProperty(out, k, {
+          value: nextVal,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+    }
+    return out;
+  } finally {
+    _WeakSetDelete(seen, value);
+  }
 }
 
 function createRendererKernel(doc = globalThis.document, win = globalThis.window || globalThis) {
@@ -1767,43 +1898,49 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   let regionObserver = null;
   let settingsTabs = null;
 
-  const pluginDisposers = new Map(); // pluginId -> Set<Function>
-  const pluginMarkDisposed = new Map(); // pluginId -> Set<Function>
-  const pluginActions = new Map(); // pluginId -> Map<actionId, object>
-  const pluginSettingsAllowed = new Set(); // pluginId (trusted + settingsBridge declared)
-  const pluginSettingsSnapshots = new Map(); // pluginId -> frozen snapshot
-  const pluginSettingsListeners = new Map(); // pluginId -> Set<Function>
-  const stagedHandles = new Map(); // runNonce -> { pluginId, handle } (S-1 CSP-safe two-phase execution)
+  const pluginDisposers = new _Map(); // pluginId -> Set<Function>
+  const pluginMarkDisposed = new _Map(); // pluginId -> Set<Function>
+  const disposingPlugins = new _Set(); // pluginId (I10: re-entrancy guard during onDispose)
+  const pluginActions = new _Map(); // pluginId -> Map<actionId, object>
+  const pluginTrustLevels = new _Map(); // pluginId -> 'trusted' | 'restricted' (I4)
+  const pluginSettingsAllowed = new _Set(); // pluginId (trusted + settingsBridge declared)
+  const pluginSettingsSnapshots = new _Map(); // pluginId -> frozen snapshot
+  const pluginSettingsListeners = new _Map(); // pluginId -> Set<Function>
+  const stagedHandles = new _Map(); // runNonce -> { pluginId, handle } (S-1 CSP-safe two-phase execution)
   const recordedErrors = [];
   let nonceSeq = 0;
 
   function generateRunNonce() {
     nonceSeq += 1;
     try {
-      const cryptoObj = (win && win.crypto) || (typeof globalThis !== 'undefined' && globalThis.crypto);
-      if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
-        const bytes = new Uint8Array(16);
-        cryptoObj.getRandomValues(bytes);
+      const getRandom =
+        _CryptoGetRandomValues ||
+        (win && win.crypto && typeof win.crypto.getRandomValues === 'function'
+          ? (arr) => win.crypto.getRandomValues(arr)
+          : null);
+      if (getRandom) {
+        const bytes = new _Uint8Array(16);
+        getRandom(bytes);
         let hex = '';
-        for (let i = 0; i < bytes.length; i++) {
-          hex += bytes[i].toString(16).padStart(2, '0');
+        for (let i = 0; i < 16; i++) {
+          hex += _StringPadStart(_NumberToString(bytes[i], 16), 2, '0');
         }
         return `rn-${nonceSeq}-${hex}`;
       }
     } catch (_e) {}
-    return `rn-${nonceSeq}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    return `rn-${nonceSeq}-${_NumberToString(_DateNow(), 36)}-${_StringSlice(_NumberToString(_MathRandom(), 36), 2)}-${_StringSlice(_NumberToString(_MathRandom(), 36), 2)}`;
   }
 
   function assertHostToken(providedToken) {
     if (hostToken !== null && providedToken !== hostToken) {
-      throw new Error('ERR_FORBIDDEN_HOST_TOKEN');
+      throw new _Error('ERR_FORBIDDEN_HOST_TOKEN');
     }
   }
 
   function reportPluginError(pluginId, detail) {
-    const entry = { pluginId: String(pluginId || 'unknown'), detail: String(detail || '') };
-    recordedErrors.push(entry);
-    if (recordedErrors.length > 200) recordedErrors.shift();
+    const entry = { pluginId: _String(pluginId || 'unknown'), detail: _String(detail || '') };
+    _ArrayPush(recordedErrors, entry);
+    if (recordedErrors.length > 200) _ArrayShift(recordedErrors);
     if (hostBridge && typeof hostBridge.reportError === 'function') {
       try {
         hostBridge.reportError(entry.pluginId, entry.detail);
@@ -1821,9 +1958,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     if (typeof cfg.hostToken === 'string' && cfg.hostToken.length >= 16) {
       hostToken = cfg.hostToken;
     }
-    docGenId = Number(cfg.docGenId) || 1;
-    extraNoTranslateAttributes = Array.isArray(cfg.extraNoTranslateAttributes)
-      ? cfg.extraNoTranslateAttributes.slice()
+    docGenId = _Number(cfg.docGenId) || 1;
+    extraNoTranslateAttributes = _ArrayIsArray(cfg.extraNoTranslateAttributes)
+      ? _ArraySlice(cfg.extraNoTranslateAttributes)
       : [];
 
     // T-A Option A1: claim preload bridge ONCE per document generation
@@ -1859,56 +1996,74 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     regionObserver = createRegionObserver(doc, win);
     settingsTabs = createSettingsTabCoordinator();
     booted = true;
-    return { ok: true, alreadyBooted: false, docGenId, hasBridge: Boolean(hostBridge) };
+    return { ok: true, alreadyBooted: false, docGenId, hasBridge: !!hostBridge };
   }
 
   function addPluginDisposer(pluginId, fn) {
     if (typeof fn !== 'function') return;
-    let set = pluginDisposers.get(pluginId);
+    let set = _MapGet(pluginDisposers, pluginId);
     if (!set) {
-      set = new Set();
-      pluginDisposers.set(pluginId, set);
+      set = new _Set();
+      _MapSet(pluginDisposers, pluginId, set);
     }
-    set.add(fn);
+    _SetAdd(set, fn);
   }
 
   function disposePluginInternal(pluginId) {
-    const markers = pluginMarkDisposed.get(pluginId);
-    if (markers) {
-      for (const mark of Array.from(markers)) {
-        try {
-          mark();
-        } catch (_e) {}
-      }
-      markers.clear();
-      pluginMarkDisposed.delete(pluginId);
+    if (_SetHas(disposingPlugins, pluginId)) {
+      return true;
     }
-    const set = pluginDisposers.get(pluginId);
-    if (set) {
-      for (const fn of Array.from(set)) {
-        try {
-          fn();
-        } catch (err) {
-          reportPluginError(pluginId, err && err.message ? err.message : String(err));
+    _SetAdd(disposingPlugins, pluginId);
+    try {
+      // I10: Run registered onDispose callbacks BEFORE marking handle disposed so cleanup calls (e.g. removeStyle) succeed cleanly
+      const set = _MapGet(pluginDisposers, pluginId);
+      if (set) {
+        const fns = [];
+        _SetForEach(set, (fn) => {
+          _ArrayPush(fns, fn);
+        });
+        for (let i = 0; i < fns.length; i++) {
+          try {
+            fns[i]();
+          } catch (err) {
+            reportPluginError(pluginId, err && err.message ? err.message : _String(err));
+          }
         }
+        _SetClear(set);
+        _MapDelete(pluginDisposers, pluginId);
       }
-      set.clear();
-      pluginDisposers.delete(pluginId);
+      const markers = _MapGet(pluginMarkDisposed, pluginId);
+      if (markers) {
+        const marks = [];
+        _SetForEach(markers, (mark) => {
+          _ArrayPush(marks, mark);
+        });
+        for (let i = 0; i < marks.length; i++) {
+          try {
+            marks[i]();
+          } catch (_e) {}
+        }
+        _SetClear(markers);
+        _MapDelete(pluginMarkDisposed, pluginId);
+      }
+      if (slotManager) slotManager.disposePluginSlots(pluginId);
+      if (styleManager) styleManager.disposePluginStyles(pluginId);
+      if (modalPortal) modalPortal.disposePluginPortals(pluginId);
+      if (regionObserver) regionObserver.disposePluginObservers(pluginId);
+      if (settingsTabs) settingsTabs.disposePluginTabs(pluginId);
+      _MapDelete(pluginActions, pluginId);
+      _MapDelete(pluginTrustLevels, pluginId);
+      _SetDelete(pluginSettingsAllowed, pluginId);
+      _MapDelete(pluginSettingsSnapshots, pluginId);
+      const settingsSubs = _MapGet(pluginSettingsListeners, pluginId);
+      if (settingsSubs) {
+        _SetClear(settingsSubs);
+        _MapDelete(pluginSettingsListeners, pluginId);
+      }
+      return true;
+    } finally {
+      _SetDelete(disposingPlugins, pluginId);
     }
-    if (slotManager) slotManager.disposePluginSlots(pluginId);
-    if (styleManager) styleManager.disposePluginStyles(pluginId);
-    if (modalPortal) modalPortal.disposePluginPortals(pluginId);
-    if (regionObserver) regionObserver.disposePluginObservers(pluginId);
-    if (settingsTabs) settingsTabs.disposePluginTabs(pluginId);
-    pluginActions.delete(pluginId);
-    pluginSettingsAllowed.delete(pluginId);
-    pluginSettingsSnapshots.delete(pluginId);
-    const settingsSubs = pluginSettingsListeners.get(pluginId);
-    if (settingsSubs) {
-      settingsSubs.clear();
-      pluginSettingsListeners.delete(pluginId);
-    }
-    return true;
   }
 
   function disposePlugin(pluginId, token) {
@@ -1919,16 +2074,19 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   function createPluginHandle(pluginMeta, token, initialSettingsSnapshot = null) {
     assertHostToken(token);
     if (!booted) {
-      throw new Error('ERR_KERNEL_NOT_BOOTED');
+      throw new _Error('ERR_KERNEL_NOT_BOOTED');
     }
     const pluginId = pluginMeta.pluginId;
     const effectiveTrustLevel = pluginMeta.trustLevel || 'restricted';
-    const hasSettingsBridge = Boolean(pluginMeta.hasSettingsBridge && effectiveTrustLevel === 'trusted');
+    const hasSettingsBridge = !!(pluginMeta.hasSettingsBridge && effectiveTrustLevel === 'trusted');
     let disposed = false;
 
+    _MapSet(pluginTrustLevels, pluginId, effectiveTrustLevel);
+
     if (hasSettingsBridge) {
-      pluginSettingsAllowed.add(pluginId);
-      pluginSettingsSnapshots.set(
+      _SetAdd(pluginSettingsAllowed, pluginId);
+      _MapSet(
+        pluginSettingsSnapshots,
         pluginId,
         initialSettingsSnapshot && typeof initialSettingsSnapshot === 'object'
           ? deepFreezeClone(initialSettingsSnapshot)
@@ -1936,20 +2094,20 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       );
     }
 
-    let markers = pluginMarkDisposed.get(pluginId);
+    let markers = _MapGet(pluginMarkDisposed, pluginId);
     if (!markers) {
-      markers = new Set();
-      pluginMarkDisposed.set(pluginId, markers);
+      markers = new _Set();
+      _MapSet(pluginMarkDisposed, pluginId, markers);
     }
-    markers.add(() => {
+    _SetAdd(markers, () => {
       disposed = true;
     });
 
     const assertActive = () => {
-      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
+      if (disposed) throw new _Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
     };
 
-    const handle = Object.freeze({
+    const handle = _ObjectFreeze({
       pluginId,
       version: pluginMeta.version || '0.0.0',
       trustLevel: effectiveTrustLevel,
@@ -1999,42 +2157,51 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
       registerAction(actionId, spec = {}) {
         assertActive();
-        if (!actionId || typeof actionId !== 'string') throw new Error('ERR_INVALID_ACTION_ID');
-        let map = pluginActions.get(pluginId);
+        if (!actionId || typeof actionId !== 'string') throw new _Error('ERR_INVALID_ACTION_ID');
+        let map = _MapGet(pluginActions, pluginId);
         if (!map) {
-          map = new Map();
-          pluginActions.set(pluginId, map);
+          map = new _Map();
+          _MapSet(pluginActions, pluginId, map);
         }
         const entry = {
           pluginId,
           actionId,
-          label: String(spec.label || actionId),
+          label: _String(spec.label || actionId),
           run: typeof spec.run === 'function' ? spec.run : null,
         };
-        map.set(actionId, entry);
-        return Object.freeze({
+        _MapSet(map, actionId, entry);
+        return _ObjectFreeze({
           unregister() {
-            map.delete(actionId);
+            _MapDelete(map, actionId);
           },
         });
       },
 
       listActions() {
+        assertActive();
         const out = [];
-        for (const map of pluginActions.values()) {
-          for (const a of map.values()) {
-            out.push({ pluginId: a.pluginId, actionId: a.actionId, label: a.label });
-          }
-        }
+        _MapForEach(pluginActions, (map) => {
+          _MapForEach(map, (a) => {
+            const ownerTrust = _MapGet(pluginTrustLevels, a.pluginId) || 'restricted';
+            if (effectiveTrustLevel !== 'trusted' && ownerTrust === 'trusted' && a.pluginId !== pluginId) {
+              return;
+            }
+            _ArrayPush(out, { pluginId: a.pluginId, actionId: a.actionId, label: a.label });
+          });
+        });
         return out;
       },
 
       invokeAction(targetPluginId, actionId, ...args) {
         assertActive();
-        const map = pluginActions.get(targetPluginId);
-        const a = map && map.get(actionId);
-        if (!a || !a.run) throw new Error(`ERR_ACTION_NOT_FOUND:${targetPluginId}:${actionId}`);
-        return a.run(...args);
+        const targetTrust = _MapGet(pluginTrustLevels, targetPluginId) || 'restricted';
+        if (effectiveTrustLevel !== 'trusted' && targetTrust === 'trusted' && targetPluginId !== pluginId) {
+          throw new _Error(`ERR_ACTION_TRUST_FORBIDDEN:${targetPluginId}:${actionId}`);
+        }
+        const map = _MapGet(pluginActions, targetPluginId);
+        const a = map && _MapGet(map, actionId);
+        if (!a || !a.run) throw new _Error(`ERR_ACTION_NOT_FOUND:${targetPluginId}:${actionId}`);
+        return _ReflectApply(a.run, undefined, args);
       },
 
       isElementInsideIgnored(nodeOrEvent, opts = {}) {
@@ -2047,42 +2214,76 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       getSettings() {
         assertActive();
         if (!hasSettingsBridge) return null;
-        return pluginSettingsSnapshots.get(pluginId) || null;
+        return _MapGet(pluginSettingsSnapshots, pluginId) || null;
       },
 
       onSettingsChange(callback) {
         assertActive();
         if (typeof callback !== 'function') {
-          throw new Error('ERR_INVALID_SETTINGS_CALLBACK');
+          throw new _Error('ERR_INVALID_SETTINGS_CALLBACK');
         }
         if (!hasSettingsBridge) {
-          throw new Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
+          throw new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
         }
-        let subs = pluginSettingsListeners.get(pluginId);
+        let subs = _MapGet(pluginSettingsListeners, pluginId);
         if (!subs) {
-          subs = new Set();
-          pluginSettingsListeners.set(pluginId, subs);
+          subs = new _Set();
+          _MapSet(pluginSettingsListeners, pluginId, subs);
         }
-        subs.add(callback);
+        _SetAdd(subs, callback);
         return () => {
-          subs.delete(callback);
+          _SetDelete(subs, callback);
         };
+      },
+
+      saveSettings(nextData) {
+        assertActive();
+        if (!hasSettingsBridge) {
+          return _PromiseReject(new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED'));
+        }
+        if (!nextData || typeof nextData !== 'object' || _ArrayIsArray(nextData)) {
+          return _PromiseReject(new _Error('ERR_SETTINGS_MUST_BE_OBJECT'));
+        }
+        if (!hostBridge || typeof hostBridge.saveSettings !== 'function') {
+          return _PromiseReject(new _Error('ERR_SETTINGS_SAVE_UNAVAILABLE'));
+        }
+        let rawJson;
+        try {
+          const clean = sanitizeJsonPayload(nextData);
+          rawJson = _JSONStringify(clean);
+        } catch (err) {
+          return _PromiseReject(new _Error(err && err.message ? err.message : 'ERR_SETTINGS_INVALID_JSON'));
+        }
+        if (typeof rawJson !== 'string') {
+          return _PromiseReject(new _Error('ERR_SETTINGS_INVALID_JSON'));
+        }
+        return _PromiseResolve(hostBridge.saveSettings(pluginId, rawJson)).then((res) => {
+          if (res && res.ok === true && res.snapshot && typeof res.snapshot === 'object') {
+            const frozen = deepFreezeClone(res.snapshot);
+            return _ObjectFreeze({ ok: true, reason: null, snapshot: frozen });
+          }
+          return _ObjectFreeze({
+            ok: false,
+            reason: (res && res.reason) || 'ERR_SETTINGS_SAVE_FAILED',
+            snapshot: null,
+          });
+        });
       },
 
       addManagedListener(target, type, listener, opts) {
         assertActive();
         if (!target || typeof target.addEventListener !== 'function') {
-          throw new Error('ERR_INVALID_EVENT_TARGET');
+          throw new _Error('ERR_INVALID_EVENT_TARGET');
         }
         const safeListener = (ev) => {
           if (disposed) return;
           try {
             const ret = listener(ev);
             if (ret && typeof ret.then === 'function') {
-              ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : String(err)));
+              ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : _String(err)));
             }
           } catch (err) {
-            reportPluginError(pluginId, err && err.message ? err.message : String(err));
+            reportPluginError(pluginId, err && err.message ? err.message : _String(err));
           }
         };
         target.addEventListener(type, safeListener, opts);
@@ -2103,13 +2304,13 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
           const ret = fn();
           if (ret && typeof ret.then === 'function') {
             return ret.catch((err) => {
-              reportPluginError(pluginId, err && err.message ? err.message : String(err));
+              reportPluginError(pluginId, err && err.message ? err.message : _String(err));
               return undefined;
             });
           }
           return ret;
         } catch (err) {
-          reportPluginError(pluginId, err && err.message ? err.message : String(err));
+          reportPluginError(pluginId, err && err.message ? err.message : _String(err));
           return undefined;
         }
       },
@@ -2121,7 +2322,6 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
       dispose() {
         if (disposed) return;
-        disposed = true;
         disposePluginInternal(pluginId);
       },
     });
@@ -2133,7 +2333,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     assertHostToken(token);
     const handle = createPluginHandle(pluginMeta, token, initialSettingsSnapshot);
     const runNonce = generateRunNonce();
-    stagedHandles.set(runNonce, { pluginId: pluginMeta.pluginId, handle });
+    _MapSet(stagedHandles, runNonce, { pluginId: pluginMeta.pluginId, handle });
     return { ok: true, runNonce };
   }
 
@@ -2142,46 +2342,50 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     if (!booted) {
       return { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED', delivered: 0 };
     }
-    if (!pluginSettingsAllowed.has(pluginId)) {
+    if (!_SetHas(pluginSettingsAllowed, pluginId)) {
       return { ok: false, reason: 'ERR_SETTINGS_BRIDGE_NOT_BOUND', delivered: 0 };
     }
     const frozen = snapshot && typeof snapshot === 'object' ? deepFreezeClone(snapshot) : null;
-    pluginSettingsSnapshots.set(pluginId, frozen);
-    const subs = pluginSettingsListeners.get(pluginId);
-    if (!subs || subs.size === 0) {
+    _MapSet(pluginSettingsSnapshots, pluginId, frozen);
+    const subs = _MapGet(pluginSettingsListeners, pluginId);
+    if (!subs || _SetSize(subs) === 0) {
       return { ok: true, delivered: 0 };
     }
+    const cbs = [];
+    _SetForEach(subs, (cb) => {
+      _ArrayPush(cbs, cb);
+    });
     let delivered = 0;
-    for (const cb of Array.from(subs)) {
+    for (let i = 0; i < cbs.length; i++) {
       delivered += 1;
       try {
-        const ret = cb(frozen);
+        const ret = cbs[i](frozen);
         if (ret && typeof ret.then === 'function') {
-          ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : String(err)));
+          ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : _String(err)));
         }
       } catch (err) {
-        reportPluginError(pluginId, err && err.message ? err.message : String(err));
+        reportPluginError(pluginId, err && err.message ? err.message : _String(err));
       }
     }
     return { ok: true, delivered };
   }
 
   function consumeStagedHandle(runNonce) {
-    if (typeof runNonce !== 'string' || !stagedHandles.has(runNonce)) {
-      throw new Error('ERR_INVALID_OR_CONSUMED_RUN_NONCE');
+    if (typeof runNonce !== 'string' || !_MapHas(stagedHandles, runNonce)) {
+      throw new _Error('ERR_INVALID_OR_CONSUMED_RUN_NONCE');
     }
-    const entry = stagedHandles.get(runNonce);
-    stagedHandles.delete(runNonce);
+    const entry = _MapGet(stagedHandles, runNonce);
+    _MapDelete(stagedHandles, runNonce);
     return entry.handle;
   }
 
   function clearStagedHandle(runNonce, token) {
     assertHostToken(token);
     if (typeof runNonce !== 'string') return false;
-    return stagedHandles.delete(runNonce);
+    return _MapDelete(stagedHandles, runNonce);
   }
 
-  const api = Object.freeze({
+  const api = _ObjectFreeze({
     boot,
     createPluginHandle,
     stagePluginHandle,
@@ -2190,8 +2394,8 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     clearStagedHandle,
     disposePlugin,
     reportPluginError,
-    getErrors: () => recordedErrors.slice(),
-    getBridgeStatus: () => ({ booted, docGenId, hasBridge: Boolean(hostBridge) }),
+    getErrors: () => _ArraySlice(recordedErrors),
+    getBridgeStatus: () => ({ booted, docGenId, hasBridge: !!hostBridge }),
     listSettingsTabs: () => (settingsTabs ? settingsTabs.listTabs() : []),
   });
 

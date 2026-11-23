@@ -291,3 +291,358 @@ test('TC-V21-004: RendererKernel enforces hostToken auth, deep-frozen snapshots,
   kernel.disposePlugin('p-trusted', hostToken);
   assert.equal(kernel.pushPluginSettings('p-trusted', { status: 'ok', data: {}, revision: 4 }, hostToken).ok, false);
 });
+
+test('TC-V211-001 (I1): Multi-window readSnapshotForPlugin emits onSnapshotChange so Window 1 never starves', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-v211-i1-'));
+  try {
+    const cfgPath = path.join(tmpDir, 'multi_win.json');
+    fs.writeFileSync(cfgPath, '{"enabled":true,"provider":"google-translate"}', 'utf8');
+
+    const broadcasted = [];
+    const bridge = createSettingsBridge({
+      settingsDataDir: tmpDir,
+      debounceMs: 500, // Long debounce to deterministically simulate Window 2 joining BEFORE debounce fires
+      onSnapshotChange: (pluginId, snap) => broadcasted.push({ pluginId, snap }),
+    });
+
+    // Window 1 initial read establishes binding (no broadcast expected yet)
+    const w1Init = bridge.readSnapshotForPlugin('ko-thought-translator', { fileName: 'multi_win.json', maxBytes: 4096 });
+    assert.equal(w1Init.revision, 1);
+    assert.equal(w1Init.data.enabled, true);
+    assert.equal(broadcasted.length, 0);
+
+    // File changes while Window 1 is active, BEFORE fs.watch debounce fires
+    fs.writeFileSync(cfgPath, '{"enabled":false,"provider":"local-llm"}', 'utf8');
+
+    // Window 2 joins and calls readSnapshotForPlugin before debounce fires
+    const w2Init = bridge.readSnapshotForPlugin('ko-thought-translator', { fileName: 'multi_win.json', maxBytes: 4096 });
+    assert.equal(w2Init.revision, 2);
+    assert.equal(w2Init.data.enabled, false);
+
+    // I1 invariant: onSnapshotChange MUST have fired for Window 1 even though readSnapshotForPlugin advanced lastKey!
+    assert.equal(broadcasted.length, 1);
+    assert.equal(broadcasted[0].pluginId, 'ko-thought-translator');
+    assert.equal(broadcasted[0].snap.revision, 2);
+    assert.equal(broadcasted[0].snap.data.enabled, false);
+
+    // Subsequent debounce refreshNow() sees identical key -> zero duplicate broadcast
+    assert.equal(bridge.refreshNow(), 0);
+    assert.equal(broadcasted.length, 1);
+
+    bridge.dispose();
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-V211-002 (I2): Transient Windows EBUSY/EPERM lock retries gracefully and watcher auto-reconnects after error', async () => {
+  const { EventEmitter } = require('node:events');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-v211-i2-'));
+  try {
+    const cfgPath = path.join(tmpDir, 'lock_test.json');
+    fs.writeFileSync(cfgPath, '{"enabled":true,"provider":"local-llm"}', 'utf8');
+
+    let remainingLockFailures = 0;
+    let watchCalls = 0;
+    const watchers = [];
+    const fakeFs = {
+      existsSync: (p) => fs.existsSync(p),
+      lstatSync: (p) => fs.lstatSync(p),
+      realpathSync: (p) => fs.realpathSync(p),
+      fstatSync: (fd) => fs.fstatSync(fd),
+      readSync: (...a) => fs.readSync(...a),
+      closeSync: (fd) => fs.closeSync(fd),
+      openSync: (p, flags) => {
+        if (remainingLockFailures > 0) {
+          remainingLockFailures -= 1;
+          const err = new Error('EBUSY: resource busy or locked');
+          err.code = 'EBUSY';
+          throw err;
+        }
+        return fs.openSync(p, flags);
+      },
+      watch: (_dir, _opts, listener) => {
+        watchCalls += 1;
+        const w = new EventEmitter();
+        w.close = () => {
+          w.closed = true;
+        };
+        w.trigger = () => listener('change', 'lock_test.json');
+        watchers.push(w);
+        return w;
+      },
+    };
+
+    const events = [];
+    const bridge = createSettingsBridge({
+      settingsDataDir: tmpDir,
+      debounceMs: 15,
+      transientRetryDelaysMs: [15, 20],
+      postErrorRetryDelaysMs: [25],
+      watcherReconnectBaseMs: 20,
+      watcherReconnectMaxMs: 40,
+      fsImpl: fakeFs,
+      onSnapshotChange: (pluginId, snap) => events.push({ pluginId, snap }),
+    });
+
+    const init = bridge.readSnapshotForPlugin('p-lock', { fileName: 'lock_test.json', maxBytes: 4096 });
+    assert.equal(init.status, 'ok');
+    assert.equal(watchCalls, 1);
+
+    // 1. Transient lock (1 EBUSY then succeeds on retry) -> MUST NOT trip Fail-Closed!
+    fs.writeFileSync(cfgPath, '{"enabled":false,"provider":"local-llm"}', 'utf8');
+    remainingLockFailures = 1;
+    assert.equal(bridge.refreshNow(), 0, 'Transient lock deferred during grace retry');
+    assert.equal(events.length, 0, 'Must not immediately emit error on 1st EBUSY');
+
+    await new Promise((r) => setTimeout(r, 70));
+    assert.equal(events.length, 1);
+    assert.equal(events[0].snap.status, 'ok');
+    assert.equal(events[0].snap.data.enabled, false);
+
+    // 2. Sustained lock exceeding grace retries (3 EBUSY) -> MUST Fail-Closed, then self-heal on post-error recheck!
+    remainingLockFailures = 3;
+    bridge.refreshNow();
+    await new Promise((r) => setTimeout(r, 140));
+    assert.ok(events.some((e) => e.snap.status === 'error' && e.snap.reason === 'ERR_SETTINGS_READ_FAILED'));
+    assert.equal(events[events.length - 1].snap.status, 'ok', 'Self-healed back to ok once lock cleared');
+
+    // 3. Watcher emits error -> MUST close and auto-reconnect + refresh missed edits
+    fs.writeFileSync(cfgPath, '{"enabled":true,"provider":"google-translate"}', 'utf8');
+    watchers[0].emit('error', new Error('EPERM watch handle lost'));
+    assert.equal(bridge.getStatus().watcherActive, false);
+    assert.equal(bridge.getStatus().watcherReconnectPending, true);
+
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(watchCalls, 2, 'Watcher must reconnect automatically after error');
+    assert.equal(bridge.getStatus().watcherActive, true);
+    assert.equal(events[events.length - 1].snap.data.provider, 'google-translate');
+
+    bridge.dispose();
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-V211-003 (I4 + I10): Kernel resists World 998 prototype tampering, gates invokeAction by trustLevel, and runs onDispose before marking disposed', () => {
+  const removedStyles = [];
+  const fakeDoc = {
+    head: { appendChild() {} },
+    body: { appendChild() {} },
+    documentElement: null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: () => ({
+      id: '',
+      textContent: '',
+      setAttribute() {},
+      remove() {
+        removedStyles.push(this.id);
+      },
+    }),
+  };
+  const kernel = createRendererKernel(fakeDoc, {});
+  const hostToken = 'fedcba9876543210fedcba9876543210';
+  assert.equal(kernel.boot({ docGenId: 1, hostToken }).ok, true);
+
+  // Register trusted plugin + action + onDispose calling removeStyle (I10)
+  const trustedStage = kernel.stagePluginHandle(
+    { pluginId: 'p-trusted', trustLevel: 'trusted', hasSettingsBridge: true },
+    hostToken,
+    { status: 'ok', data: { enabled: true, provider: 'local-llm' }, revision: 1 }
+  );
+  const trustedHandle = kernel.consumeStagedHandle(trustedStage.runNonce);
+  let trustedActionRuns = 0;
+  trustedHandle.registerAction('secret-op', {
+    label: 'Secret Op',
+    run: () => {
+      trustedActionRuns += 1;
+      return 'SECRET_OK';
+    },
+  });
+  trustedHandle.injectStyle('s-own', '[data-addon-host-owner="p-trusted"][data-addon-host-slot="main"] { color: red; }');
+  let onDisposeError = null;
+  trustedHandle.onDispose(() => {
+    try {
+      trustedHandle.removeStyle('s-own');
+    } catch (err) {
+      onDisposeError = err;
+    }
+  });
+
+  // Register restricted plugin
+  const restrictedStage = kernel.stagePluginHandle(
+    { pluginId: 'p-restricted', trustLevel: 'restricted', hasSettingsBridge: false },
+    hostToken,
+    null
+  );
+  const restrictedHandle = kernel.consumeStagedHandle(restrictedStage.runNonce);
+  restrictedHandle.registerAction('public-op', {
+    label: 'Public Op',
+    run: () => 'PUBLIC_OK',
+  });
+
+  // I4: restricted plugin cannot list or invoke trusted plugin actions
+  const restrictedList = restrictedHandle.listActions();
+  assert.equal(restrictedList.some((a) => a.pluginId === 'p-trusted'), false);
+  assert.equal(restrictedList.some((a) => a.pluginId === 'p-restricted'), true);
+  assert.throws(
+    () => restrictedHandle.invokeAction('p-trusted', 'secret-op'),
+    /ERR_ACTION_TRUST_FORBIDDEN/
+  );
+  assert.equal(trustedActionRuns, 0);
+
+  // Trusted plugin CAN still invoke restricted plugin actions and its own actions
+  assert.equal(trustedHandle.invokeAction('p-restricted', 'public-op'), 'PUBLIC_OK');
+  assert.equal(trustedHandle.invokeAction('p-trusted', 'secret-op'), 'SECRET_OK');
+
+  // I4 (F-I4-1 + F-I4-2 + Iterator/Global): Prototype, Iterator, Object.freeze, Set.size & Boolean tampering MUST NOT hijack kernel
+  const origMapGet = Map.prototype.get;
+  const origMapSet = Map.prototype.set;
+  const origObjFreeze = Object.freeze;
+  const origObjKeys = Object.keys;
+  const origSetSizeDesc = Object.getOwnPropertyDescriptor(Set.prototype, 'size');
+  const origArrIter = Array.prototype[Symbol.iterator];
+  const origArrPush = Array.prototype.push;
+  const setIterProto = Object.getPrototypeOf(new Set().values());
+  const mapIterProto = Object.getPrototypeOf(new Map().values());
+  const origSetIterNext = setIterProto.next;
+  const origMapIterNext = mapIterProto.next;
+  const origBoolean = globalThis.Boolean;
+  let hijackAttempts = 0;
+  let stolenHandle = null;
+  let lastPushedRev = null;
+  let pushCount = 0;
+  trustedHandle.onSettingsChange((s) => {
+    pushCount += 1;
+    lastPushedRev = s.revision;
+  });
+  try {
+    Map.prototype.get = function () {
+      hijackAttempts += 1;
+      return undefined;
+    };
+    Map.prototype.set = function () {
+      hijackAttempts += 1;
+      return this;
+    };
+    Object.freeze = (o) => {
+      hijackAttempts += 1;
+      if (o && typeof o === 'object' && o.pluginId === 'p-trusted-late') {
+        stolenHandle = o;
+      }
+      return o;
+    };
+    Object.keys = () => {
+      hijackAttempts += 1;
+      return [];
+    };
+    Object.defineProperty(Set.prototype, 'size', {
+      configurable: true,
+      get() {
+        hijackAttempts += 1;
+        return 0;
+      },
+    });
+    Array.prototype[Symbol.iterator] = function () {
+      hijackAttempts += 1;
+      return { next: () => ({ done: true, value: undefined }) };
+    };
+    Array.prototype.push = function () {
+      hijackAttempts += 1;
+      return 0;
+    };
+    setIterProto.next = function () {
+      hijackAttempts += 1;
+      return { done: true, value: undefined };
+    };
+    mapIterProto.next = function () {
+      hijackAttempts += 1;
+      return { done: true, value: undefined };
+    };
+    globalThis.Boolean = () => {
+      hijackAttempts += 1;
+      return false;
+    };
+
+    // F-I4-1 + Boolean tamper: Late-staged trusted handle MUST keep hasSettingsBridge:true and NOT leak via Object.freeze
+    const lateStage = kernel.stagePluginHandle(
+      { pluginId: 'p-trusted-late', trustLevel: 'trusted', hasSettingsBridge: true },
+      hostToken,
+      { status: 'ok', data: { enabled: true, provider: 'local-llm' }, revision: 1 }
+    );
+    const lateHandle = kernel.consumeStagedHandle(lateStage.runNonce);
+    assert.equal(stolenHandle, null, 'F-I4-1: hooked Object.freeze must not steal trusted handle');
+    assert.equal(lateHandle.hasSettingsBridge, true, 'globalThis.Boolean tamper must not disable hasSettingsBridge');
+    assert.equal(Object.isFrozen(lateHandle), true);
+
+    // listActions & invokeAction MUST resist MapIterator/Array.prototype[Symbol.iterator]/Array.prototype.push tamper
+    const actionsUnderTamper = trustedHandle.listActions();
+    assert.equal(actionsUnderTamper.length, 2);
+    assert.equal(trustedHandle.invokeAction('p-restricted', 'public-op', 'arg1'), 'PUBLIC_OK');
+
+    // F-I4-2 + SetIterator/ArrayIterator tamper: pushPluginSettings MUST deliver despite Set.size & iterator tamper
+    const pushRes = kernel.pushPluginSettings(
+      'p-trusted',
+      { status: 'ok', data: { enabled: false, provider: 'local-llm' }, revision: 2 },
+      hostToken
+    );
+    assert.equal(pushRes.ok, true);
+    assert.equal(pushRes.delivered, 1, 'F-I4-2: pushPluginSettings must deliver despite Set.size & iterator tamper');
+    assert.equal(pushCount, 1);
+    assert.equal(lastPushedRev, 2);
+    const snap = trustedHandle.getSettings();
+    assert.equal(snap.revision, 2);
+    assert.equal(snap.data.enabled, false);
+    assert.equal(Object.isFrozen(snap.data), true);
+    assert.equal(hijackAttempts, 0, 'Kernel must use captured primordials, zero tampered prototype/iterator calls');
+  } finally {
+    Map.prototype.get = origMapGet;
+    Map.prototype.set = origMapSet;
+    Object.freeze = origObjFreeze;
+    Object.keys = origObjKeys;
+    if (origSetSizeDesc) Object.defineProperty(Set.prototype, 'size', origSetSizeDesc);
+    Array.prototype[Symbol.iterator] = origArrIter;
+    Array.prototype.push = origArrPush;
+    setIterProto.next = origSetIterNext;
+    mapIterProto.next = origMapIterNext;
+    globalThis.Boolean = origBoolean;
+    kernel.disposePlugin('p-trusted-late', hostToken);
+  }
+
+  // I10: disposePlugin runs onDispose BEFORE marking handle disposed so removeStyle succeeds cleanly
+  kernel.disposePlugin('p-trusted', hostToken);
+  assert.equal(onDisposeError, null, 'removeStyle inside onDispose must not throw ERR_PLUGIN_HANDLE_DISPOSED');
+  assert.throws(() => trustedHandle.listActions(), /ERR_PLUGIN_HANDLE_DISPOSED/);
+});
+
+test('TC-V211-004 (I10): style-manager preserves [attr] ownerPrefix and host-loader-builder emits dynamic version comment', () => {
+  const { scopeCssToOwner } = require('../../src/runtime/renderer/style-manager');
+  const { buildHostLoaderScriptSource } = require('../../src/adapters/electron/host-loader-builder');
+  const { ANTIGRAVITY_HOST_PROFILE } = require('../../src/profiles/antigravity');
+
+  const scoped = scopeCssToOwner(
+    'ko-thought-translator',
+    '[data-addon-host-owner="ko-thought-translator"][data-addon-host-slot="main"] { color: green; }'
+  );
+  assert.equal(
+    scoped.includes('[data-addon-host-owner="ko-thought-translator"] [data-addon-host-owner="ko-thought-translator"]'),
+    false,
+    'Owner-prefixed attribute selector must not be double-prefixed'
+  );
+
+  const shim = buildHostLoaderScriptSource(
+    {
+      ADDONS_DIR: '/tmp/addons.d',
+      PLUGINS_ROOT_DIR: '/tmp/plugins',
+      CONFIG_JSON_PATH: '/tmp/config.json',
+      TRUST_POLICY_PATH: '/tmp/trust-policy.json',
+    },
+    ANTIGRAVITY_HOST_PROFILE,
+    {
+      hostVersion: '2.1.1',
+      buildSha8: '12345678',
+    }
+  );
+  assert.match(shim, /Auto-generated thin v2\.1\.1 entry shim/);
+});

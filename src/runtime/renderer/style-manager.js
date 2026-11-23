@@ -716,7 +716,15 @@ function scopeCssToOwner(cssText, pluginId) {
         if (!trimmed) return '';
         if (trimmed.startsWith(':host')) return trimmed;
         // Only treat exact leading ownerPrefix as already rooted (NEVER `includes(ownerPrefix)` which allows `body:not([owner])`)
-        if (trimmed === ownerPrefix || trimmed.startsWith(`${ownerPrefix} `) || trimmed.startsWith(`${ownerPrefix}>`) || trimmed.startsWith(`${ownerPrefix}.`) || trimmed.startsWith(`${ownerPrefix}#`) || trimmed.startsWith(`${ownerPrefix}:`)) {
+        if (
+          trimmed === ownerPrefix ||
+          trimmed.startsWith(`${ownerPrefix} `) ||
+          trimmed.startsWith(`${ownerPrefix}>`) ||
+          trimmed.startsWith(`${ownerPrefix}.`) ||
+          trimmed.startsWith(`${ownerPrefix}#`) ||
+          trimmed.startsWith(`${ownerPrefix}:`) ||
+          trimmed.startsWith(`${ownerPrefix}[`)
+        ) {
           return trimmed;
         }
         if (/^(?:html|body|:root)(?![a-z0-9_-])/i.test(trimmed)) {

@@ -23,6 +23,7 @@ const BOOTSTRAP_GLOBAL_NAME = '__addonHostBootstrap';
 const IPC_VERIFY_FRAME = 'addon-host:v2:verify-frame';
 const IPC_CLAIM_NONCE = 'addon-host:v2:claim-nonce';
 const IPC_PORTAL_CLAIM = 'addon-host:v2:portal-claim';
+const IPC_SAVE_SETTINGS = 'addon-host:v2:save-settings';
 const IPC_REPORT_ERROR = 'addon-host:v2:report-error';
 const IPC_PING = 'addon-host:v2:ping';
 
@@ -67,6 +68,13 @@ try {
             docGenId,
             claimId: String(claimId || ''),
             active: Boolean(active),
+          });
+        },
+        saveSettings(pluginId, rawJson) {
+          return ipcRenderer.invoke(IPC_SAVE_SETTINGS, {
+            docGenId,
+            pluginId: String(pluginId || ''),
+            rawJson: typeof rawJson === 'string' ? rawJson : '',
           });
         },
         reportError(pluginId, detail) {
