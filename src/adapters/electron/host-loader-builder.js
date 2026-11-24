@@ -124,7 +124,8 @@ function compactUiSurfacesForShim(uiSurfaces, uiAnchors) {
 
 function serializeDeduplicatedConfigJs(obj) {
   const raw = serializeSafeInlineJson(obj);
-  const defs = [];
+  const arrBindings = [];
+  const baseDefs = [];
   let expr = raw;
 
   // 1. Deduplicate repeated non-trivial string-array literals (e.g. selector lists shared across surfaces)
@@ -141,7 +142,7 @@ function serializeDeduplicatedConfigJs(obj) {
     if (count < 2) continue;
     const varName = `_A${idx}`;
     idx += 1;
-    defs.push(`const ${varName} = ${literal};`);
+    arrBindings.push(`${varName}=${literal}`);
     expr = expr.split(literal).join(varName);
   }
 
@@ -187,12 +188,40 @@ function serializeDeduplicatedConfigJs(obj) {
       } catch (_e) {}
     }
     if (replacements.length >= 3) {
-      defs.push(`const _B = ${serializeSafeInlineJson(bestPrefix)};`);
+      baseDefs.push(`const _B = ${serializeSafeInlineJson(bestPrefix)};`);
       for (const [lit, rep] of replacements) {
         expr = expr.split(lit).join(rep);
       }
     }
   }
+
+  // 3. Deduplicate repeated non-key string value literals shared across defs & expr (e.g. uiAnchors & uiSurfaces selectors)
+  const valCounts = new Map();
+  const valRe = /"(?:\\.|[^"\\]){14,}"(?!\s*:)/g;
+  const scanTarget = arrBindings.join(',') + '\n' + expr;
+  while ((m = valRe.exec(scanTarget)) !== null) {
+    valCounts.set(m[0], (valCounts.get(m[0]) || 0) + 1);
+  }
+  const strBindings = [];
+  let sIdx = 0;
+  for (const [literal, count] of valCounts.entries()) {
+    if (count < 2) continue;
+    const varName = `_S${sIdx}`;
+    const bindingOverhead = sIdx === 0 ? 8 + varName.length : 2 + varName.length;
+    const savings = count * literal.length - (literal.length + bindingOverhead + count * varName.length);
+    if (savings < 4) continue;
+    sIdx += 1;
+    strBindings.push(`${varName}=${literal}`);
+    for (let i = 0; i < arrBindings.length; i += 1) {
+      arrBindings[i] = arrBindings[i].split(literal).join(varName);
+    }
+    expr = expr.split(literal).join(varName);
+  }
+
+  const defs = [];
+  if (strBindings.length > 0) defs.push(`const ${strBindings.join(',')};`);
+  if (arrBindings.length > 0) defs.push(`const ${arrBindings.join(',')};`);
+  if (baseDefs.length > 0) defs.push(...baseDefs);
 
   return { defs, expr };
 }
@@ -201,7 +230,7 @@ function buildHostLoaderScriptSource(
   paths,
   profile,
   {
-    hostVersion = '2.5.1',
+    hostVersion = '2.5.2',
     strictTrustPolicy = true,
     mainHookTimeoutMs = 5000,
     rendererExecTimeoutMs = 10000,

@@ -1211,7 +1211,9 @@ module.exports = {
  *   1. Direct visible container matching `selectors` (`source: 'selector'`).
  *   2. Viewport minus visible edge chrome matching `exclude{Left,Right,Top,Bottom}Selectors`
  *      (`source: 'chrome-subtracted'`).
- *   3. Safe viewport fallback (`source: 'viewport'`).
+ *   3. Optional caller-provided `anchorEl` nearest inset content-pane ancestor
+ *      (`source: 'anchor-container'`).
+ *   4. Safe viewport fallback (`source: 'viewport'`).
  * - Always returns finite, viewport-clamped, deep-frozen coordinates including `centerX`,
  *   `centerY`, bounding box (`left/top/right/bottom/width/height`), and CSS fixed insets
  *   (`insetLeft/insetTop/insetRight/insetBottom`).
@@ -1563,7 +1565,44 @@ function createSurfaceGeometry(doc, win, { uiSurfaces = {}, uiAnchors = {} } = {
     return { left, top, right, bottom };
   }
 
-  function getActiveSurface() {
+  function measureByAnchorContainer(anchorEl, safeRect, vw, vh) {
+    if (!anchorEl || typeof anchorEl !== 'object' || vw <= 0 || vh <= 0) return null;
+    if (anchorEl.isConnected === false || isInsideAddonPortal(anchorEl)) return null;
+    const minWidth = _MathMin(240, vw * 0.25);
+    const minHeight = _MathMin(240, vh * 0.45);
+    const bodyEl = doc && doc.body ? doc.body : null;
+    const docEl = doc && doc.documentElement ? doc.documentElement : null;
+
+    let best = null;
+    let bestArea = 0;
+    let cur = anchorEl.parentNode;
+    let guard = 0;
+    while (cur && guard < 32) {
+      guard += 1;
+      if (cur === bodyEl || cur === docEl) break;
+      const r = readVisibleRect(cur);
+      if (r) {
+        const left = _MathMax(safeRect.left, r.left);
+        const top = _MathMax(safeRect.top, r.top);
+        const right = _MathMin(safeRect.right, r.right);
+        const bottom = _MathMin(safeRect.bottom, r.bottom);
+        const w = right - left;
+        const h = bottom - top;
+        const isHorizontallyInset = left >= safeRect.left + 16 || right <= safeRect.right - 16;
+        if (w >= minWidth && h >= minHeight && w < vw - 16 && isHorizontallyInset) {
+          const area = w * h;
+          if (area >= bestArea) {
+            bestArea = area;
+            best = { left, top, right, bottom };
+          }
+        }
+      }
+      cur = cur.parentNode;
+    }
+    return best;
+  }
+
+  function getActiveSurface(anchorEl = null) {
     const { width: vw, height: vh } = getViewportSize();
 
     // Pass 1: highest-priority direct selector match wins
@@ -1610,6 +1649,26 @@ function createSurfaceGeometry(doc, win, { uiSurfaces = {}, uiAnchors = {} } = {
       }
     }
 
+    // Pass 3: caller-supplied anchor element ancestor pane fallback
+    if (anchorEl) {
+      const fallbackSafeRect = computeSafeViewportRect(defaultSafeInsets, vw, vh);
+      const anchorRect = measureByAnchorContainer(anchorEl, fallbackSafeRect, vw, vh);
+      if (anchorRect) {
+        return buildBoundsDto({
+          surfaceId: 'viewport',
+          requestedSurfaceId: 'auto',
+          matched: true,
+          source: 'anchor-container',
+          left: anchorRect.left,
+          top: anchorRect.top,
+          right: anchorRect.right,
+          bottom: anchorRect.bottom,
+          vw,
+          vh,
+        });
+      }
+    }
+
     const fallbackRect = computeSafeViewportRect(defaultSafeInsets, vw, vh);
     return buildBoundsDto({
       surfaceId: 'viewport',
@@ -1627,14 +1686,20 @@ function createSurfaceGeometry(doc, win, { uiSurfaces = {}, uiAnchors = {} } = {
 
   function getSurfaceBounds(surfaceIdOrOpts) {
     let requested = 'auto';
+    let anchorEl = null;
     if (typeof surfaceIdOrOpts === 'string' && surfaceIdOrOpts.trim()) {
       requested = surfaceIdOrOpts.trim();
-    } else if (surfaceIdOrOpts && typeof surfaceIdOrOpts === 'object' && typeof surfaceIdOrOpts.surface === 'string' && surfaceIdOrOpts.surface.trim()) {
-      requested = surfaceIdOrOpts.surface.trim();
+    } else if (surfaceIdOrOpts && typeof surfaceIdOrOpts === 'object') {
+      if (typeof surfaceIdOrOpts.surface === 'string' && surfaceIdOrOpts.surface.trim()) {
+        requested = surfaceIdOrOpts.surface.trim();
+      }
+      if (surfaceIdOrOpts.anchorEl && typeof surfaceIdOrOpts.anchorEl === 'object') {
+        anchorEl = surfaceIdOrOpts.anchorEl;
+      }
     }
 
     if (requested === 'auto' || requested === 'active') {
-      return getActiveSurface();
+      return getActiveSurface(anchorEl);
     }
 
     const { width: vw, height: vh } = getViewportSize();
@@ -1684,6 +1749,21 @@ function createSurfaceGeometry(doc, win, { uiSurfaces = {}, uiAnchors = {} } = {
           top: chromeRect.top,
           right: chromeRect.right,
           bottom: chromeRect.bottom,
+          vw,
+          vh,
+        });
+      }
+      const anchorRect = measureByAnchorContainer(anchorEl, safeRect, vw, vh);
+      if (anchorRect) {
+        return buildBoundsDto({
+          surfaceId: requested,
+          requestedSurfaceId: requested,
+          matched: true,
+          source: 'anchor-container',
+          left: anchorRect.left,
+          top: anchorRect.top,
+          right: anchorRect.right,
+          bottom: anchorRect.bottom,
           vw,
           vh,
         });
@@ -2019,13 +2099,18 @@ function createModalPortal(
           ? 'auto'
           : null;
 
-    const applySurfaceBounds = (targetSurface) => {
+    const applySurfaceBounds = (targetSurface, anchorEl = null) => {
       if (!surfaceGeometry || typeof surfaceGeometry.getSurfaceBounds !== 'function') {
         return null;
       }
-      const bounds = surfaceGeometry.getSurfaceBounds(targetSurface || 'auto');
+      const queryArg = anchorEl ? { surface: targetSurface || 'auto', anchorEl } : targetSurface || 'auto';
+      const bounds = surfaceGeometry.getSurfaceBounds(queryArg);
       if (bounds && dlg.style) {
         dlg.setAttribute('data-addon-host-modal-surface', bounds.surfaceId);
+        if (typeof bounds.source === 'string' && bounds.source) {
+          dlg.setAttribute('data-addon-host-modal-surface-source', bounds.source);
+        }
+        dlg.setAttribute('data-addon-host-modal-surface-matched', bounds.matched ? 'true' : 'false');
         if (bounds.viewport && bounds.viewport.width > 0 && bounds.viewport.height > 0) {
           dlg.style.position = 'fixed';
           dlg.style.inset = '';
@@ -2051,17 +2136,18 @@ function createModalPortal(
       shadowRoot,
       prevFocus,
       surfaceTarget: requestedSurface,
+      anchorEl: opts.anchorEl && typeof opts.anchorEl === 'object' ? opts.anchorEl : null,
       onResizeCleanup: null,
       ignoreOutsideClickEls: Array.isArray(opts.ignoreOutsideClickEls) ? opts.ignoreOutsideClickEls : [],
       onClose: opts.onClose || null,
     };
 
     if (requestedSurface && surfaceGeometry) {
-      applySurfaceBounds(requestedSurface);
+      applySurfaceBounds(requestedSurface, entry.anchorEl);
       if (win && typeof win.addEventListener === 'function') {
         const handleResize = () => {
           if (entry.closing || !stack.includes(entry)) return;
-          applySurfaceBounds(entry.surfaceTarget);
+          applySurfaceBounds(entry.surfaceTarget, entry.anchorEl);
         };
         win.addEventListener('resize', handleResize);
         entry.onResizeCleanup = () => {
@@ -2102,10 +2188,17 @@ function createModalPortal(
         if (entry.closing || !stack.includes(entry)) return null;
         if (typeof nextSurface === 'string' && nextSurface.trim()) {
           entry.surfaceTarget = nextSurface.trim();
+        } else if (nextSurface && typeof nextSurface === 'object') {
+          if (typeof nextSurface.surface === 'string' && nextSurface.surface.trim()) {
+            entry.surfaceTarget = nextSurface.surface.trim();
+          }
+          if (nextSurface.anchorEl !== undefined) {
+            entry.anchorEl = nextSurface.anchorEl && typeof nextSurface.anchorEl === 'object' ? nextSurface.anchorEl : null;
+          }
         } else if (!entry.surfaceTarget) {
           entry.surfaceTarget = 'auto';
         }
-        return applySurfaceBounds(entry.surfaceTarget);
+        return applySurfaceBounds(entry.surfaceTarget, entry.anchorEl);
       },
     });
   }
