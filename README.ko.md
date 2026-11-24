@@ -1,9 +1,10 @@
-# antigravity-native-addon-host
+# antigravity-addons
 
-[![CI](https://github.com/jaeseongs95/antigravity-native-addon-host/actions/workflows/ci.yml/badge.svg)](https://github.com/jaeseongs95/antigravity-native-addon-host/actions/workflows/ci.yml)
+[![CI](https://github.com/jaeseongs95/antigravity-addons/actions/workflows/ci.yml/badge.svg)](https://github.com/jaeseongs95/antigravity-addons/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
-> **언어**: [English (README.md)](./README.md) | 한국어
+> **언어**: [English (README.md)](./README.md) | 한국어  
+> *(구 `antigravity-native-addon-host` — 기존 `addon-host` CLI 명령, `ADDON_HOST_LOADER_V2` 패치 마커 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
 **내장 설정 화면 `애드온 관리(Addon Manager)` UI, 무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Remote Web 호스트 통합, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.5.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
 

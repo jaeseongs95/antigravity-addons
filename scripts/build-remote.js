@@ -183,7 +183,7 @@ function buildUserscriptSource(runtimeSource, { profile = ANTIGRAVITY_REMOTE_WEB
   const header = [
     '// ==UserScript==',
     `// @name         ${browserProfile.displayName} Addon Host`,
-    `// @namespace    https://github.com/jaeseongs95/antigravity-native-addon-host`,
+    `// @namespace    https://github.com/jaeseongs95/antigravity-addons`,
     `// @version      ${version}`,
     `// @description  Unified AddonManifest.v2 renderer addon host for ${browserProfile.displayName}`,
     ...matchLines,

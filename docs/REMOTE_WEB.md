@@ -2,7 +2,7 @@
 
 [한국어 문서 (Korean)](./REMOTE_WEB.ko.md)
 
-`antigravity-native-addon-host` v2.3.0 introduces a unified **Remote Web Host** profile (`antigravity-remote-web`) and browser adapter (`src/adapters/remote-web/`) built directly on top of the shared renderer kernel (`src/runtime/renderer/kernel.js`) and `HostBridgePort` contract.
+`antigravity-addons` (formerly `antigravity-native-addon-host`) v2.3.0+ introduces a unified **Remote Web Host** profile (`antigravity-remote-web`) and browser adapter (`src/adapters/remote-web/`) built directly on top of the shared renderer kernel (`src/runtime/renderer/kernel.js`) and `HostBridgePort` contract.
 
 Any compliant `AddonManifest.v2` renderer plugin built for `antigravity-desktop` runs automatically on Antigravity Remote Web (`https://antigravity.google.com/*`) without requiring a separate remote-only plugin API.
 
