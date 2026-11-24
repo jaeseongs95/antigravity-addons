@@ -124,8 +124,11 @@ function compactUiSurfacesForShim(uiSurfaces, uiAnchors) {
 
 function serializeDeduplicatedConfigJs(obj) {
   const raw = serializeSafeInlineJson(obj);
+  const defs = [];
+  let expr = raw;
+
+  // 1. Deduplicate repeated non-trivial string-array literals (e.g. selector lists shared across surfaces)
   const counts = new Map();
-  // Deduplicate repeated non-trivial string-array literals (e.g. selector lists shared across surfaces)
   const arrRe = /\["(?:\\.|[^"\\]){4,}"(?:,"(?:\\.|[^"\\]){1,}")*\]/g;
   let m;
   while ((m = arrRe.exec(raw)) !== null) {
@@ -133,8 +136,6 @@ function serializeDeduplicatedConfigJs(obj) {
       counts.set(m[0], (counts.get(m[0]) || 0) + 1);
     }
   }
-  const defs = [];
-  let expr = raw;
   let idx = 0;
   for (const [literal, count] of counts.entries()) {
     if (count < 2) continue;
@@ -143,6 +144,56 @@ function serializeDeduplicatedConfigJs(obj) {
     defs.push(`const ${varName} = ${literal};`);
     expr = expr.split(literal).join(varName);
   }
+
+  // 2. Deduplicate a shared base directory prefix repeated across 3+ path values (e.g. long Windows/CI temp paths)
+  const dirPrefixCounts = new Map();
+  const strRe = /"(?:\\.|[^"\\]){20,}"/g;
+  const matchedStrings = [];
+  while ((m = strRe.exec(expr)) !== null) {
+    matchedStrings.push(m[0]);
+    try {
+      const val = JSON.parse(m[0]);
+      if (typeof val === 'string' && (val.includes('\\') || val.startsWith('/'))) {
+        const sep = val.includes('\\') ? '\\' : '/';
+        const lastSep = val.lastIndexOf(sep);
+        if (lastSep >= 16) {
+          const dirPrefix = val.slice(0, lastSep);
+          dirPrefixCounts.set(dirPrefix, (dirPrefixCounts.get(dirPrefix) || 0) + 1);
+        }
+      }
+    } catch (_e) {}
+  }
+  let bestPrefix = null;
+  let bestSavings = 0;
+  for (const [prefix, count] of dirPrefixCounts.entries()) {
+    if (count < 3) continue;
+    const savings = count * prefix.length - (prefix.length + 20);
+    if (savings > bestSavings) {
+      bestSavings = savings;
+      bestPrefix = prefix;
+    }
+  }
+  if (bestPrefix && bestSavings >= 40) {
+    const uniqueMatches = Array.from(new Set(matchedStrings));
+    const replacements = [];
+    for (const lit of uniqueMatches) {
+      try {
+        const val = JSON.parse(lit);
+        if (typeof val === 'string' && val.startsWith(bestPrefix)) {
+          const rest = val.slice(bestPrefix.length);
+          const rep = rest.length === 0 ? '_B' : `_B+${serializeSafeInlineJson(rest)}`;
+          replacements.push([lit, rep]);
+        }
+      } catch (_e) {}
+    }
+    if (replacements.length >= 3) {
+      defs.push(`const _B = ${serializeSafeInlineJson(bestPrefix)};`);
+      for (const [lit, rep] of replacements) {
+        expr = expr.split(lit).join(rep);
+      }
+    }
+  }
+
   return { defs, expr };
 }
 

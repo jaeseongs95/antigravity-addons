@@ -638,6 +638,21 @@ test('TC-V25-005: Consumer addonHost handle never exposes host admin methods; lo
   assert.match(shimSource, /"remoteProfileId":"antigravity-remote-web"/);
   assert.match(shimSource, /"remotePrefsPath":/);
   assert.match(shimSource, /"remoteDistDir":/);
+
+  // Long Windows CI temp paths must remain strictly under the 4096-byte thin-shim cap
+  const longWinBase = 'C:\\Users\\runneradmin\\AppData\\Local\\Temp\\addon-host-v2-tc008-long-ci-runner-dir-999999';
+  const longShim = buildHostLoaderScriptSource(
+    {
+      ADDONS_DIR: `${longWinBase}\\addons.d`,
+      PLUGINS_ROOT_DIR: `${longWinBase}\\plugins`,
+      CONFIG_JSON_PATH: `${longWinBase}\\config.json`,
+      TRUST_POLICY_PATH: `${longWinBase}\\trust-policy.json`,
+    },
+    ANTIGRAVITY_HOST_PROFILE,
+    { hostVersion: '2.5.0', buildSha8: 'testsha8' }
+  );
+  assert.equal(longShim.length < 4096, true, `Long-path shim exceeded 4096 bytes: ${longShim.length}`);
+  assert.match(longShim, /const _B = /);
 });
 
 test('TC-V25-006: Built-in host-settings-ui mounts Korean Settings tab, toggles Remote Web, and coexists with peer tabs', async () => {
