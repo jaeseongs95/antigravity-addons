@@ -620,15 +620,20 @@ async function bootRemoteWebHost({
   kernelState.docGenId = docGenId;
   kernelState.profileId = profile.id;
 
+  const safeExtraNoTranslateAttributes = Array.isArray(profile.extraNoTranslateAttributes)
+    ? profile.extraNoTranslateAttributes
+        .map((attr) => (typeof attr === 'string' ? attr.trim() : ''))
+        .filter((attr) => isSafeExtraAttrName(attr))
+    : [];
+
   const bootRes = activeKernel.boot({
     docGenId,
     hostToken,
     hostProfileId: profile.id,
     hostBridge: existingKernelState ? undefined : createSwappableBridgePort(kernelState),
     uiAnchors: profile.uiAnchors || {},
-    extraNoTranslateAttributes: Array.isArray(profile.extraNoTranslateAttributes)
-      ? profile.extraNoTranslateAttributes
-      : [],
+    uiSurfaces: profile.uiSurfaces || {},
+    extraNoTranslateAttributes: safeExtraNoTranslateAttributes,
   });
   if (!bootRes || bootRes.ok !== true) {
     kernelState.currentBridge = prevBridge;
@@ -643,10 +648,7 @@ async function bootRemoteWebHost({
 
   let fallbackDockEl = null;
   if (mountFallbackDock !== false) {
-    fallbackDockEl = mountFallbackSlotDock(
-      doc,
-      Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : []
-    );
+    fallbackDockEl = mountFallbackSlotDock(doc, safeExtraNoTranslateAttributes);
   }
 
   for (let i = 0; i < (packedAddons || []).length; i += 1) {

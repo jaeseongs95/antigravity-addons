@@ -42,6 +42,45 @@ function validateHostProfile(profile) {
   if (profile.resolveConfigScopes !== undefined && typeof profile.resolveConfigScopes !== 'function') {
     return { ok: false, reason: 'INVALID_HOST_PROFILE_RESOLVE_CONFIG_SCOPES' };
   }
+  if (profile.uiSurfaces !== undefined) {
+    if (!profile.uiSurfaces || typeof profile.uiSurfaces !== 'object' || Array.isArray(profile.uiSurfaces)) {
+      return { ok: false, reason: 'INVALID_HOST_PROFILE_UI_SURFACES' };
+    }
+    for (const [surfaceId, spec] of Object.entries(profile.uiSurfaces)) {
+      if (!surfaceId || !spec || typeof spec !== 'object' || Array.isArray(spec)) {
+        return { ok: false, reason: `INVALID_HOST_PROFILE_UI_SURFACE:${surfaceId}` };
+      }
+      const listKeys = [
+        'selectors',
+        'excludeLeftSelectors',
+        'excludeRightSelectors',
+        'excludeTopSelectors',
+        'excludeBottomSelectors',
+      ];
+      for (const k of listKeys) {
+        if (
+          spec[k] !== undefined &&
+          (!Array.isArray(spec[k]) || spec[k].some((item) => typeof item !== 'string' || !item.trim()))
+        ) {
+          return { ok: false, reason: `INVALID_HOST_PROFILE_UI_SURFACE_SELECTORS:${surfaceId}:${k}` };
+        }
+      }
+      if (spec.priority !== undefined && (typeof spec.priority !== 'number' || !Number.isFinite(spec.priority))) {
+        return { ok: false, reason: `INVALID_HOST_PROFILE_UI_SURFACE_PRIORITY:${surfaceId}` };
+      }
+      if (spec.safeInsets !== undefined) {
+        if (!spec.safeInsets || typeof spec.safeInsets !== 'object' || Array.isArray(spec.safeInsets)) {
+          return { ok: false, reason: `INVALID_HOST_PROFILE_UI_SURFACE_INSETS:${surfaceId}` };
+        }
+        for (const edge of ['top', 'right', 'bottom', 'left']) {
+          const val = spec.safeInsets[edge];
+          if (val !== undefined && (typeof val !== 'number' || !Number.isFinite(val) || val < 0)) {
+            return { ok: false, reason: `INVALID_HOST_PROFILE_UI_SURFACE_INSETS:${surfaceId}:${edge}` };
+          }
+        }
+      }
+    }
+  }
   return { ok: true };
 }
 

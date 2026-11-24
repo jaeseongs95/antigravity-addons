@@ -886,7 +886,7 @@ test('TC-V23-006: CLI --profile remote-web, --build-remote, and src/index.js int
     });
     assert.equal(statusRes.status, 0, statusRes.stderr);
     const statusJson = JSON.parse(statusRes.stdout);
-    assert.equal(statusJson.hostVersion, '2.3.0');
+    assert.equal(statusJson.hostVersion, '2.4.0');
     assert.equal(statusJson.hostProfileId, 'antigravity-remote-web');
     assert.equal(statusJson.hostStatus.mode, 'remote-web');
     assert.equal(statusJson.activeAddons.length, 1);
