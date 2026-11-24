@@ -188,6 +188,7 @@ function createRendererInjector({
       hostToken,
       extraNoTranslateAttributes: Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [],
       uiAnchors: profile.uiAnchors || {},
+      uiSurfaces: profile.uiSurfaces || {},
       worldId,
     };
 

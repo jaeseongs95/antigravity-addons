@@ -5,7 +5,18 @@
 
 > **언어**: [English (README.md)](./README.md) | 한국어
 
-**무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Remote Web 호스트 통합, Shadow DOM UI 격리, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.3.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+**무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Remote Web 호스트 통합, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.4.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+
+## v2.4.0 주요 업데이트 (화면별 중앙 좌표 API · `--build-remote` 기본 경로 결함 수정 · F7 보강)
+
+- **화면(Surface)별 콘텐츠 영역·중앙 좌표 API (SOLID #0)**:
+  - 벤더 중립 `src/runtime/renderer/surface-geometry.js`와 프로필 선언형 `HostProfile.uiSurfaces`(`settings-pane`, `customizations-page`, `automation-page`, `workspace`)를 추가했습니다.
+  - 모든 `addonHost` 핸들에 `getSurfaceBounds(surfaceIdOrOpts?)`, `getActiveSurface()`, `listSurfaces()`를 제공하여 각 화면의 실제 콘텐츠 영역과 중앙 좌표(`centerX`, `centerY`) 및 고정 inset을 반환합니다.
+  - `openModal(slotId, { surface, align })` 및 `modalHandle.reposition(nextSurface?)`를 지원해 사이드바 등 크롬 영역을 제외한 활성 화면 정중앙에 모달을 정렬하며, 창 크기 변경(`resize`)을 자동 추적합니다(옵션 미지정 시 기존 전체 뷰포트 중앙 정렬 하위 호환 유지).
+- **결함 수정: `--build-remote` 기본 CLI 경로 폴백 복구 (`scripts/build-remote.js`)**:
+  - 미지정 `configJsonPath`/`trustPolicyPath` 기본값을 `null`에서 `undefined`로 교정해 기본 `addon-host --build-remote` 실행 시 `TRUST_POLICY_PATH`·`CONFIG_JSON_PATH`로 정상 폴백하도록 수정했습니다(명시적 `null` 전달 의미는 보존).
+- **보안 보강 (`F7`)**:
+  - `src/adapters/remote-web/remote-bootstrap.js`에서 `activeKernel.boot()` 호출 전 `profile.extraNoTranslateAttributes`를 `isSafeExtraAttrName`으로 사전 필터링합니다.
 
 ## v2.3.0 주요 업데이트 (Remote Web 호스트 통합 · Option A Named-Scope `configBridge`)
 
@@ -79,6 +90,7 @@ node ./bin/addon-host.js --rollback
 
 ## 문서
 
+- [릴리스 노트 (`v2.4.0` 영문/국문)](./RELEASE_NOTES_v2.4.0.md)
 - [릴리스 노트 (`v2.3.0` 영문/국문)](./RELEASE_NOTES_v2.3.0.md)
 - [Remote Web 호스트 가이드 (`docs/REMOTE_WEB.ko.md`)](./docs/REMOTE_WEB.ko.md)
 - [릴리스 노트 (`v2.2.0` 영문/국문)](./RELEASE_NOTES_v2.2.0.md)

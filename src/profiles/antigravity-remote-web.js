@@ -74,6 +74,42 @@ const REMOTE_WEB_UI_ANCHORS = Object.freeze({
   'modal-root': Object.freeze(['body']),
 });
 
+const REMOTE_WEB_UI_SURFACES = Object.freeze({
+  'settings-pane': Object.freeze({
+    priority: 100,
+    selectors: Object.freeze([
+      '.settings-modal-container',
+      '[data-testid="settings-panel"]',
+      '[role="dialog"]:not([data-addon-host-modal-dialog])',
+    ]),
+    safeInsets: Object.freeze({ top: 0, right: 0, bottom: 0, left: 0 }),
+  }),
+  'customizations-page': Object.freeze({
+    priority: 80,
+    selectors: Object.freeze(['[data-testid="customizations-view"]']),
+    excludeLeftSelectors: Object.freeze(['[data-testid="sidebar"]', '[data-testid="left-sidebar"]', 'aside', 'nav']),
+    excludeRightSelectors: Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
+    excludeBottomSelectors: Object.freeze(['[data-testid="status-bar"]', '[data-testid="app-status-bar"]']),
+    safeInsets: Object.freeze({ top: 0, right: 0, bottom: 0, left: 0 }),
+  }),
+  'automation-page': Object.freeze({
+    priority: 75,
+    selectors: Object.freeze(['[data-testid="automation-view"]']),
+    excludeLeftSelectors: Object.freeze(['[data-testid="sidebar"]', '[data-testid="left-sidebar"]', 'aside', 'nav']),
+    excludeRightSelectors: Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
+    excludeBottomSelectors: Object.freeze(['[data-testid="status-bar"]', '[data-testid="app-status-bar"]']),
+    safeInsets: Object.freeze({ top: 0, right: 0, bottom: 0, left: 0 }),
+  }),
+  workspace: Object.freeze({
+    priority: 50,
+    selectors: Object.freeze(['[data-testid="workspace-main"]', 'main', '[role="main"]']),
+    excludeLeftSelectors: Object.freeze(['[data-testid="sidebar"]', '[data-testid="left-sidebar"]', 'aside', 'nav']),
+    excludeRightSelectors: Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
+    excludeBottomSelectors: Object.freeze(['[data-testid="status-bar"]', '[data-testid="app-status-bar"]']),
+    safeInsets: Object.freeze({ top: 0, right: 0, bottom: 0, left: 0 }),
+  }),
+});
+
 const ANTIGRAVITY_REMOTE_WEB_PROFILE = Object.freeze({
   id: REMOTE_WEB_PROFILE_ID,
   displayName: 'Antigravity Remote Web',
@@ -85,6 +121,7 @@ const ANTIGRAVITY_REMOTE_WEB_PROFILE = Object.freeze({
   storageNamespace: DEFAULT_STORAGE_NAMESPACE,
   extraNoTranslateAttributes: Object.freeze(['data-agy-no-translate']),
   uiAnchors: REMOTE_WEB_UI_ANCHORS,
+  uiSurfaces: REMOTE_WEB_UI_SURFACES,
   resolvePaths: resolveAntigravityRemoteWebPaths,
   resolveConfigScopes: resolveAntigravityConfigScopes,
 });
@@ -114,6 +151,7 @@ function toBrowserRemoteWebProfile(profile = ANTIGRAVITY_REMOTE_WEB_PROFILE) {
       Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes.slice() : []
     ),
     uiAnchors: profile.uiAnchors || {},
+    uiSurfaces: profile.uiSurfaces || {},
   });
 }
 
@@ -124,6 +162,7 @@ module.exports = {
   DEFAULT_TRUSTED_TYPES_POLICY_NAME,
   DEFAULT_STORAGE_NAMESPACE,
   REMOTE_WEB_UI_ANCHORS,
+  REMOTE_WEB_UI_SURFACES,
   resolveAntigravityRemoteWebPaths,
   toBrowserRemoteWebProfile,
   ANTIGRAVITY_REMOTE_WEB_PROFILE,

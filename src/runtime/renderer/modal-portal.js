@@ -32,7 +32,7 @@ function isEventInsideElements(ev, elements) {
 function createModalPortal(
   doc,
   win,
-  { extraNoTranslateAttributes = [], styleManager = null, onPortalClaimChange = () => {} } = {}
+  { extraNoTranslateAttributes = [], styleManager = null, surfaceGeometry = null, onPortalClaimChange = () => {} } = {}
 ) {
   const stack = []; // LIFO: { id, kind: 'modal'|'popover', pluginId, slotId, el, bodyEl, shadowRoot, prevFocus, ignoreOutsideClickEls, onClose }
   let seq = 0;
@@ -86,6 +86,12 @@ function createModalPortal(
 
     if (entry.shadowRoot && styleManager) {
       styleManager.unregisterShadowRoot(entry.pluginId, entry.slotId, entry.shadowRoot);
+    }
+    if (typeof entry.onResizeCleanup === 'function') {
+      try {
+        entry.onResizeCleanup();
+      } catch (_e) {}
+      entry.onResizeCleanup = null;
     }
     try {
       if (entry.kind === 'modal' && typeof entry.el.close === 'function' && entry.el.open) {
@@ -243,6 +249,35 @@ function createModalPortal(
     const hostBody = doc.body || doc.documentElement;
     hostBody.appendChild(dlg);
 
+    const requestedSurface =
+      typeof opts.surface === 'string' && opts.surface.trim()
+        ? opts.surface.trim()
+        : opts.align === 'surface'
+          ? 'auto'
+          : null;
+
+    const applySurfaceBounds = (targetSurface) => {
+      if (!surfaceGeometry || typeof surfaceGeometry.getSurfaceBounds !== 'function') {
+        return null;
+      }
+      const bounds = surfaceGeometry.getSurfaceBounds(targetSurface || 'auto');
+      if (bounds && dlg.style) {
+        dlg.setAttribute('data-addon-host-modal-surface', bounds.surfaceId);
+        if (bounds.viewport && bounds.viewport.width > 0 && bounds.viewport.height > 0) {
+          dlg.style.position = 'fixed';
+          dlg.style.inset = '';
+          dlg.style.left = `${bounds.insetLeft}px`;
+          dlg.style.top = `${bounds.insetTop}px`;
+          dlg.style.right = `${bounds.insetRight}px`;
+          dlg.style.bottom = `${bounds.insetBottom}px`;
+          dlg.style.margin = 'auto';
+          dlg.style.maxWidth = `${Math.max(120, Math.floor(bounds.width - 24))}px`;
+          dlg.style.maxHeight = `${Math.max(120, Math.floor(bounds.height - 24))}px`;
+        }
+      }
+      return bounds;
+    };
+
     const entry = {
       id: `modal-${++seq}`,
       kind: 'modal',
@@ -252,9 +287,27 @@ function createModalPortal(
       bodyEl,
       shadowRoot,
       prevFocus,
+      surfaceTarget: requestedSurface,
+      onResizeCleanup: null,
       ignoreOutsideClickEls: Array.isArray(opts.ignoreOutsideClickEls) ? opts.ignoreOutsideClickEls : [],
       onClose: opts.onClose || null,
     };
+
+    if (requestedSurface && surfaceGeometry) {
+      applySurfaceBounds(requestedSurface);
+      if (win && typeof win.addEventListener === 'function') {
+        const handleResize = () => {
+          if (entry.closing || !stack.includes(entry)) return;
+          applySurfaceBounds(entry.surfaceTarget);
+        };
+        win.addEventListener('resize', handleResize);
+        entry.onResizeCleanup = () => {
+          if (typeof win.removeEventListener === 'function') {
+            win.removeEventListener('resize', handleResize);
+          }
+        };
+      }
+    }
 
     if (typeof dlg.addEventListener === 'function') {
       dlg.addEventListener('cancel', (ev) => {
@@ -282,6 +335,15 @@ function createModalPortal(
       element: dlg,
       bodyEl,
       close: () => closeEntry(entry),
+      reposition: (nextSurface) => {
+        if (entry.closing || !stack.includes(entry)) return null;
+        if (typeof nextSurface === 'string' && nextSurface.trim()) {
+          entry.surfaceTarget = nextSurface.trim();
+        } else if (!entry.surfaceTarget) {
+          entry.surfaceTarget = 'auto';
+        }
+        return applySurfaceBounds(entry.surfaceTarget);
+      },
     });
   }
 

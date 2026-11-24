@@ -800,3 +800,132 @@ test('TC-RW-010: Audit regressions F2 (check:remote mode mismatch), F3 (control-
   assert.ok(store2.getItem(settingsKey));
   boot2.controller.dispose();
 });
+
+test('TC-RW-011: build-remote CLI resolves default trust-policy & config.json paths, preserves explicit null, and filters F7 extraNoTranslateAttributes', async () => {
+  const tmpHome = makeTmpDir('agy-v24-cli-default-paths-');
+  const tmpOutDir = makeTmpDir('agy-v24-cli-out-');
+  try {
+    const addonsDir = path.join(tmpHome, '.gemini', 'antigravity', 'addons.d');
+    const pluginsRootDir = path.join(tmpHome, '.gemini', 'config', 'plugins');
+    const configJsonPath = path.join(tmpHome, '.gemini', 'config', 'config.json');
+    const trustPolicyPath = path.join(tmpHome, '.gemini', 'antigravity', 'trust-policy.json');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    fs.mkdirSync(pluginsRootDir, { recursive: true });
+
+    const enabledSrc = 'addonHost.registerAction("ok", { label: "OK", run: () => 1 });\n';
+    const disabledSrc = 'addonHost.registerAction("off", { label: "OFF", run: () => 0 });\n';
+    fs.mkdirSync(path.join(pluginsRootDir, 'trusted-enabled'), { recursive: true });
+    fs.mkdirSync(path.join(pluginsRootDir, 'trusted-disabled'), { recursive: true });
+    fs.writeFileSync(path.join(pluginsRootDir, 'trusted-enabled', 'renderer.js'), enabledSrc, 'utf8');
+    fs.writeFileSync(path.join(pluginsRootDir, 'trusted-disabled', 'renderer.js'), disabledSrc, 'utf8');
+
+    for (const id of ['trusted-enabled', 'trusted-disabled']) {
+      fs.writeFileSync(
+        path.join(addonsDir, `${id}.json`),
+        JSON.stringify({
+          schemaVersion: 2,
+          pluginId: id,
+          displayName: id,
+          version: '1.0.0',
+          trustLevel: 'trusted',
+          capabilities: ['renderer'],
+          entry: { rendererScript: 'renderer.js' },
+          compatibility: { hostProfile: 'antigravity-desktop', minHostVersion: '2.3.0' },
+          isolation: { noTranslate: true, i18nSelfManaged: true },
+        }),
+        'utf8'
+      );
+    }
+
+    fs.writeFileSync(
+      trustPolicyPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        approved: {
+          'trusted-enabled': { rendererSha256: sha256(enabledSrc) },
+          'trusted-disabled': { rendererSha256: sha256(disabledSrc) },
+        },
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(
+      configJsonPath,
+      JSON.stringify({
+        plugins: {
+          'trusted-enabled': { enabled: true },
+          'trusted-disabled': { enabled: false },
+        },
+      }),
+      'utf8'
+    );
+
+    // 1. Default CLI invocation (NO --trust-policy and NO --config-json flags) MUST resolve profile defaults
+    const buildRemoteScript = path.join(REPO_ROOT, 'scripts', 'build-remote.js');
+    const cliRes = spawnSync(process.execPath, [buildRemoteScript, '--out-dir', tmpOutDir], {
+      env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome },
+      encoding: 'utf8',
+    });
+    assert.equal(cliRes.status, 0, cliRes.stderr);
+    const cliOut = JSON.parse(cliRes.stdout);
+    assert.equal(cliOut.ok, true);
+    assert.equal(cliOut.addonCount, 1);
+    assert.equal(cliOut.rejectedCount, 0);
+    const builtManifest = JSON.parse(fs.readFileSync(path.join(tmpOutDir, 'build-manifest.json'), 'utf8'));
+    assert.deepEqual(
+      builtManifest.addons.map((a) => a.pluginId),
+      ['trusted-enabled']
+    );
+
+    // 2. Programmatic explicit null MUST still disable trustPolicyPath / configJsonPath fallback
+    const nullOutDir = path.join(tmpOutDir, 'explicit-null');
+    const nullRes = buildDistRemote({
+      targetDir: nullOutDir,
+      addonsDir,
+      pluginsRootDir,
+      configJsonPath: null,
+      trustPolicyPath: null,
+      hostVersion: '2.4.0',
+    });
+    assert.equal(nullRes.ok, true);
+    assert.equal(nullRes.buildManifest.addonCount, 0);
+    assert.equal(nullRes.buildManifest.rejectedCount, 2);
+
+    // 3. F7: bootRemoteWebHost filters unsafe profile.extraNoTranslateAttributes BEFORE kernel.boot
+    const { doc, win } = makeMockDom('https://antigravity.google.com/workspace');
+    const kernel = createRendererKernel(doc, win);
+    let mountedHostEl = null;
+    const f7Res = await bootRemoteWebHost({
+      doc,
+      win,
+      kernel,
+      profile: {
+        ...ANTIGRAVITY_REMOTE_WEB_PROFILE,
+        extraNoTranslateAttributes: ['data-safe-f7', 'onclick', 'bad attr', '123invalid'],
+      },
+      packedAddons: [
+        {
+          pluginMeta: {
+            pluginId: 'f7-slot-addon',
+            displayName: 'F7 Slot',
+            version: '1.0.0',
+            trustLevel: 'restricted',
+            uiSlots: [{ slot: 'status-bar', slotId: 'f7.bar', anchor: 'status-bar', shadow: false }],
+          },
+          run(handle) {
+            mountedHostEl = handle.mountSlot('f7.bar');
+          },
+        },
+      ],
+    });
+    assert.equal(f7Res.ok, true);
+    assert.ok(mountedHostEl);
+    assert.equal(mountedHostEl.getAttribute('data-safe-f7'), 'true');
+    assert.equal(mountedHostEl.getAttribute('onclick'), null);
+    assert.equal(mountedHostEl.getAttribute('bad attr'), null);
+    assert.equal(mountedHostEl.getAttribute('123invalid'), null);
+    f7Res.controller.dispose();
+  } finally {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpOutDir, { recursive: true, force: true });
+  }
+});

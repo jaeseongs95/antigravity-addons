@@ -151,6 +151,41 @@ const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
     'customizations-page': Object.freeze(['[data-testid="customizations-view"]']),
     'modal-root': Object.freeze(['body']),
   }),
+  uiSurfaces: Object.freeze({
+    'settings-pane': Object.freeze({
+      priority: 100,
+      selectors: Object.freeze([
+        '.settings-modal-container',
+        '[data-testid="settings-panel"]',
+        '[role="dialog"]:not([data-addon-host-modal-dialog])',
+      ]),
+      safeInsets: Object.freeze({ top: 36, right: 0, bottom: 0, left: 0 }),
+    }),
+    'customizations-page': Object.freeze({
+      priority: 80,
+      selectors: Object.freeze(['[data-testid="customizations-view"]']),
+      excludeLeftSelectors: Object.freeze(['[data-testid="sidebar"]', '[data-testid="left-sidebar"]', 'aside', 'nav']),
+      excludeRightSelectors: Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
+      excludeBottomSelectors: Object.freeze(['[data-testid="status-bar"]', '[data-testid="app-status-bar"]']),
+      safeInsets: Object.freeze({ top: 36, right: 0, bottom: 0, left: 0 }),
+    }),
+    'automation-page': Object.freeze({
+      priority: 75,
+      selectors: Object.freeze(['[data-testid="automation-view"]']),
+      excludeLeftSelectors: Object.freeze(['[data-testid="sidebar"]', '[data-testid="left-sidebar"]', 'aside', 'nav']),
+      excludeRightSelectors: Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
+      excludeBottomSelectors: Object.freeze(['[data-testid="status-bar"]', '[data-testid="app-status-bar"]']),
+      safeInsets: Object.freeze({ top: 36, right: 0, bottom: 0, left: 0 }),
+    }),
+    workspace: Object.freeze({
+      priority: 50,
+      selectors: Object.freeze(['[data-testid="workspace-main"]', 'main', '[role="main"]']),
+      excludeLeftSelectors: Object.freeze(['[data-testid="sidebar"]', '[data-testid="left-sidebar"]', 'aside', 'nav']),
+      excludeRightSelectors: Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
+      excludeBottomSelectors: Object.freeze(['[data-testid="status-bar"]', '[data-testid="app-status-bar"]']),
+      safeInsets: Object.freeze({ top: 36, right: 0, bottom: 0, left: 0 }),
+    }),
+  }),
   allowedUrlProtocols: Object.freeze(['http:', 'https:']),
   allowedUrlHosts: Object.freeze(['127.0.0.1', 'localhost', '::1', '[::1]']),
   legacyPatchMarkers: Object.freeze([

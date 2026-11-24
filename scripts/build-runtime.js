@@ -92,6 +92,7 @@ function buildRendererKernelBundleSource() {
     './ignore-guard.js',
     './style-manager.js',
     './slot-manager.js',
+    './surface-geometry.js',
     './modal-portal.js',
     './region-observer.js',
     './settings-tab-coordinator.js',

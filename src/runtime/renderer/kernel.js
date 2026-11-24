@@ -13,6 +13,7 @@
 const { isElementInsideIgnored } = require('./ignore-guard');
 const { createStyleManager } = require('./style-manager');
 const { createSlotManager } = require('./slot-manager');
+const { createSurfaceGeometry } = require('./surface-geometry');
 const { createModalPortal } = require('./modal-portal');
 const { createRegionObserver } = require('./region-observer');
 const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
@@ -167,6 +168,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   let extraNoTranslateAttributes = [];
   let styleManager = null;
   let slotManager = null;
+  let surfaceGeometry = null;
   let modalPortal = null;
   let regionObserver = null;
   let settingsTabs = null;
@@ -272,9 +274,14 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       extraNoTranslateAttributes,
       styleManager,
     });
+    surfaceGeometry = createSurfaceGeometry(doc, win, {
+      uiSurfaces: cfg.uiSurfaces || {},
+      uiAnchors: cfg.uiAnchors || {},
+    });
     modalPortal = createModalPortal(doc, win, {
       extraNoTranslateAttributes,
       styleManager,
+      surfaceGeometry,
       onPortalClaimChange: (claimId, active) => {
         if (hostBridge && typeof hostBridge.setPortalClaim === 'function') {
           try {
@@ -459,6 +466,21 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       openPopover(slotId, opts) {
         assertActive();
         return modalPortal.openPopover(pluginMeta, slotId, opts);
+      },
+
+      getSurfaceBounds(surfaceIdOrOpts) {
+        assertActive();
+        return surfaceGeometry.getSurfaceBounds(surfaceIdOrOpts);
+      },
+
+      getActiveSurface() {
+        assertActive();
+        return surfaceGeometry.getActiveSurface();
+      },
+
+      listSurfaces() {
+        assertActive();
+        return surfaceGeometry.listSurfaces();
       },
 
       observeRegion(selector, callback, opts) {
@@ -808,6 +830,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     getErrors: () => _ArraySlice(recordedErrors),
     getBridgeStatus: () => ({ booted, docGenId, hostProfileId, hasBridge: !!hostBridge }),
     listSettingsTabs: () => (settingsTabs ? settingsTabs.listTabs() : []),
+    getSurfaceBounds: (surfaceIdOrOpts) => (surfaceGeometry ? surfaceGeometry.getSurfaceBounds(surfaceIdOrOpts) : null),
+    getActiveSurface: () => (surfaceGeometry ? surfaceGeometry.getActiveSurface() : null),
+    listSurfaces: () => (surfaceGeometry ? surfaceGeometry.listSurfaces() : _ObjectFreeze(['viewport'])),
   });
 
   return api;

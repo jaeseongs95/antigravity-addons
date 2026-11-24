@@ -5,7 +5,18 @@
 
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)
 
-**Single, vendor-independent native desktop & remote web addon host framework (`v2.3.0`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent native desktop & remote web addon host framework (`v2.4.0`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+
+## Key Updates in v2.4.0 (Per-Surface Bounds API, `--build-remote` Default Path Fix & F7 Hardening)
+
+- **Per-Surface Content Bounds & Center-Point API (SOLID #0)**:
+  - Adds vendor-neutral `src/runtime/renderer/surface-geometry.js` driven solely by declarative `HostProfile.uiSurfaces` descriptors (`settings-pane`, `customizations-page`, `automation-page`, `workspace` in `src/profiles/antigravity.js` and `src/profiles/antigravity-remote-web.js`).
+  - Exposes `addonHost.getSurfaceBounds(surfaceIdOrOpts?)`, `addonHost.getActiveSurface()`, and `addonHost.listSurfaces()` returning deep-frozen `{ surfaceId, requestedSurfaceId, matched, source, left, top, right, bottom, width, height, centerX, centerY, insetLeft, insetTop, insetRight, insetBottom, viewport }`.
+  - Extends `addonHost.openModal(slotId, { surface, align })` and `modalHandle.reposition(nextSurface?)` so plugin modals center cleanly within the active screen content area (automatically excluding sidebars/chrome and tracking window `resize` until closed), while preserving legacy viewport centering when omitted.
+- **Fix: `--build-remote` Default CLI Path Fallback (`scripts/build-remote.js`)**:
+  - Defaults omitted `configJsonPath`/`trustPolicyPath` to `undefined` instead of `null`, restoring profile fallback to `TRUST_POLICY_PATH` and `CONFIG_JSON_PATH` during default `addon-host --build-remote` runs while preserving programmatic explicit `null` opt-out.
+- **Security Hardening (`F7`)**:
+  - Filters `profile.extraNoTranslateAttributes` through `isSafeExtraAttrName` before `activeKernel.boot()` in `src/adapters/remote-web/remote-bootstrap.js`.
 
 ## Key Updates in v2.3.0 (Remote Web Host Integration & Option A Named-Scope `configBridge`)
 
@@ -91,6 +102,7 @@ if (rootEl) {
 
 ## Documentation
 
+- [Release Notes (`v2.4.0` EN/KO)](./RELEASE_NOTES_v2.4.0.md)
 - [Release Notes (`v2.3.0` EN/KO)](./RELEASE_NOTES_v2.3.0.md)
 - [Remote Web Host Guide (`docs/REMOTE_WEB.md`)](./docs/REMOTE_WEB.md)
 - [Release Notes (`v2.2.0` EN/KO)](./RELEASE_NOTES_v2.2.0.md)

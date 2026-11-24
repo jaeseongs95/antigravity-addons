@@ -68,9 +68,9 @@ function writeFileLf(filePath, content) {
 function readPackageVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
-    return typeof pkg.version === 'string' && pkg.version ? pkg.version : '2.3.0';
+    return typeof pkg.version === 'string' && pkg.version ? pkg.version : '2.4.0';
   } catch (_err) {
-    return '2.3.0';
+    return '2.4.0';
   }
 }
 
@@ -414,11 +414,11 @@ function buildDistRemote({
   targetDir = DEFAULT_DIST_REMOTE_DIR,
   profile = ANTIGRAVITY_REMOTE_WEB_PROFILE,
   noAddons = false,
-  addonsDir = null,
-  pluginsRootDir = null,
-  configJsonPath = null,
-  trustPolicyPath = null,
-  settingsDataDir = null,
+  addonsDir = undefined,
+  pluginsRootDir = undefined,
+  configJsonPath = undefined,
+  trustPolicyPath = undefined,
+  settingsDataDir = undefined,
   strictTrustPolicy = true,
   includeSettingsSnapshots = false,
   hostVersion = null,
@@ -539,10 +539,10 @@ function parseCliArgs(argv) {
     includeSettingsSnapshots: false,
     strictTrustPolicy: true,
     outDir: DEFAULT_DIST_REMOTE_DIR,
-    addonsDir: null,
-    pluginsRootDir: null,
-    configJsonPath: null,
-    trustPolicyPath: null,
+    addonsDir: undefined,
+    pluginsRootDir: undefined,
+    configJsonPath: undefined,
+    trustPolicyPath: undefined,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
