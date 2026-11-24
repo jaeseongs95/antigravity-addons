@@ -96,6 +96,23 @@ function createFakeDom() {
       return child;
     }
 
+    insertBefore(child, ref) {
+      if (!ref) return this.appendChild(child);
+      if (!child) return child;
+      if (child.parentNode) child.parentNode.removeChild(child);
+      child.parentNode = this;
+      child.parentElement = this.nodeType === 1 ? this : null;
+      const ci = this.childNodes.indexOf(ref);
+      if (ci >= 0) this.childNodes.splice(ci, 0, child);
+      else this.childNodes.push(child);
+      if (child.nodeType === 1) {
+        const ei = this.children.indexOf(ref);
+        if (ei >= 0) this.children.splice(ei, 0, child);
+        else this.children.push(child);
+      }
+      return child;
+    }
+
     removeChild(child) {
       const idx = this.childNodes.indexOf(child);
       if (idx !== -1) this.childNodes.splice(idx, 1);
@@ -798,4 +815,158 @@ test('TC-V25-006: Built-in host-settings-ui mounts Korean Settings tab, toggles 
   assert.equal(nativeBody.style.display, '');
 
   ui.dispose();
+});
+
+test('TC-V25-007: host-settings-ui mounts reliably across div/li/wrapped/icon-split/deep-nested Settings sidebars and syncs language', async () => {
+  const hostBridge = {
+    getHostAdminState: async () => ({
+      ok: true,
+      host: { version: '2.5.1', buildSha8: '1234abcd', profileId: 'antigravity-desktop' },
+      summary: { totalCount: 0, desktopActiveCount: 0, remoteEligibleCount: 0, remoteEnabledCount: 0 },
+      addons: [],
+      remoteBundle: { built: false, needsRebuild: true, buildCommand: 'addon-host --build-remote' },
+    }),
+    setRemoteAddonPreference: async () => ({ ok: true }),
+  };
+
+  function buildSidebarDom(variant) {
+    const { doc } = createFakeDom();
+    const setRect = (el, r) => {
+      el.getBoundingClientRect = () => r;
+    };
+    const modal = doc.createElement('div');
+    setRect(modal, { left: 80, top: 40, width: 960, height: 680, right: 1040, bottom: 720 });
+    const sidebar = doc.createElement('aside');
+    setRect(sidebar, { left: 80, top: 40, width: 220, height: 680, right: 300, bottom: 720 });
+    const content = doc.createElement('main');
+    setRect(content, { left: 300, top: 40, width: 740, height: 680, right: 1040, bottom: 720 });
+
+    // Top-right SVG-only close button (no aria-label or text, detected via geometry)
+    const svgCloseBtn = doc.createElement('button');
+    setRect(svgCloseBtn, { left: 996, top: 52, width: 32, height: 32, right: 1028, bottom: 84 });
+    const nativePane = doc.createElement('div');
+    nativePane.textContent = 'Native Settings Pane';
+    content.appendChild(svgCloseBtn);
+    content.appendChild(nativePane);
+
+    modal.appendChild(sidebar);
+    modal.appendChild(content);
+    doc.body.appendChild(modal);
+
+    let host = sidebar;
+    const depthWrap = variant === 'deep-nesting' ? 7 : 1;
+    for (let d = 0; d < depthWrap; d += 1) {
+      const wrap = doc.createElement('div');
+      setRect(wrap, { left: 88, top: 60, width: 204, height: 420, right: 292, bottom: 480 });
+      host.appendChild(wrap);
+      host = wrap;
+    }
+
+    const labels =
+      variant === 'late-ko-translation'
+        ? ['General', 'Application', 'Appearance', 'Shortcuts', 'Notifications', 'Models', 'Browser']
+        : ['일반', '애플리케이션', '모양 및 테마', '단축키', '알림', '모델', '브라우저'];
+
+    const createdItems = [];
+    for (const label of labels) {
+      if (variant === 'div-items' || variant === 'late-ko-translation') {
+        const item = doc.createElement('div');
+        item.textContent = label;
+        setRect(item, { left: 88, top: 80, width: 200, height: 32, right: 288, bottom: 112 });
+        host.appendChild(item);
+        createdItems.push(item);
+      } else if (variant === 'wrapped-li-buttons') {
+        const li = doc.createElement('li');
+        setRect(li, { left: 88, top: 80, width: 200, height: 32, right: 288, bottom: 112 });
+        const btn = doc.createElement('button');
+        btn.textContent = label;
+        li.appendChild(btn);
+        host.appendChild(li);
+        createdItems.push(li);
+      } else if (variant === 'icon-and-div-button') {
+        const btn = doc.createElement('button');
+        setRect(btn, { left: 88, top: 80, width: 200, height: 32, right: 288, bottom: 112 });
+        const icon = doc.createElement('svg');
+        const labelDiv = doc.createElement('div');
+        labelDiv.textContent = label;
+        btn.appendChild(icon);
+        btn.appendChild(labelDiv);
+        host.appendChild(btn);
+        createdItems.push(btn);
+      } else {
+        const btn = doc.createElement('button');
+        btn.textContent = label;
+        setRect(btn, { left: 88, top: 80, width: 200, height: 32, right: 288, bottom: 112 });
+        host.appendChild(btn);
+        createdItems.push(btn);
+      }
+    }
+
+    // Peer plugin nav slot right after Browser + separate Projects section below
+    const peerSlot = doc.createElement('div');
+    peerSlot.setAttribute('data-addon-host-slot', 'peer.settings-nav');
+    peerSlot.setAttribute('data-addon-host-owner', 'peer-plugin');
+    peerSlot.textContent = 'Peer Plugin';
+    host.appendChild(peerSlot);
+
+    const projectsHeading = doc.createElement('div');
+    projectsHeading.textContent = variant === 'late-ko-translation' ? 'Projects' : '프로젝트';
+    host.appendChild(projectsHeading);
+
+    const projectLink = doc.createElement('div');
+    projectLink.textContent = variant === 'late-ko-translation' ? 'Workspace' : '개발자';
+    sidebar.appendChild(projectLink);
+
+    return { doc, host, sidebar, svgCloseBtn, nativePane, peerSlot, projectsHeading, projectLink, createdItems };
+  }
+
+  for (const variant of ['div-items', 'wrapped-li-buttons', 'icon-and-div-button', 'deep-nesting']) {
+    const { doc, host, svgCloseBtn, nativePane, peerSlot, projectsHeading, projectLink } = buildSidebarDom(variant);
+    const ui = createHostSettingsUi(
+      doc,
+      { getComputedStyle: () => ({ backgroundColor: 'rgba(0, 0, 0, 0)', color: '#cbd5e1' }) },
+      { hostBridge, settingsUi: ANTIGRAVITY_HOST_PROFILE.settingsUi }
+    );
+    assert.equal(ui.ensureMount(), true, `${variant} must mount host settings nav`);
+    const { navElement } = ui.getElements();
+    assert.ok(navElement, `${variant} navElement must exist`);
+    assert.equal(navElement.textContent, '애드온 관리');
+    assert.equal(navElement.parentElement, host, `${variant} must insert into shared listParent`);
+
+    // Placement: immediately after peerSlot and BEFORE projectsHeading
+    const idxPeer = host.children.indexOf(peerSlot);
+    const idxNav = host.children.indexOf(navElement);
+    const idxProj = host.children.indexOf(projectsHeading);
+    assert.equal(idxNav, idxPeer + 1, `${variant} should sit right after peer settings slot`);
+    assert.ok(idxNav < idxProj, `${variant} must stay above Projects section`);
+
+    // Open panel -> SVG-only top-right close button stays visible, native pane hidden
+    navElement.dispatchClick();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(ui.isOpen(), true);
+    assert.equal(nativePane.style.display, 'none');
+    assert.notEqual(svgCloseBtn.style.display, 'none', `${variant} top-right SVG close button must stay visible`);
+
+    // Clicking a Project link outside listParent (inside outerSidebar) closes our panel cleanly
+    projectLink.dispatchClick();
+    assert.equal(ui.isOpen(), false, `${variant} clicking outerSidebar project item must close panel`);
+    assert.equal(nativePane.style.display, '');
+    ui.dispose();
+  }
+
+  // Late Korean localization after initial English mount updates nav label dynamically
+  const { doc, createdItems } = buildSidebarDom('late-ko-translation');
+  doc.documentElement.lang = 'en';
+  const uiLang = createHostSettingsUi(
+    doc,
+    { getComputedStyle: () => ({ backgroundColor: 'rgba(0, 0, 0, 0)', color: '#cbd5e1' }) },
+    { hostBridge, settingsUi: ANTIGRAVITY_HOST_PROFILE.settingsUi }
+  );
+  assert.equal(uiLang.ensureMount(), true);
+  assert.equal(uiLang.getElements().navElement.textContent, 'Addon Manager');
+  createdItems[0].textContent = '일반';
+  createdItems[6].textContent = '브라우저';
+  assert.equal(uiLang.ensureMount(), true);
+  assert.equal(uiLang.getElements().navElement.textContent, '애드온 관리');
+  uiLang.dispose();
 });

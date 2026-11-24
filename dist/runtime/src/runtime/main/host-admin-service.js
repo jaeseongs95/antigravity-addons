@@ -207,7 +207,7 @@ function sameStringArray(a, b) {
 }
 
 function createHostAdminService({
-  hostVersion = '2.5.0',
+  hostVersion = '2.5.1',
   buildSha8 = 'dev',
   profile = {},
   addonsDir = null,

@@ -40,3 +40,4 @@
 | `TC-V21-002` | `slot-registry.js` | Enforces unique `settingsBridge.fileName` across active manifests (`ERR_DUPLICATE_SETTINGS_FILE`) | `test/unit/v2-settings-bridge.test.js` |
 | `TC-V21-003` | `settings-bridge.js` | Verifies missing/corrupt/non-object/`__proto__`/oversized/directory/symlink/reserved-path rejections, SHA-256 deduplication, monotonic `revision`, and automatic `fs.watch` teardown | `test/unit/v2-settings-bridge.test.js` |
 | `TC-V21-004` | `kernel.js` | Enforces `hostToken` authentication on `pushPluginSettings`, deep-frozen snapshots, restricted plugin denial, unsubscribe, and `disposePlugin` cleanup | `test/unit/v2-settings-bridge.test.js` |
+| `TC-V25-007` | `host-settings-ui.js` | Mounts built-in Addon Manager tab across `div`/`li`/wrapped/icon-split/deep-nested Settings sidebars, preserves top-right SVG close controls, closes on outer-sidebar clicks, and syncs late Korean localization | `test/unit/v25-host-settings-ui.test.js` |

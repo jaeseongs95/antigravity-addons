@@ -24,9 +24,13 @@ const DEFAULT_SETTINGS_UI_CONFIG = Object.freeze({
   }),
   anchorGroups: Object.freeze([
     Object.freeze(['general', '일반']),
+    Object.freeze(['application', '애플리케이션', '앱']),
+    Object.freeze(['appearance', '모양 및 테마', '외관', '모양', '화면']),
+    Object.freeze(['shortcuts', '단축키', '바로가기']),
+    Object.freeze(['notifications', '알림']),
+    Object.freeze(['models', '모델']),
     Object.freeze(['browser', '브라우저']),
     Object.freeze(['editor', '에디터']),
-    Object.freeze(['notifications', '알림']),
     Object.freeze(['account', '계정']),
   ]),
 });
@@ -713,30 +717,6 @@ function applyShieldAttributes(el, extraNoTranslateAttributes) {
   }
 }
 
-function createPuzzleIconSvg(doc) {
-  const ns = 'http://www.w3.org/2000/svg';
-  const svg = doc.createElementNS ? doc.createElementNS(ns, 'svg') : doc.createElement('span');
-  if (!doc.createElementNS) return svg;
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('width', '16');
-  svg.setAttribute('height', '16');
-  svg.setAttribute('fill', 'none');
-  svg.setAttribute('stroke', 'currentColor');
-  svg.setAttribute('stroke-width', '1.8');
-  svg.setAttribute('stroke-linecap', 'round');
-  svg.setAttribute('stroke-linejoin', 'round');
-  svg.setAttribute('aria-hidden', 'true');
-  svg.style.flexShrink = '0';
-
-  const path = doc.createElementNS(ns, 'path');
-  path.setAttribute(
-    'd',
-    'M19.4 13.5a2.1 2.1 0 1 1 0-3h.6a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-3.5a2.1 2.1 0 1 0-3 0H11a1 1 0 0 0-1 1v3.5a2.1 2.1 0 1 1 0 3V16a1 1 0 0 0 1 1h3.5a2.1 2.1 0 1 0 3 0H20a1 1 0 0 0 1-1v-2.5h-.6z'
-  );
-  svg.appendChild(path);
-  return svg;
-}
-
 function resolveRemoteReasonLabel(reason, t) {
   switch (reason) {
     case 'ERR_UNSUPPORTED_HOST_CAPABILITY':
@@ -754,6 +734,81 @@ function resolveRemoteReasonLabel(reason, t) {
   }
 }
 
+function hasVisibleBackground(el, win) {
+  if (!el || !win || typeof win.getComputedStyle !== 'function') return false;
+  try {
+    const bg = String(win.getComputedStyle(el).backgroundColor || '').trim().toLowerCase();
+    if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)' || bg === 'rgba(0,0,0,0)') {
+      return false;
+    }
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function replaceLeafText(rootEl, nextText, doc) {
+  if (!rootEl) return;
+  const textNodes = [];
+  function walk(node) {
+    const list = node && node.childNodes ? node.childNodes : [];
+    for (let i = 0; i < list.length; i += 1) {
+      const ch = list[i];
+      if (!ch) continue;
+      if (ch.nodeType === 3) {
+        if (String(ch.nodeValue !== undefined ? ch.nodeValue : ch.textContent || '').trim().length > 0) {
+          textNodes.push(ch);
+        }
+      } else if (ch.nodeType === 1) {
+        const tag = String(ch.tagName || '').toUpperCase();
+        if (tag !== 'SVG' && tag !== 'STYLE' && tag !== 'SCRIPT') {
+          walk(ch);
+        }
+      }
+    }
+  }
+  walk(rootEl);
+  if (textNodes.length > 0) {
+    for (let i = 0; i < textNodes.length; i += 1) {
+      const val = i === 0 ? nextText : '';
+      if ('nodeValue' in textNodes[i]) {
+        textNodes[i].nodeValue = val;
+      } else {
+        textNodes[i].textContent = val;
+      }
+    }
+    return;
+  }
+  // If cloned item contains an SVG icon alongside empty text wrapper, preserve SVG; otherwise replace text cleanly
+  const hasSvg = Boolean(rootEl.querySelector && rootEl.querySelector('svg'));
+  if (hasSvg && doc && typeof doc.createElement === 'function') {
+    const span = doc.createElement('span');
+    span.textContent = nextText;
+    rootEl.appendChild(span);
+    return;
+  }
+  rootEl.textContent = nextText;
+}
+
+function setImportantStyle(el, prop, value) {
+  if (!el || !el.style) return;
+  if (typeof el.style.setProperty === 'function') {
+    el.style.setProperty(prop, value, 'important');
+  } else {
+    const camel = prop.replace(/-([a-z])/g, (_m, ch) => ch.toUpperCase());
+    el.style[camel] = value;
+  }
+}
+
+function removeStyleProp(el, prop, restoreValue) {
+  if (!el || !el.style) return;
+  if (typeof el.style.removeProperty === 'function') {
+    el.style.removeProperty(prop);
+  }
+  const camel = prop.replace(/-([a-z])/g, (_m, ch) => ch.toUpperCase());
+  el.style[camel] = restoreValue || '';
+}
+
 function createHostSettingsUi(doc, win, opts = {}) {
   const hostBridge = opts.hostBridge || null;
   const settingsUiCfg = opts.settingsUi && typeof opts.settingsUi === 'object' ? opts.settingsUi : DEFAULT_SETTINGS_UI_CONFIG;
@@ -766,11 +821,15 @@ function createHostSettingsUi(doc, win, opts = {}) {
   let disposed = false;
   let started = false;
   let observer = null;
+  let domReadyHandler = null;
   let mountTimer = null;
 
   let mountedListParent = null;
+  let mountedOuterSidebar = null;
   let mountedContentPane = null;
+  let mountedLang = null;
   let navElement = null;
+  let navInactiveColor = '';
   let paneHostElement = null;
   let shadowRoot = null;
   let isOpen = false;
@@ -781,6 +840,8 @@ function createHostSettingsUi(doc, win, opts = {}) {
   let flashTimer = null;
   let pendingToggleIds = new Set();
   const savedChildDisplay = new WeakMap();
+  const suppressedSiblingStyles = new Map(); // el -> { bg, color }
+  let clickHostElement = null;
   let listClickHandler = null;
 
   function getNavLabel(lang) {
@@ -808,50 +869,129 @@ function createHostSettingsUi(doc, win, opts = {}) {
     return -1;
   }
 
+  function unwrapNavItem(el, groupIdx, stopContainer) {
+    let cur = el;
+    while (
+      cur &&
+      cur.parentElement &&
+      cur.parentElement !== stopContainer &&
+      cur.parentElement !== doc.body &&
+      cur.parentElement !== doc.documentElement
+    ) {
+      const parent = cur.parentElement;
+      const isSingleChild = parent.children && parent.children.length === 1;
+      const isSameAnchorItem =
+        parent.children &&
+        parent.children.length <= 3 &&
+        matchAnchorGroupIndex(parent.textContent) === groupIdx;
+      if (isSingleChild || isSameAnchorItem) {
+        cur = parent;
+      } else {
+        break;
+      }
+    }
+    return cur;
+  }
+
   function findSettingsSidebarAndContent() {
     if (!doc || typeof doc.querySelectorAll !== 'function') return null;
-    const candidates = doc.querySelectorAll('button, [role="tab"], [role="button"], a');
-    const byParent = new Map();
+    const NAV_CANDIDATE_SEL = 'button, a, [role="tab"], [role="menuitem"], [role="button"], li, div';
+    const candidates = doc.querySelectorAll(NAV_CANDIDATE_SEL);
+    const matchedLeaves = [];
 
     for (let i = 0; i < candidates.length; i += 1) {
       const el = candidates[i];
       if (!el || !el.parentElement) continue;
+      if (el.children && el.children.length > 2) continue;
       if (el.getAttribute && el.getAttribute(NAV_ATTR) === 'true') continue;
       if (el.closest && el.closest(`[${PANE_ATTR}="true"]`)) continue;
       const groupIdx = matchAnchorGroupIndex(el.textContent);
       if (groupIdx === -1) continue;
-      const parent = el.parentElement;
-      let rec = byParent.get(parent);
-      if (!rec) {
-        rec = { parent, groups: new Set(), items: [] };
-        byParent.set(parent, rec);
+      // Keep only the innermost matching node so outer wrappers don't shadow actual clickable items
+      let hasMatchingChild = false;
+      if (el.children && el.children.length > 0 && typeof el.querySelectorAll === 'function') {
+        const desc = el.querySelectorAll(NAV_CANDIDATE_SEL);
+        for (let j = 0; j < desc.length; j += 1) {
+          if (desc[j] !== el && matchAnchorGroupIndex(desc[j].textContent) !== -1) {
+            hasMatchingChild = true;
+            break;
+          }
+        }
       }
-      rec.groups.add(groupIdx);
-      rec.items.push(el);
+      if (hasMatchingChild) continue;
+      matchedLeaves.push({ el, groupIdx });
+    }
+
+    if (matchedLeaves.length < 2) return null;
+
+    // Group matched leaves by ancestor containers up to depth 4 (handles both direct siblings and wrapped items)
+    const byContainer = new Map();
+    for (let i = 0; i < matchedLeaves.length; i += 1) {
+      const { el, groupIdx } = matchedLeaves[i];
+      let container = el.parentElement;
+      for (let depth = 0; depth < 4 && container && container !== doc.body && container !== doc.documentElement; depth += 1) {
+        let rec = byContainer.get(container);
+        if (!rec) {
+          rec = { container, depthSum: 0, maxDepth: depth, groups: new Set(), items: [] };
+          byContainer.set(container, rec);
+        }
+        if (!rec.groups.has(groupIdx)) {
+          rec.groups.add(groupIdx);
+          rec.depthSum += depth;
+          if (depth > rec.maxDepth) rec.maxDepth = depth;
+          rec.items.push({ el, groupIdx });
+        }
+        container = container.parentElement;
+      }
     }
 
     let best = null;
-    for (const rec of byParent.values()) {
-      if (rec.groups.size >= 2) {
-        if (!best || rec.groups.size > best.groups.size) {
-          best = rec;
-        }
+    for (const rec of byContainer.values()) {
+      if (rec.groups.size < 2) continue;
+      if (
+        !best ||
+        rec.groups.size > best.groups.size ||
+        (rec.groups.size === best.groups.size && rec.maxDepth < best.maxDepth) ||
+        (rec.groups.size === best.groups.size && rec.maxDepth === best.maxDepth && rec.depthSum < best.depthSum)
+      ) {
+        best = rec;
       }
     }
     if (!best) return null;
 
-    const listParent = best.parent;
-    // Walk up to locate the 2-pane split container (sidebar column + main content pane),
-    // skipping narrow sidebar headers/titles stacked vertically above the nav list.
+    // Resolve unwrapped sibling items & true listParent inside the matched sidebar container
+    const unwrappedItems = best.items.map((entry) => unwrapNavItem(entry.el, entry.groupIdx, best.container));
+    const listParentCounts = new Map();
+    for (let i = 0; i < unwrappedItems.length; i += 1) {
+      const p = unwrappedItems[i].parentElement || best.container;
+      listParentCounts.set(p, (listParentCounts.get(p) || 0) + 1);
+    }
+    let listParent = best.container;
+    let bestParentCount = 0;
+    for (const [p, count] of listParentCounts.entries()) {
+      if (count > bestParentCount) {
+        bestParentCount = count;
+        listParent = p;
+      }
+    }
+    const directMatchedItems = unwrappedItems.filter((item) => item.parentElement === listParent);
+    const matchedList = directMatchedItems.length > 0 ? directMatchedItems : unwrappedItems;
+
+    // Walk up up to 10 levels to locate the 2-pane split container (outerSidebar + largest right-hand contentPane)
+    const sidebarRect =
+      typeof best.container.getBoundingClientRect === 'function' ? best.container.getBoundingClientRect() : null;
     let cur = listParent;
+    let outerSidebar = best.container;
     let contentPane = null;
-    for (let depth = 0; depth < 6 && cur && cur.parentElement; depth += 1) {
+    for (let depth = 0; depth < 10 && cur && cur.parentElement && cur.parentElement !== doc.documentElement; depth += 1) {
       const container = cur.parentElement;
-      const curRect =
-        typeof cur.getBoundingClientRect === 'function' ? cur.getBoundingClientRect() : null;
+      const curRect = typeof cur.getBoundingClientRect === 'function' ? cur.getBoundingClientRect() : null;
       const hasLayout = Boolean(curRect && curRect.width > 0 && curRect.height > 0);
+      const rightBoundary = hasLayout
+        ? Math.max(curRect.right, sidebarRect && sidebarRect.width > 0 ? sidebarRect.right : 0)
+        : 0;
       const siblings = Array.from(container.children || []).filter((child) => child !== cur);
-      const viable = siblings.find((sib) => {
+      const viableList = siblings.filter((sib) => {
         if (!sib || sib.nodeType !== 1) return false;
         const tag = String(sib.tagName || '').toUpperCase();
         if (tag === 'STYLE' || tag === 'SCRIPT' || tag === 'BUTTON' || tag === 'HEADER' || /^H[1-6]$/.test(tag)) {
@@ -860,9 +1000,11 @@ function createHostSettingsUi(doc, win, opts = {}) {
         if (hasLayout && typeof sib.getBoundingClientRect === 'function') {
           const sibRect = sib.getBoundingClientRect();
           if (sibRect.width < 260 || sibRect.height < 200) return false;
-          // Require side-by-side pane placement (not stacked vertically inside the same narrow column)
+          // Require side-by-side placement to the right (or non-overlapping horizontally)
           const horizontalOverlap = Math.min(curRect.right, sibRect.right) - Math.max(curRect.left, sibRect.left);
-          if (horizontalOverlap > Math.min(curRect.width, sibRect.width) * 0.5) return false;
+          if (sibRect.left < rightBoundary - 24 && horizontalOverlap > Math.min(curRect.width, sibRect.width) * 0.5) {
+            return false;
+          }
           return true;
         }
         // Fallback for non-layout mock DOMs: skip tiny text-only sidebar titles with no element children
@@ -871,50 +1013,159 @@ function createHostSettingsUi(doc, win, opts = {}) {
         if (childCount === 0 && textLen < 40 && tag !== 'MAIN') return false;
         return true;
       });
-      if (viable) {
-        contentPane = viable;
+      if (viableList.length > 0) {
+        let chosen = viableList[0];
+        if (hasLayout) {
+          let bestArea = 0;
+          for (let i = 0; i < viableList.length; i += 1) {
+            const r = viableList[i].getBoundingClientRect();
+            const area = r.width * r.height;
+            if (area > bestArea) {
+              bestArea = area;
+              chosen = viableList[i];
+            }
+          }
+        }
+        outerSidebar = cur;
+        contentPane = chosen;
         break;
       }
       cur = container;
     }
 
     if (!contentPane) return null;
+
+    // Pick an INACTIVE sibling as clone template so native classes/spacing match with 0px shift
+    const inactiveItem =
+      matchedList.find((item) => !hasVisibleBackground(item, win) && matchAnchorGroupIndex(item.textContent) !== 0) ||
+      matchedList.find((item) => !hasVisibleBackground(item, win)) ||
+      matchedList[matchedList.length - 1] ||
+      matchedList[0];
+
     return {
       listParent,
+      outerSidebar,
       contentPane,
-      referenceItem: best.items[best.items.length - 1] || best.items[0],
+      referenceItem: inactiveItem,
+      lastMatchedItem: matchedList[matchedList.length - 1] || inactiveItem,
     };
   }
 
-  function isCloseButtonElement(el) {
+  function isCloseButtonElement(el, contentPaneRect) {
     if (!el || el.nodeType !== 1) return false;
+    const checkBtn = (btn) => {
+      const aria = normalizeText(btn.getAttribute ? btn.getAttribute('aria-label') : '');
+      const title = normalizeText(btn.getAttribute ? btn.getAttribute('title') : '');
+      const text = normalizeText(btn.textContent);
+      if (
+        aria.includes('close') ||
+        aria.includes('닫기') ||
+        title.includes('close') ||
+        title.includes('닫기') ||
+        text === '×' ||
+        text === '✕' ||
+        text === 'x'
+      ) {
+        return true;
+      }
+      if (contentPaneRect && typeof btn.getBoundingClientRect === 'function') {
+        const r = btn.getBoundingClientRect();
+        if (r && r.width > 0 && r.width <= 52 && r.height > 0 && r.height <= 52) {
+          if (r.right >= contentPaneRect.right - 72 && r.top <= contentPaneRect.top + 72) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
     const tag = String(el.tagName || '').toUpperCase();
-    if (tag !== 'BUTTON') return false;
-    const aria = normalizeText(el.getAttribute ? el.getAttribute('aria-label') : '');
-    const title = normalizeText(el.getAttribute ? el.getAttribute('title') : '');
-    const text = normalizeText(el.textContent);
-    return (
-      aria.includes('close') ||
-      aria.includes('닫기') ||
-      title.includes('close') ||
-      title.includes('닫기') ||
-      text === '×' ||
-      text === 'x'
-    );
+    if (tag === 'BUTTON' && checkBtn(el)) return true;
+    if (contentPaneRect && typeof el.getBoundingClientRect === 'function') {
+      const r = el.getBoundingClientRect();
+      if (
+        r &&
+        r.width > 0 &&
+        r.width <= 64 &&
+        r.height > 0 &&
+        r.height <= 64 &&
+        r.right >= contentPaneRect.right - 72 &&
+        r.top <= contentPaneRect.top + 72
+      ) {
+        const innerBtn = el.querySelector ? el.querySelector('button') : null;
+        if (innerBtn && checkBtn(innerBtn)) return true;
+      }
+    }
+    return false;
   }
 
-  function updateNavVisualState(active) {
+  function suppressNativeActiveSiblings() {
+    let activeBg = 'rgba(255, 255, 255, 0.08)';
+    let activeColor = '#f8fafc';
+    if (!mountedListParent) return { activeBg, activeColor };
+
+    const dim = (node) => {
+      if (!node || !node.style || suppressedSiblingStyles.has(node)) return;
+      suppressedSiblingStyles.set(node, {
+        bg: node.style.backgroundColor || '',
+        color: node.style.color || '',
+      });
+      setImportantStyle(node, 'background-color', 'transparent');
+      if (navInactiveColor) {
+        setImportantStyle(node, 'color', navInactiveColor);
+      }
+    };
+
+    const children = Array.from(mountedListParent.children || []);
+    for (let i = 0; i < children.length; i += 1) {
+      const sib = children[i];
+      if (!sib || sib.nodeType !== 1 || sib === navElement) continue;
+      if (sib.getAttribute && sib.getAttribute(NAV_ATTR) === 'true') continue;
+      if (hasVisibleBackground(sib, win)) {
+        try {
+          const cs = win.getComputedStyle(sib);
+          if (cs.backgroundColor) activeBg = cs.backgroundColor;
+          if (cs.color) activeColor = cs.color;
+        } catch (_e) {}
+      }
+      dim(sib);
+      if (typeof sib.querySelectorAll === 'function') {
+        const inners = sib.querySelectorAll('button, span, div, a');
+        for (let j = 0; j < inners.length; j += 1) {
+          const inner = inners[j];
+          if (hasVisibleBackground(inner, win)) {
+            try {
+              const ics = win.getComputedStyle(inner);
+              if (ics.backgroundColor) activeBg = ics.backgroundColor;
+              if (ics.color) activeColor = ics.color;
+            } catch (_e2) {}
+          }
+          dim(inner);
+        }
+      }
+    }
+    return { activeBg, activeColor };
+  }
+
+  function restoreNativeActiveSiblings() {
+    for (const [node, saved] of suppressedSiblingStyles.entries()) {
+      removeStyleProp(node, 'background-color', saved.bg);
+      removeStyleProp(node, 'color', saved.color);
+    }
+    suppressedSiblingStyles.clear();
+  }
+
+  function updateNavVisualState(active, activeTheme) {
     if (!navElement) return;
     navElement.setAttribute('aria-selected', active ? 'true' : 'false');
     navElement.setAttribute('data-active', active ? 'true' : 'false');
     if (active) {
-      navElement.style.backgroundColor = 'rgba(56, 189, 248, 0.14)';
-      navElement.style.color = '#f8fafc';
-      navElement.style.fontWeight = '600';
+      const bg = (activeTheme && activeTheme.activeBg) || 'rgba(56, 189, 248, 0.14)';
+      const fg = (activeTheme && activeTheme.activeColor) || '#f8fafc';
+      setImportantStyle(navElement, 'background-color', bg);
+      setImportantStyle(navElement, 'color', fg);
     } else {
-      navElement.style.backgroundColor = '';
-      navElement.style.color = '';
-      navElement.style.fontWeight = '';
+      removeStyleProp(navElement, 'background-color', '');
+      removeStyleProp(navElement, 'color', '');
     }
   }
 
@@ -933,11 +1184,18 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
   function hideOtherContentChildren() {
     if (!mountedContentPane) return;
+    const paneRect =
+      typeof mountedContentPane.getBoundingClientRect === 'function'
+        ? mountedContentPane.getBoundingClientRect()
+        : null;
     const children = Array.from(mountedContentPane.children || []);
     for (let i = 0; i < children.length; i += 1) {
       const child = children[i];
       if (child === paneHostElement) continue;
-      if (isCloseButtonElement(child)) continue;
+      if (isCloseButtonElement(child, paneRect)) {
+        if (child.style) child.style.zIndex = '20';
+        continue;
+      }
       if (!savedChildDisplay.has(child)) {
         savedChildDisplay.set(child, child.style ? child.style.display || '' : '');
       }
@@ -1318,6 +1576,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
   function openPanel() {
     if (disposed || !mountedContentPane) return false;
+    const activeTheme = suppressNativeActiveSiblings();
     hideOtherContentChildren();
 
     if (!paneHostElement || paneHostElement.parentElement !== mountedContentPane) {
@@ -1332,7 +1591,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     }
     paneHostElement.style.display = 'block';
     isOpen = true;
-    updateNavVisualState(true);
+    updateNavVisualState(true, activeTheme);
     renderPanel();
     refresh();
     return true;
@@ -1341,6 +1600,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
   function closePanel() {
     if (!isOpen && !paneHostElement) return false;
     isOpen = false;
+    restoreNativeActiveSiblings();
     updateNavVisualState(false);
     if (paneHostElement && paneHostElement.style) {
       paneHostElement.style.display = 'none';
@@ -1350,18 +1610,19 @@ function createHostSettingsUi(doc, win, opts = {}) {
   }
 
   function detachNavListeners() {
-    if (mountedListParent && listClickHandler) {
+    if (clickHostElement && listClickHandler) {
       try {
-        mountedListParent.removeEventListener('click', listClickHandler, true);
+        clickHostElement.removeEventListener('click', listClickHandler, true);
       } catch (_err) {}
     }
+    clickHostElement = null;
     listClickHandler = null;
   }
 
   function buildNavItem(referenceItem, lang) {
     let btn;
     if (referenceItem && typeof referenceItem.cloneNode === 'function') {
-      btn = referenceItem.cloneNode(false);
+      btn = referenceItem.cloneNode(true);
       btn.removeAttribute('id');
       btn.removeAttribute('aria-current');
       btn.removeAttribute('data-state');
@@ -1369,26 +1630,27 @@ function createHostSettingsUi(doc, win, opts = {}) {
       if (btn.tagName && String(btn.tagName).toUpperCase() === 'BUTTON') {
         btn.setAttribute('type', 'button');
       }
+      if (typeof btn.querySelectorAll === 'function') {
+        const innerBtns = btn.querySelectorAll('button');
+        for (let i = 0; i < innerBtns.length; i += 1) {
+          innerBtns[i].removeAttribute('id');
+          innerBtns[i].setAttribute('type', 'button');
+        }
+      }
+      replaceLeafText(btn, getNavLabel(lang), doc);
     } else {
       btn = doc.createElement('button');
       btn.setAttribute('type', 'button');
+      btn.textContent = getNavLabel(lang);
     }
 
     btn.setAttribute(NAV_ATTR, 'true');
     btn.setAttribute('role', 'tab');
     btn.setAttribute('aria-selected', 'false');
     applyShieldAttributes(btn, extraNoTranslateAttributes);
-
-    btn.style.display = btn.style.display || 'flex';
-    btn.style.alignItems = btn.style.alignItems || 'center';
-    btn.style.gap = btn.style.gap || '8px';
-    btn.style.cursor = 'pointer';
-
-    const icon = createPuzzleIconSvg(doc);
-    const labelSpan = doc.createElement('span');
-    labelSpan.textContent = getNavLabel(lang);
-    btn.appendChild(icon);
-    btn.appendChild(labelSpan);
+    if (btn.style && !btn.style.cursor) {
+      btn.style.cursor = 'pointer';
+    }
 
     btn.addEventListener('click', (ev) => {
       if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
@@ -1399,56 +1661,107 @@ function createHostSettingsUi(doc, win, opts = {}) {
     return btn;
   }
 
+  function findInsertReferenceAfterSettingsGroup(listParent, lastMatchedItem) {
+    if (!listParent || !lastMatchedItem || lastMatchedItem.parentElement !== listParent) {
+      return null;
+    }
+    let anchor = lastMatchedItem;
+    const siblings = Array.from(listParent.children || []);
+    let idx = siblings.indexOf(anchor);
+    if (idx === -1) return null;
+    // Stay cleanly after any adjacent peer addon slot nav items mounted right after the settings group
+    while (idx + 1 < siblings.length) {
+      const next = siblings[idx + 1];
+      if (
+        next &&
+        next.getAttribute &&
+        (next.getAttribute('data-addon-host-slot') || next.getAttribute('data-addon-host-owner'))
+      ) {
+        idx += 1;
+        anchor = next;
+      } else {
+        break;
+      }
+    }
+    return idx + 1 < siblings.length ? siblings[idx + 1] : null;
+  }
+
   function ensureMount() {
     if (disposed || !doc) return false;
 
     if (navElement && navElement.isConnected && mountedListParent && mountedListParent.isConnected) {
+      const liveLang = detectLanguage(doc, mountedListParent);
+      if (liveLang !== mountedLang) {
+        mountedLang = liveLang;
+        replaceLeafText(navElement, getNavLabel(liveLang), doc);
+        if (isOpen) renderPanel();
+      }
       return true;
     }
 
     // Previous Settings modal was unmounted; clean stale references
+    restoreNativeActiveSiblings();
     detachNavListeners();
     navElement = null;
+    navInactiveColor = '';
     paneHostElement = null;
     shadowRoot = null;
     mountedListParent = null;
+    mountedOuterSidebar = null;
     mountedContentPane = null;
+    mountedLang = null;
     isOpen = false;
 
     const found = findSettingsSidebarAndContent();
     if (!found) return false;
 
-    const { listParent, contentPane, referenceItem } = found;
+    const { listParent, outerSidebar, contentPane, referenceItem, lastMatchedItem } = found;
     const existing = listParent.querySelector ? listParent.querySelector(`[${NAV_ATTR}="true"]`) : null;
     if (existing) {
       navElement = existing;
       mountedListParent = listParent;
+      mountedOuterSidebar = outerSidebar || listParent;
       mountedContentPane = contentPane;
+      mountedLang = detectLanguage(doc, listParent);
       return true;
     }
 
     const lang = detectLanguage(doc, listParent);
+    try {
+      if (referenceItem && win && typeof win.getComputedStyle === 'function') {
+        navInactiveColor = String(win.getComputedStyle(referenceItem).color || '');
+      }
+    } catch (_e) {
+      navInactiveColor = '';
+    }
     const btn = buildNavItem(referenceItem, lang);
-    listParent.appendChild(btn);
+    const insertRef = findInsertReferenceAfterSettingsGroup(listParent, lastMatchedItem);
+    if (insertRef && typeof listParent.insertBefore === 'function') {
+      listParent.insertBefore(btn, insertRef);
+    } else {
+      listParent.appendChild(btn);
+    }
 
     mountedListParent = listParent;
+    mountedOuterSidebar = outerSidebar || listParent;
     mountedContentPane = contentPane;
+    mountedLang = lang;
     navElement = btn;
 
-    // Close our panel smoothly whenever the user selects any sibling tab (native OR peer addon)
+    // Close our panel smoothly whenever the user selects any other tab/item in the sidebar (native OR peer addon)
+    const clickHost = mountedOuterSidebar || listParent;
+    clickHostElement = clickHost;
     listClickHandler = (ev) => {
       const target = ev && ev.target;
-      if (!target || !navElement) return;
+      if (!target || !navElement || !isOpen) return;
       if (target === navElement || (navElement.contains && navElement.contains(target))) {
         return;
       }
-      const clickedNav =
-        target.closest && target.closest('button, [role="tab"], [role="button"], a');
-      if (clickedNav && mountedListParent && mountedListParent.contains(clickedNav)) {
+      if (clickHost && clickHost.contains && clickHost.contains(target)) {
         closePanel();
       }
     };
-    listParent.addEventListener('click', listClickHandler, true);
+    clickHost.addEventListener('click', listClickHandler, true);
     return true;
   }
 
@@ -1465,14 +1778,22 @@ function createHostSettingsUi(doc, win, opts = {}) {
     started = true;
     ensureMount();
     const MO = (win && win.MutationObserver) || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
-    if (MO && doc && (doc.body || doc.documentElement)) {
+    const observeTarget = doc && (doc.documentElement || doc.body);
+    if (MO && observeTarget) {
       observer = new MO(() => {
         scheduleEnsureMount();
       });
-      observer.observe(doc.body || doc.documentElement, {
+      observer.observe(observeTarget, {
         childList: true,
         subtree: true,
       });
+    }
+    if (doc && doc.readyState === 'loading' && typeof doc.addEventListener === 'function') {
+      domReadyHandler = () => {
+        domReadyHandler = null;
+        if (!disposed) ensureMount();
+      };
+      doc.addEventListener('DOMContentLoaded', domReadyHandler, { once: true });
     }
     return true;
   }
@@ -1488,6 +1809,12 @@ function createHostSettingsUi(doc, win, opts = {}) {
       clearTimeout(flashTimer);
       flashTimer = null;
     }
+    if (domReadyHandler && doc && typeof doc.removeEventListener === 'function') {
+      try {
+        doc.removeEventListener('DOMContentLoaded', domReadyHandler);
+      } catch (_err) {}
+      domReadyHandler = null;
+    }
     if (observer) {
       try {
         observer.disconnect();
@@ -1495,6 +1822,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
       observer = null;
     }
     closePanel();
+    restoreNativeActiveSiblings();
     detachNavListeners();
     if (navElement && navElement.parentNode) {
       try {
@@ -1507,10 +1835,13 @@ function createHostSettingsUi(doc, win, opts = {}) {
       } catch (_err) {}
     }
     navElement = null;
+    navInactiveColor = '';
     paneHostElement = null;
     shadowRoot = null;
     mountedListParent = null;
+    mountedOuterSidebar = null;
     mountedContentPane = null;
+    mountedLang = null;
   }
 
   return Object.freeze({

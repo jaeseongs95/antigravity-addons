@@ -201,7 +201,7 @@ function buildHostLoaderScriptSource(
   paths,
   profile,
   {
-    hostVersion = '2.5.0',
+    hostVersion = '2.5.1',
     strictTrustPolicy = true,
     mainHookTimeoutMs = 5000,
     rendererExecTimeoutMs = 10000,
