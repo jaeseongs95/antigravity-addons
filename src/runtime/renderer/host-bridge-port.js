@@ -27,6 +27,8 @@ const HOST_BRIDGE_PORT_REQUIRED_METHODS = _ObjectFreeze([
 const HOST_BRIDGE_PORT_OPTIONAL_METHODS = _ObjectFreeze([
   'readConfigScope',
   'writeConfigScope',
+  'getHostAdminState',
+  'setRemoteAddonPreference',
 ]);
 
 function isValidHostBridgePort(candidate) {
@@ -58,6 +60,9 @@ function wrapHostBridgePort(candidate) {
   const fnPing = candidate.ping;
   const fnReadConfigScope = typeof candidate.readConfigScope === 'function' ? candidate.readConfigScope : null;
   const fnWriteConfigScope = typeof candidate.writeConfigScope === 'function' ? candidate.writeConfigScope : null;
+  const fnGetHostAdminState = typeof candidate.getHostAdminState === 'function' ? candidate.getHostAdminState : null;
+  const fnSetRemoteAddonPreference =
+    typeof candidate.setRemoteAddonPreference === 'function' ? candidate.setRemoteAddonPreference : null;
 
   const wrapped = {
     docGenId,
@@ -84,6 +89,16 @@ function wrapHostBridgePort(candidate) {
   if (fnWriteConfigScope) {
     wrapped.writeConfigScope = function writeConfigScope(pluginId, scopeId, rawJson, opts) {
       return _ReflectApply(fnWriteConfigScope, candidate, [pluginId, scopeId, rawJson, opts]);
+    };
+  }
+  if (fnGetHostAdminState) {
+    wrapped.getHostAdminState = function getHostAdminState() {
+      return _ReflectApply(fnGetHostAdminState, candidate, []);
+    };
+  }
+  if (fnSetRemoteAddonPreference) {
+    wrapped.setRemoteAddonPreference = function setRemoteAddonPreference(pluginId, enabled) {
+      return _ReflectApply(fnSetRemoteAddonPreference, candidate, [pluginId, enabled]);
     };
   }
 

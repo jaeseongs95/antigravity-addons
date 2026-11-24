@@ -97,6 +97,7 @@ function buildRendererKernelBundleSource() {
     './region-observer.js',
     './settings-tab-coordinator.js',
     './host-bridge-port.js',
+    './host-settings-ui.js',
     './kernel.js',
   ];
 

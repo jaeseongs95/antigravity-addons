@@ -5,7 +5,19 @@
 
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)
 
-**Single, vendor-independent native desktop & remote web addon host framework (`v2.4.0`) with zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent native desktop & remote web addon host framework (`v2.5.0`) with built-in Settings `Addon Manager` (`애드온 관리`) UI, zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+
+## Key Updates in v2.5.0 (Built-in Settings `Addon Manager` UI & Remote Web Visibility Controls)
+
+- **Built-in Settings `Addon Manager` (`애드온 관리`) UI (Host-Owned Shadow DOM, SOLID #0)**:
+  - Integrates a vendor-neutral Settings tab (`src/runtime/renderer/host-settings-ui.js`, declarative `HostProfile.settingsUi`) directly into the Electron renderer kernel — zero extra consumer plugin clutter and clean coexistence with native Settings tabs and peer plugin tabs (such as `MCP Manager`).
+  - Displays live Desktop addon runtime status (`Running` / `Disabled` / `Blocked` / `Failed`), trust approval badges, declared capabilities (`Renderer`, `Main Hook`, `Settings`, `Config`), and Remote Web bundle sync state (`Up to date` / `Rebuild needed` / `Not built yet`) with one-click copy buttons for the build command and Bookmarklet.
+- **Per-Addon Remote Web Visibility Preferences (`remote-preferences.json`)**:
+  - Adds a host-privileged Main process service (`src/runtime/main/host-admin-service.js`) and claimed IPC channels (`HOST_ADMIN_STATE`, `HOST_ADMIN_SET_REMOTE_PREF`) — strictly isolated from consumer `addonHost` plugin handles.
+  - Lets users toggle `Show on Remote Web` (`원격 웹 표시`) per compatible addon, persisting atomically to `HOST_DATA_DIR/remote-preferences.json` (never writing under `~/.gemini/config/plugins/`).
+  - Updates `src/adapters/remote-web/addon-collector.js` and `scripts/build-remote.js` (`--remote-prefs`) so addons toggled off are excluded (`DISABLED_BY_REMOTE_PREFERENCES`) when rebuilding the Remote Web Userscript & Bookmarklet bundle.
+- **Loader Profile Forwarding**:
+  - `src/adapters/electron/host-loader-builder.js` forwards `uiSurfaces`, `settingsUi`, `remoteProfileId`, `remoteSupportedCapabilities`, `remotePrefsPath`, and `remoteDistDir` cleanly on `addon-host --upgrade` with zero `app.asar` re-patching.
 
 ## Key Updates in v2.4.0 (Per-Surface Bounds API, `--build-remote` Default Path Fix & F7 Hardening)
 
@@ -102,6 +114,7 @@ if (rootEl) {
 
 ## Documentation
 
+- [Release Notes (`v2.5.0` EN/KO)](./RELEASE_NOTES_v2.5.0.md)
 - [Release Notes (`v2.4.0` EN/KO)](./RELEASE_NOTES_v2.4.0.md)
 - [Release Notes (`v2.3.0` EN/KO)](./RELEASE_NOTES_v2.3.0.md)
 - [Remote Web Host Guide (`docs/REMOTE_WEB.md`)](./docs/REMOTE_WEB.md)

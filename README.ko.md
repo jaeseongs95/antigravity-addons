@@ -5,7 +5,19 @@
 
 > **언어**: [English (README.md)](./README.md) | 한국어
 
-**무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Remote Web 호스트 통합, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.4.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+**내장 설정 화면 `애드온 관리(Addon Manager)` UI, 무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Remote Web 호스트 통합, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.5.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+
+## v2.5.0 주요 업데이트 (설정 화면 내장 `애드온 관리` UI · 원격 웹 표시 제어)
+
+- **설정 화면 내장 `애드온 관리(Addon Manager)` UI (호스트 자체 Shadow DOM · SOLID #0)**:
+  - 별도 관리 플러그인을 추가하지 않고 렌더러 커널에 직접 내장된 벤더 중립 설정 탭(`src/runtime/renderer/host-settings-ui.js`, 프로필 선언형 `HostProfile.settingsUi`)을 제공합니다. 기본 설정 탭 및 동료 플러그인 탭(`MCP Manager` 등)과 충돌 없이 공존합니다.
+  - 네이티브 호스트 기반으로 실행 중인 애드온의 데스크톱 상태(`실행 중`/`비활성`/`차단됨`/`오류`), 신뢰 승인 여부, 선언 기능(`렌더러 UI`/`메인 훅`/`설정 브리지`/`구성 브리지`), 원격 웹 번들 동기화 상태(`최신 상태`/`재빌드 필요`/`미빌드`)와 원클릭 빌드 명령·북마클릿 복사를 한 화면에서 제공합니다.
+- **애드온별 원격 웹 표시 설정 (`remote-preferences.json`)**:
+  - 호스트 전용 메인 서비스(`src/runtime/main/host-admin-service.js`)와 인증된 IPC 채널(`HOST_ADMIN_STATE`, `HOST_ADMIN_SET_REMOTE_PREF`)을 추가했으며, 소비자 플러그인 `addonHost` 핸들에는 일절 노출하지 않습니다.
+  - 원격 웹 호환 애드온마다 `원격 웹 표시` 토글을 켜거나 끌 수 있으며 변경 사항은 `HOST_DATA_DIR/remote-preferences.json`에 원자적으로 저장됩니다(`~/.gemini/config/plugins/` 무쓰기 원칙 유지).
+  - `src/adapters/remote-web/addon-collector.js`와 `scripts/build-remote.js`(`--remote-prefs`)가 해당 설정을 반영해 꺼진 애드온을 `DISABLED_BY_REMOTE_PREFERENCES`로 제외합니다.
+- **로더 프로필 전달 보강**:
+  - `src/adapters/electron/host-loader-builder.js`가 `uiSurfaces`, `settingsUi`, `remoteProfileId`, `remoteSupportedCapabilities`, `remotePrefsPath`, `remoteDistDir`를 로더 설정으로 전달하며 `addon-host --upgrade` 시 `app.asar` 재패치는 0바이트입니다.
 
 ## v2.4.0 주요 업데이트 (화면별 중앙 좌표 API · `--build-remote` 기본 경로 결함 수정 · F7 보강)
 
@@ -90,6 +102,7 @@ node ./bin/addon-host.js --rollback
 
 ## 문서
 
+- [릴리스 노트 (`v2.5.0` 영문/국문)](./RELEASE_NOTES_v2.5.0.md)
 - [릴리스 노트 (`v2.4.0` 영문/국문)](./RELEASE_NOTES_v2.4.0.md)
 - [릴리스 노트 (`v2.3.0` 영문/국문)](./RELEASE_NOTES_v2.3.0.md)
 - [Remote Web 호스트 가이드 (`docs/REMOTE_WEB.ko.md`)](./docs/REMOTE_WEB.ko.md)

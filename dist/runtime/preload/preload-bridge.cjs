@@ -26,6 +26,8 @@ const IPC_PORTAL_CLAIM = 'addon-host:v2:portal-claim';
 const IPC_SAVE_SETTINGS = 'addon-host:v2:save-settings';
 const IPC_CONFIG_READ = 'addon-host:v2:config-read';
 const IPC_CONFIG_WRITE = 'addon-host:v2:config-write';
+const IPC_HOST_ADMIN_STATE = 'addon-host:v2:host-admin-state';
+const IPC_HOST_ADMIN_SET_REMOTE_PREF = 'addon-host:v2:host-admin-set-remote-pref';
 const IPC_REPORT_ERROR = 'addon-host:v2:report-error';
 const IPC_PING = 'addon-host:v2:ping';
 
@@ -99,6 +101,16 @@ try {
             payload.expectedSha256 = opts.expectedSha256;
           }
           return ipcRenderer.invoke(IPC_CONFIG_WRITE, payload);
+        },
+        getHostAdminState() {
+          return ipcRenderer.invoke(IPC_HOST_ADMIN_STATE, { docGenId });
+        },
+        setRemoteAddonPreference(pluginId, enabled) {
+          return ipcRenderer.invoke(IPC_HOST_ADMIN_SET_REMOTE_PREF, {
+            docGenId,
+            pluginId: String(pluginId || ''),
+            enabled: Boolean(enabled),
+          });
         },
         reportError(pluginId, detail) {
           try {
