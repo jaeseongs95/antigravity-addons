@@ -1,9 +1,10 @@
-# antigravity-native-addon-host
+# antigravity-addons
 
-[![CI](https://github.com/jaeseongs95/antigravity-native-addon-host/actions/workflows/ci.yml/badge.svg)](https://github.com/jaeseongs95/antigravity-native-addon-host/actions/workflows/ci.yml)
+[![CI](https://github.com/jaeseongs95/antigravity-addons/actions/workflows/ci.yml/badge.svg)](https://github.com/jaeseongs95/antigravity-addons/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
-> **Language**: English | [한국어 (README.ko.md)](./README.ko.md)
+> **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
+> *(Formerly `antigravity-native-addon-host` — existing `addon-host` CLI command, `ADDON_HOST_LOADER_V2` marker, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
 **Single, vendor-independent native desktop & remote web addon host framework (`v2.5.0`) with built-in Settings `Addon Manager` (`애드온 관리`) UI, zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
 

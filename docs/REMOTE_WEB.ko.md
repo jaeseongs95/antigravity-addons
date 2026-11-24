@@ -2,7 +2,7 @@
 
 [English Documentation](./REMOTE_WEB.md)
 
-`antigravity-native-addon-host` v2.3.0은 공용 렌더러 커널(`src/runtime/renderer/kernel.js`)과 `HostBridgePort` 계약 위에 통합된 **원격 웹 호스트** 프로파일(`antigravity-remote-web`) 및 브라우저 어댑터(`src/adapters/remote-web/`)를 제공합니다.
+`antigravity-addons`(구 `antigravity-native-addon-host`) v2.3.0+는 공용 렌더러 커널(`src/runtime/renderer/kernel.js`)과 `HostBridgePort` 계약 위에 통합된 **원격 웹 호스트** 프로파일(`antigravity-remote-web`) 및 브라우저 어댑터(`src/adapters/remote-web/`)를 제공합니다.
 
 `antigravity-desktop`용으로 개발된 `AddonManifest.v2` 준수 렌더러 플러그인은 별도의 원격 전용 API로 다시 작성하지 않아도 Antigravity Remote Web(`https://antigravity.google.com/*`)에서 자동으로 동작합니다.
 
