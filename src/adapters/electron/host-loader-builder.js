@@ -60,6 +60,8 @@ function collectExecutableAddons(
   {
     checkFilesExist = true,
     hostProfileId = null,
+    compatibleHostProfiles = undefined,
+    supportedCapabilities = undefined,
     hostVersion = undefined,
     strictTrustPolicy = true,
     fsPort = null,
@@ -71,6 +73,8 @@ function collectExecutableAddons(
     pluginsRootDir: paths.PLUGINS_ROOT_DIR,
     checkFilesExist,
     hostProfileId,
+    compatibleHostProfiles,
+    supportedCapabilities,
     hostVersion,
     strictTrustPolicy,
     fsPort: activeFsPort,
@@ -82,7 +86,7 @@ function buildHostLoaderScriptSource(
   paths,
   profile,
   {
-    hostVersion = '2.1.1',
+    hostVersion = '2.3.0',
     strictTrustPolicy = true,
     mainHookTimeoutMs = 5000,
     rendererExecTimeoutMs = 10000,
@@ -101,6 +105,9 @@ function buildHostLoaderScriptSource(
     }
   }
 
+  const resolvedConfigScopes =
+    typeof profile.resolveConfigScopes === 'function' ? profile.resolveConfigScopes(paths) : {};
+
   const hostCfg = {
     hostVersion,
     buildSha8,
@@ -118,8 +125,14 @@ function buildHostLoaderScriptSource(
     configJsonPath: paths.CONFIG_JSON_PATH || null,
     trustPolicyPath:
       paths.TRUST_POLICY_PATH || (loaderDir ? path.join(loaderDir, 'trust-policy.json') : null),
+    configScopes:
+      resolvedConfigScopes && typeof resolvedConfigScopes === 'object' && !Array.isArray(resolvedConfigScopes)
+        ? resolvedConfigScopes
+        : {},
     profile: {
       id: profile.id,
+      compatibleHostProfiles: Array.isArray(profile.compatibleHostProfiles) ? profile.compatibleHostProfiles : null,
+      supportedCapabilities: Array.isArray(profile.supportedCapabilities) ? profile.supportedCapabilities : null,
       patchMarker: profile.patchMarker,
       windowOrigin: profile.windowOrigin || null,
       strictWindowOrigin: Boolean(profile.strictWindowOrigin),

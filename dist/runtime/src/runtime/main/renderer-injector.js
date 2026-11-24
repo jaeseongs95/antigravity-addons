@@ -62,6 +62,7 @@ function createRendererInjector({
   const hostTokensByWcId = new Map(); // wcId -> per-document-generation CSPRNG kernel auth token (SEC-02)
   const injectedPluginsByWcId = new Map(); // wcId -> Set<pluginId>
   const trustedSettingsByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, fileName, maxBytes }>
+  const trustedConfigByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, scopes }>
   const deliveredSettingsKeyByWcId = new Map(); // wcId -> Map<pluginId, string> (I1: per-window delivery dedup)
   const lifecycleStatesByWcId = new Map(); // wcId -> Map<pluginId, state> (I10: multi-window state isolation)
   const navAttemptSeqByWcId = new Map(); // wcId -> incremented on did-start-navigation to abort in-flight loops without bricking live doc (R-1)
@@ -182,6 +183,7 @@ function createRendererInjector({
     const hostToken = crypto.randomBytes(24).toString('hex');
     const kernelConfig = {
       docGenId: state.docGenId,
+      hostProfileId: profile.id || null,
       claimNonce: nonce || null,
       hostToken,
       extraNoTranslateAttributes: Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [],
@@ -237,6 +239,11 @@ function createRendererInjector({
       trustedSettingsMap = new Map();
       trustedSettingsByWcId.set(wcId, trustedSettingsMap);
     }
+    let trustedConfigMap = trustedConfigByWcId.get(wcId);
+    if (!trustedConfigMap) {
+      trustedConfigMap = new Map();
+      trustedConfigByWcId.set(wcId, trustedConfigMap);
+    }
 
     // Dispose any previously injected plugins that are now disabled/unregistered
     const hostToken = hostTokensByWcId.get(wcId) || null;
@@ -252,6 +259,7 @@ function createRendererInjector({
             );
             injectedSet.delete(oldId);
             trustedSettingsMap.delete(oldId);
+            trustedConfigMap.delete(oldId);
             const delivMap = deliveredSettingsKeyByWcId.get(wcId);
             if (delivMap) delivMap.delete(oldId);
             setWindowLifecycleState(wcId, oldId, LIFECYCLE_STATES.DISPOSED);
@@ -295,6 +303,22 @@ function createRendererInjector({
             ? settingsBridge.readSnapshotForPlugin(addon.pluginId, settingsSpec)
             : null;
 
+        const configSpec =
+          addon.manifest.configBridge &&
+          typeof addon.manifest.configBridge === 'object' &&
+          Array.isArray(addon.manifest.configBridge.scopes) &&
+          addon.manifest.configBridge.scopes.length > 0
+            ? addon.manifest.configBridge
+            : null;
+        const hasConfigBridge = Boolean(configSpec && verified.effectiveTrustLevel === 'trusted');
+        const configScopes = hasConfigBridge
+          ? configSpec.scopes.map((s) => ({
+              scopeId: s.scopeId,
+              access: s.access,
+              maxBytes: s.maxBytes,
+            }))
+          : [];
+
         const pluginMeta = {
           pluginId: addon.pluginId,
           version: addon.manifest.version,
@@ -302,6 +326,8 @@ function createRendererInjector({
           trustLevel: verified.effectiveTrustLevel,
           hasDocumentTransformSlot: Boolean(addon.hasDocumentTransformSlot),
           hasSettingsBridge,
+          hasConfigBridge,
+          configScopes,
           uiSlots: addon.manifest.uiSlots || [],
           isolation: addon.manifest.isolation || {},
         };
@@ -369,9 +395,20 @@ ${verified.source}
           }
         })()`;
 
+        if (hasConfigBridge) {
+          // Bind before Phase 2 execution so verified trusted plugins can call readConfigScope during async startup.
+          trustedConfigMap.set(addon.pluginId, {
+            pluginId: addon.pluginId,
+            scopes: configScopes,
+          });
+        }
+
         try {
           const execRes = await execInWorld(contents, runCode, `plugin:${addon.pluginId}`);
-          if (!isStillCurrent()) return;
+          if (!isStillCurrent()) {
+            trustedConfigMap.delete(addon.pluginId);
+            return;
+          }
           if (execRes && execRes.ok) {
             injectedSet.add(addon.pluginId);
             if (hasSettingsBridge && settingsSpec) {
@@ -401,6 +438,7 @@ ${verified.source}
           } else {
             injectedSet.add(addon.pluginId);
             trustedSettingsMap.delete(addon.pluginId);
+            trustedConfigMap.delete(addon.pluginId);
             setWindowLifecycleState(wcId, addon.pluginId, LIFECYCLE_STATES.FAILED);
             recordRendererError(addon.pluginId, (execRes && execRes.error) || 'ERR_PLUGIN_EXEC');
             try {
@@ -412,6 +450,7 @@ ${verified.source}
             } catch (_disposeErr) {}
           }
         } catch (err) {
+          trustedConfigMap.delete(addon.pluginId);
           if (!isStillCurrent()) return;
           injectedSet.add(addon.pluginId);
           trustedSettingsMap.delete(addon.pluginId);
@@ -513,6 +552,7 @@ ${verified.source}
       hostTokensByWcId.delete(wcId);
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
+      trustedConfigByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
       clearWindowLifecycleStates(wcId);
       syncSettingsBridgeBindings();
@@ -525,6 +565,7 @@ ${verified.source}
       hostTokensByWcId.delete(wcId);
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
+      trustedConfigByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
       clearWindowLifecycleStates(wcId);
       syncSettingsBridgeBindings();
@@ -551,6 +592,7 @@ ${verified.source}
       hostTokensByWcId.delete(wcId);
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
+      trustedConfigByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
       clearWindowLifecycleStates(wcId);
       navAttemptSeqByWcId.delete(wcId);
@@ -576,11 +618,30 @@ ${verified.source}
     };
   }
 
+  function getTrustedConfigBinding(wcId, pluginId) {
+    if (typeof pluginId !== 'string' || !pluginId) return null;
+    const map = trustedConfigByWcId.get(wcId);
+    if (!map) return null;
+    const binding = map.get(pluginId);
+    if (!binding) return null;
+    return {
+      pluginId: binding.pluginId,
+      scopes: Array.isArray(binding.scopes)
+        ? binding.scopes.map((s) => ({
+            scopeId: s.scopeId,
+            access: s.access,
+            maxBytes: s.maxBytes,
+          }))
+        : [],
+    };
+  }
+
   return Object.freeze({
     attachWebContents,
     scheduleSync,
     pushSettingsUpdate,
     getTrustedSettingsBinding,
+    getTrustedConfigBinding,
     recordRendererError,
     collectRendererErrors,
   });

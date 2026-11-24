@@ -95,6 +95,7 @@ function buildRendererKernelBundleSource() {
     './modal-portal.js',
     './region-observer.js',
     './settings-tab-coordinator.js',
+    './host-bridge-port.js',
     './kernel.js',
   ];
 

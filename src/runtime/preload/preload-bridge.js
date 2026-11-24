@@ -24,6 +24,8 @@ const IPC_VERIFY_FRAME = 'addon-host:v2:verify-frame';
 const IPC_CLAIM_NONCE = 'addon-host:v2:claim-nonce';
 const IPC_PORTAL_CLAIM = 'addon-host:v2:portal-claim';
 const IPC_SAVE_SETTINGS = 'addon-host:v2:save-settings';
+const IPC_CONFIG_READ = 'addon-host:v2:config-read';
+const IPC_CONFIG_WRITE = 'addon-host:v2:config-write';
 const IPC_REPORT_ERROR = 'addon-host:v2:report-error';
 const IPC_PING = 'addon-host:v2:ping';
 
@@ -76,6 +78,27 @@ try {
             pluginId: String(pluginId || ''),
             rawJson: typeof rawJson === 'string' ? rawJson : '',
           });
+        },
+        readConfigScope(pluginId, scopeId) {
+          return ipcRenderer.invoke(IPC_CONFIG_READ, {
+            docGenId,
+            pluginId: String(pluginId || ''),
+            scopeId: String(scopeId || ''),
+          });
+        },
+        writeConfigScope(pluginId, scopeId, rawJson, opts) {
+          const hasExpected =
+            opts && typeof opts === 'object' && Object.prototype.hasOwnProperty.call(opts, 'expectedSha256');
+          const payload = {
+            docGenId,
+            pluginId: String(pluginId || ''),
+            scopeId: String(scopeId || ''),
+            rawJson: typeof rawJson === 'string' ? rawJson : '',
+          };
+          if (hasExpected) {
+            payload.expectedSha256 = opts.expectedSha256;
+          }
+          return ipcRenderer.invoke(IPC_CONFIG_WRITE, payload);
         },
         reportError(pluginId, detail) {
           try {

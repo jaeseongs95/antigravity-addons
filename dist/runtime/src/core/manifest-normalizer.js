@@ -51,6 +51,23 @@ function normalizeManifestToV2(manifest) {
         }
       : null;
 
+  const rawConfigBridge =
+    manifest.configBridge &&
+    typeof manifest.configBridge === 'object' &&
+    Array.isArray(manifest.configBridge.scopes) &&
+    manifest.configBridge.scopes.length > 0
+      ? {
+          scopes: manifest.configBridge.scopes
+            .filter((s) => s && typeof s === 'object' && typeof s.scopeId === 'string' && s.scopeId.length > 0)
+            .map((s) => ({
+              scopeId: s.scopeId,
+              access: s.access === 'rw' ? 'rw' : 'ro',
+              maxBytes:
+                Number.isInteger(s.maxBytes) && s.maxBytes >= 1024 && s.maxBytes <= 262144 ? s.maxBytes : 262144,
+            })),
+        }
+      : null;
+
   return {
     ...manifest,
     schemaVersion: 2,
@@ -62,6 +79,7 @@ function normalizeManifestToV2(manifest) {
       respectsNoTranslate: rawIsolation.respectsNoTranslate !== false,
     },
     settingsBridge: rawSettingsBridge,
+    configBridge: rawConfigBridge && rawConfigBridge.scopes.length > 0 ? rawConfigBridge : null,
     integrity:
       manifest.integrity && typeof manifest.integrity === 'object'
         ? {

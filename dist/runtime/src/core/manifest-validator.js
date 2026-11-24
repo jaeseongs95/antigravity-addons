@@ -212,6 +212,8 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       pluginsRootDir = null,
       checkFilesExist = false,
       hostProfileId = null,
+      compatibleHostProfiles = null,
+      supportedCapabilities = null,
       hostVersion = undefined,
       strictTrustPolicy = true,
       fsPort: callFsPort = null,
@@ -242,28 +244,50 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
     }
 
     if (manifest.compatibility) {
-      if (hostProfileId && manifest.compatibility.hostProfile && manifest.compatibility.hostProfile !== hostProfileId) {
-        return {
-          ok: false,
-          reason: 'ERR_INCOMPATIBLE_HOST_PROFILE',
-          errors: [`Requires hostProfile "${manifest.compatibility.hostProfile}", current is "${hostProfileId}"`],
-        };
+      const compat = manifest.compatibility;
+      if (hostProfileId) {
+        if (Array.isArray(compat.excludeHostProfiles) && compat.excludeHostProfiles.includes(hostProfileId)) {
+          return {
+            ok: false,
+            reason: 'ERR_INCOMPATIBLE_HOST_PROFILE',
+            errors: [`Host profile "${hostProfileId}" is excluded by compatibility.excludeHostProfiles`],
+          };
+        }
+        if (Array.isArray(compat.hostProfiles) && compat.hostProfiles.length > 0) {
+          if (!compat.hostProfiles.includes(hostProfileId)) {
+            return {
+              ok: false,
+              reason: 'ERR_INCOMPATIBLE_HOST_PROFILE',
+              errors: [`Requires hostProfile in [${compat.hostProfiles.join(', ')}], current is "${hostProfileId}"`],
+            };
+          }
+        } else if (compat.hostProfile && compat.hostProfile !== hostProfileId) {
+          const acceptedCompat =
+            Array.isArray(compatibleHostProfiles) && compatibleHostProfiles.includes(compat.hostProfile);
+          if (!acceptedCompat) {
+            return {
+              ok: false,
+              reason: 'ERR_INCOMPATIBLE_HOST_PROFILE',
+              errors: [`Requires hostProfile "${compat.hostProfile}", current is "${hostProfileId}"`],
+            };
+          }
+        }
       }
-      if (manifest.compatibility.minHostVersion) {
-        if (!parseSemver(manifest.compatibility.minHostVersion)) {
+      if (compat.minHostVersion) {
+        if (!parseSemver(compat.minHostVersion)) {
           return {
             ok: false,
             reason: 'ERR_MANIFEST_SCHEMA_INVALID',
-            errors: [`Invalid SemVer 2.0.0 minHostVersion: ${manifest.compatibility.minHostVersion}`],
+            errors: [`Invalid SemVer 2.0.0 minHostVersion: ${compat.minHostVersion}`],
           };
         }
         if (hostVersion !== undefined) {
-          const cmp = compareSemver(hostVersion, manifest.compatibility.minHostVersion);
+          const cmp = compareSemver(hostVersion, compat.minHostVersion);
           if (cmp === null || cmp < 0) {
             return {
               ok: false,
               reason: 'ERR_INCOMPATIBLE_HOST_VERSION',
-              errors: [`Requires hostVersion >= ${manifest.compatibility.minHostVersion}, current is ${hostVersion}`],
+              errors: [`Requires hostVersion >= ${compat.minHostVersion}, current is ${hostVersion}`],
             };
           }
         }
@@ -271,6 +295,27 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
     }
 
     const caps = new Set(manifest.capabilities || []);
+    const skippedCapabilities = [];
+    if (Array.isArray(supportedCapabilities) && supportedCapabilities.length > 0) {
+      const supportedSet = new Set(supportedCapabilities);
+      let supportedCount = 0;
+      for (const c of caps) {
+        if (supportedSet.has(c)) {
+          supportedCount += 1;
+        } else {
+          skippedCapabilities.push(c);
+        }
+      }
+      if (supportedCount === 0) {
+        return {
+          ok: false,
+          reason: 'ERR_UNSUPPORTED_HOST_CAPABILITY',
+          errors: [
+            `None of declared capabilities [${Array.from(caps).join(', ')}] are supported by host [${supportedCapabilities.join(', ')}]`,
+          ],
+        };
+      }
+    }
     const entry = manifest.entry || {};
     if (caps.has('renderer') && !entry.rendererScript) {
       return {
@@ -349,9 +394,24 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       }
     }
 
+    if (manifest.configBridge && typeof manifest.configBridge === 'object' && Array.isArray(manifest.configBridge.scopes)) {
+      const seenScopes = new Set();
+      for (const sc of manifest.configBridge.scopes) {
+        if (!sc || typeof sc.scopeId !== 'string') continue;
+        if (seenScopes.has(sc.scopeId)) {
+          return {
+            ok: false,
+            reason: 'ERR_DUPLICATE_CONFIG_SCOPE_IN_MANIFEST',
+            errors: [`Duplicate configBridge scopeId "${sc.scopeId}" within the same manifest`],
+          };
+        }
+        seenScopes.add(sc.scopeId);
+      }
+    }
+
     // Declarative trust validation (v2 Default-Deny):
     // - `strictTrustPolicy` defaults to `true`.
-    // - Omitting `trustLevel` under strict mode defaults to `restricted`, blocking `mainHook`, `document-transform`, and `settingsBridge`.
+    // - Omitting `trustLevel` under strict mode defaults to `restricted`, blocking `mainHook`, `document-transform`, `settingsBridge`, and `configBridge`.
     // - Declaring `trustLevel: "trusted"` passes static manifest validation with `requiresTrustApproval: true`;
     //   actual runtime execution STILL requires host `trust-policy.json` SHA-256 pinning (TrustPolicyPort / TrustVerifier).
     const declaredTrust = manifest.trustLevel || null;
@@ -360,7 +420,7 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       declaredTrust ||
       (strictTrustPolicy
         ? 'restricted'
-        : reqs.hasMainHook || reqs.hasDocumentTransform || reqs.hasSettingsBridge
+        : reqs.hasMainHook || reqs.hasDocumentTransform || reqs.hasSettingsBridge || reqs.hasConfigBridge
           ? 'trusted'
           : 'restricted');
     if (effectiveTrustLevel === 'restricted') {
@@ -385,6 +445,13 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
           errors: ['Restricted plugins cannot declare "settingsBridge"; requires trustLevel: "trusted" and host trust approval'],
         };
       }
+      if (reqs.hasConfigBridge) {
+        return {
+          ok: false,
+          reason: 'ERR_RESTRICTED_CONFIG_BRIDGE_FORBIDDEN',
+          errors: ['Restricted plugins cannot declare "configBridge"; requires trustLevel: "trusted" and host trust approval'],
+        };
+      }
     }
 
     const activeFsPort = callFsPort ? assertFileSystemPort(callFsPort) : defaultFsPort;
@@ -397,7 +464,7 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
         ? `${String(pluginsRootDir).replace(/[\\/]+$/, '')}/${manifest.pluginId}`
         : `plugins/${manifest.pluginId}`;
 
-    if (entry.rendererScript) {
+    if (entry.rendererScript && !skippedCapabilities.includes('renderer')) {
       const res = resolveConfinedScriptPath(entry.rendererScript, pluginDir, {
         pluginsRootDir,
         checkExists: Boolean(checkFilesExist && pluginsRootDir),
@@ -409,7 +476,7 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       resolvedEntries.rendererScript = res.resolvedPath;
     }
 
-    if (entry.mainHookScript) {
+    if (entry.mainHookScript && !skippedCapabilities.includes('mainHook')) {
       const res = resolveConfinedScriptPath(entry.mainHookScript, pluginDir, {
         pluginsRootDir,
         checkExists: Boolean(checkFilesExist && pluginsRootDir),
@@ -434,6 +501,8 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       privilegedCapabilities: reqs.privilegedCapabilities,
       hasDocumentTransformSlot,
       hasSettingsBridge: reqs.hasSettingsBridge,
+      hasConfigBridge: reqs.hasConfigBridge,
+      skippedCapabilities,
       resolvedEntries,
       manifest: normalizedManifest,
       rawManifest: manifest,

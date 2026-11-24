@@ -20,6 +20,8 @@ const asarPatchTransport = require('./adapters/electron/asar-patch-transport');
 const envLauncherTransport = require('./adapters/electron/env-launcher-transport');
 const hostLoaderBuilder = require('./adapters/electron/host-loader-builder');
 const antigravityProfile = require('./profiles/antigravity');
+const antigravityRemoteWebProfile = require('./profiles/antigravity-remote-web');
+const remoteWebAdapter = require('./adapters/remote-web');
 const cliFactory = require('./cli/main');
 
 // NB3: Lazy default CLI app factory (zero side effects or eager instantiation at module import time)
@@ -57,6 +59,8 @@ module.exports = {
   ...envLauncherTransport,
   ...hostLoaderBuilder,
   ...antigravityProfile,
+  ...antigravityRemoteWebProfile,
+  ...remoteWebAdapter,
   ...cliFactory,
   getDefaultCliApp,
   loadHostProfileFromFile: (...args) => getDefaultCliApp().loadHostProfileFromFile(...args),

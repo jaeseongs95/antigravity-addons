@@ -20,6 +20,7 @@ const { createPortalArbiter } = require('./portal-arbiter');
 const { loadTrustPolicyFile } = require('./trust-verifier');
 const { createMainHookRunner } = require('./main-hook-runner');
 const { createSettingsBridge } = require('./settings-bridge');
+const { createConfigBridge } = require('./config-bridge');
 const { createRendererInjector } = require('./renderer-injector');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
 const { createNodeFileSystemPort } = require('../../adapters/node-fs-port');
@@ -108,7 +109,9 @@ function createHostRuntimeController(cfg, deps = {}) {
       pluginsRootDir: cfg.pluginsRootDir,
       checkFilesExist: true,
       hostProfileId: profile.id || null,
-      hostVersion: cfg.hostVersion || '2.1.1',
+      compatibleHostProfiles: profile.compatibleHostProfiles || null,
+      supportedCapabilities: profile.supportedCapabilities || null,
+      hostVersion: cfg.hostVersion || '2.3.0',
       strictTrustPolicy,
       fsPort,
       isEnabled: (pluginId) => isPluginEnabledInConfig(cfg.configJsonPath, pluginId),
@@ -155,6 +158,12 @@ function createHostRuntimeController(cfg, deps = {}) {
         rendererInjectorRef.pushSettingsUpdate(pluginId, snapshot);
       }
     },
+    recordDiag,
+  });
+
+  const configBridge = createConfigBridge({
+    configScopes: cfg.configScopes || {},
+    reservedFilePaths: [cfg.trustPolicyPath, cfg.configJsonPath].filter(Boolean),
     recordDiag,
   });
 
@@ -235,6 +244,61 @@ function createHostRuntimeController(cfg, deps = {}) {
         return settingsBridge.writeSnapshotForPlugin(binding.pluginId, binding, rawJson);
       });
 
+      ipcMain.handle(IPC_CHANNELS.CONFIG_READ, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, scopeId: '', status: 'error', data: null, rawText: null, sha256: null, reason: 'ERR_INVALID_PAYLOAD' };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return {
+            ok: false,
+            scopeId: typeof payload.scopeId === 'string' ? payload.scopeId : '',
+            status: 'error',
+            data: null,
+            rawText: null,
+            sha256: null,
+            reason: check.reason || 'ERR_INVALID_PAYLOAD',
+          };
+        }
+        const pluginId = typeof payload.pluginId === 'string' ? payload.pluginId : '';
+        const scopeId = typeof payload.scopeId === 'string' ? payload.scopeId : '';
+        if (!pluginId || !scopeId) {
+          return { ok: false, scopeId, status: 'error', data: null, rawText: null, sha256: null, reason: 'ERR_INVALID_PAYLOAD' };
+        }
+        const wcId = ev && ev.sender && typeof ev.sender.id === 'number' ? ev.sender.id : null;
+        const binding = wcId !== null ? rendererInjector.getTrustedConfigBinding(wcId, pluginId) : null;
+        if (!binding) {
+          return { ok: false, scopeId, status: 'error', data: null, rawText: null, sha256: null, reason: 'ERR_CONFIG_BRIDGE_NOT_BOUND' };
+        }
+        return configBridge.readScopeForPlugin(binding.pluginId, binding, scopeId);
+      });
+
+      ipcMain.handle(IPC_CHANNELS.CONFIG_WRITE, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, reason: 'ERR_INVALID_PAYLOAD', currentSha256: null, snapshot: null };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, reason: check.reason || 'ERR_INVALID_PAYLOAD', currentSha256: null, snapshot: null };
+        }
+        const pluginId = typeof payload.pluginId === 'string' ? payload.pluginId : '';
+        const scopeId = typeof payload.scopeId === 'string' ? payload.scopeId : '';
+        const rawJson = typeof payload.rawJson === 'string' ? payload.rawJson : null;
+        if (!pluginId || !scopeId || rawJson === null) {
+          return { ok: false, reason: 'ERR_INVALID_PAYLOAD', currentSha256: null, snapshot: null };
+        }
+        const wcId = ev && ev.sender && typeof ev.sender.id === 'number' ? ev.sender.id : null;
+        const binding = wcId !== null ? rendererInjector.getTrustedConfigBinding(wcId, pluginId) : null;
+        if (!binding) {
+          return { ok: false, reason: 'ERR_CONFIG_BRIDGE_NOT_BOUND', currentSha256: null, snapshot: null };
+        }
+        const opts = {};
+        if (Object.prototype.hasOwnProperty.call(payload, 'expectedSha256') && payload.expectedSha256 !== undefined) {
+          opts.expectedSha256 = payload.expectedSha256;
+        }
+        return configBridge.writeScopeForPlugin(binding.pluginId, binding, scopeId, rawJson, opts);
+      });
+
       ipcMain.handle(IPC_CHANNELS.PING, (ev, payload) => {
         const check = originResolver.verifyClaimedEvent(ev, payload && payload.docGenId);
         if (!check.ok) return { ok: false, reason: check.reason };
@@ -296,6 +360,7 @@ function createHostRuntimeController(cfg, deps = {}) {
     getPortalArbiterStatus: () => portalArbiter.getStatus(),
     getPreloadStatus: () => preloadRegistrar.getStatus(),
     getSettingsBridgeStatus: () => settingsBridge.getStatus(),
+    getConfigBridgeStatus: () => configBridge.getStatus(),
     refreshSettingsBridge: () => settingsBridge.refreshNow(),
     dispose: () => {
       settingsBridge.dispose();

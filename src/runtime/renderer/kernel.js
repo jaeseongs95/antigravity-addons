@@ -16,6 +16,7 @@ const { createSlotManager } = require('./slot-manager');
 const { createModalPortal } = require('./modal-portal');
 const { createRegionObserver } = require('./region-observer');
 const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
+const { wrapHostBridgePort } = require('./host-bridge-port');
 
 // I4: Capture JS primordials BEFORE any plugin executes in shared Isolated World 998
 const _Error = Error;
@@ -25,6 +26,7 @@ const _NumberIsFinite = Number.isFinite;
 const _ReflectApply = Reflect.apply;
 const _ObjectKeys = Object.keys;
 const _ObjectFreeze = Object.freeze;
+const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const _ArrayIsArray = Array.isArray;
@@ -159,6 +161,7 @@ function sanitizeJsonPayload(value, seen = new _WeakSet()) {
 function createRendererKernel(doc = globalThis.document, win = globalThis.window || globalThis) {
   let booted = false;
   let docGenId = 0;
+  let hostProfileId = null;
   let hostToken = null;
   let hostBridge = null;
   let extraNoTranslateAttributes = [];
@@ -176,6 +179,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   const pluginSettingsAllowed = new _Set(); // pluginId (trusted + settingsBridge declared)
   const pluginSettingsSnapshots = new _Map(); // pluginId -> frozen snapshot
   const pluginSettingsListeners = new _Map(); // pluginId -> Set<Function>
+  const pluginConfigScopes = new _Map(); // pluginId -> Map<scopeId, { scopeId, access, maxBytes }>
   const stagedHandles = new _Map(); // runNonce -> { pluginId, handle } (S-1 CSP-safe two-phase execution)
   const recordedErrors = [];
   let nonceSeq = 0;
@@ -223,27 +227,43 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       if (hostToken !== null && cfg.hostToken !== hostToken) {
         return { ok: false, reason: 'ERR_KERNEL_ALREADY_BOOTED' };
       }
-      return { ok: true, alreadyBooted: true, docGenId };
+      return { ok: true, alreadyBooted: true, docGenId, hostProfileId };
     }
     if (typeof cfg.hostToken === 'string' && cfg.hostToken.length >= 16) {
       hostToken = cfg.hostToken;
     }
     docGenId = _Number(cfg.docGenId) || 1;
+    hostProfileId = typeof cfg.hostProfileId === 'string' && cfg.hostProfileId ? cfg.hostProfileId : null;
     extraNoTranslateAttributes = _ArrayIsArray(cfg.extraNoTranslateAttributes)
       ? _ArraySlice(cfg.extraNoTranslateAttributes)
       : [];
 
-    // T-A Option A1: claim preload bridge ONCE per document generation
-    const bootstrap = win && win.__addonHostBootstrap;
-    if (bootstrap && typeof bootstrap.claim === 'function' && cfg.claimNonce) {
+    // v2.3.0 HostBridgePort: accept direct cfg.hostBridge injection (e.g. Remote Web adapter)
+    // OR T-A Option A1 single-claim Electron preload bootstrap (`claim(nonce)`).
+    if (cfg.hostBridge !== undefined && cfg.hostBridge !== null) {
       try {
-        hostBridge = bootstrap.claim(cfg.claimNonce);
+        hostBridge = wrapHostBridgePort(cfg.hostBridge);
       } catch (err) {
         return {
           ok: false,
-          reason: err && err.message ? err.message : 'ERR_BRIDGE_CLAIM_FAILED',
+          reason: err && err.message ? err.message : 'ERR_INVALID_HOST_BRIDGE_PORT',
         };
       }
+    } else {
+      const bootstrap = win && win.__addonHostBootstrap;
+      if (bootstrap && typeof bootstrap.claim === 'function' && cfg.claimNonce) {
+        try {
+          hostBridge = wrapHostBridgePort(bootstrap.claim(cfg.claimNonce));
+        } catch (err) {
+          return {
+            ok: false,
+            reason: err && err.message ? err.message : 'ERR_BRIDGE_CLAIM_FAILED',
+          };
+        }
+      }
+    }
+    if (!hostProfileId && hostBridge && hostBridge.profileId) {
+      hostProfileId = hostBridge.profileId;
     }
 
     styleManager = createStyleManager(doc);
@@ -266,7 +286,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     regionObserver = createRegionObserver(doc, win);
     settingsTabs = createSettingsTabCoordinator();
     booted = true;
-    return { ok: true, alreadyBooted: false, docGenId, hasBridge: !!hostBridge };
+    return { ok: true, alreadyBooted: false, docGenId, hostProfileId, hasBridge: !!hostBridge };
   }
 
   function addPluginDisposer(pluginId, fn) {
@@ -325,6 +345,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       _MapDelete(pluginTrustLevels, pluginId);
       _SetDelete(pluginSettingsAllowed, pluginId);
       _MapDelete(pluginSettingsSnapshots, pluginId);
+      _MapDelete(pluginConfigScopes, pluginId);
       const settingsSubs = _MapGet(pluginSettingsListeners, pluginId);
       if (settingsSubs) {
         _SetClear(settingsSubs);
@@ -349,6 +370,25 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     const pluginId = pluginMeta.pluginId;
     const effectiveTrustLevel = pluginMeta.trustLevel || 'restricted';
     const hasSettingsBridge = !!(pluginMeta.hasSettingsBridge && effectiveTrustLevel === 'trusted');
+    const scopeMap = new _Map();
+    const declaredConfigScopes = [];
+    if (pluginMeta.hasConfigBridge && effectiveTrustLevel === 'trusted' && _ArrayIsArray(pluginMeta.configScopes)) {
+      for (let i = 0; i < pluginMeta.configScopes.length; i += 1) {
+        const s = pluginMeta.configScopes[i];
+        if (!s || typeof s.scopeId !== 'string' || !s.scopeId) continue;
+        const access = s.access === 'rw' ? 'rw' : 'ro';
+        const maxBytes = _NumberIsFinite(s.maxBytes) ? s.maxBytes : 262144;
+        const frozenEntry = _ObjectFreeze({
+          scopeId: s.scopeId,
+          access,
+          maxBytes,
+        });
+        _MapSet(scopeMap, s.scopeId, frozenEntry);
+        _ArrayPush(declaredConfigScopes, frozenEntry);
+      }
+    }
+    const frozenConfigScopes = _ObjectFreeze(declaredConfigScopes);
+    const hasConfigBridge = frozenConfigScopes.length > 0;
     let disposed = false;
 
     _MapSet(pluginTrustLevels, pluginId, effectiveTrustLevel);
@@ -362,6 +402,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
           ? deepFreezeClone(initialSettingsSnapshot)
           : null
       );
+    }
+    if (hasConfigBridge) {
+      _MapSet(pluginConfigScopes, pluginId, scopeMap);
     }
 
     let markers = _MapGet(pluginMarkDisposed, pluginId);
@@ -381,9 +424,12 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       pluginId,
       version: pluginMeta.version || '0.0.0',
       trustLevel: effectiveTrustLevel,
+      hostProfileId,
       schemaVersion: 2,
       sourceSchemaVersion: pluginMeta.sourceSchemaVersion || 2,
       hasSettingsBridge,
+      hasConfigBridge,
+      configScopes: frozenConfigScopes,
 
       mountSlot(slotId, opts) {
         assertActive();
@@ -540,6 +586,101 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         });
       },
 
+      readConfigScope(scopeId) {
+        assertActive();
+        if (!hasConfigBridge) {
+          return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_NOT_DECLARED'));
+        }
+        if (typeof scopeId !== 'string' || !scopeId) {
+          return _PromiseReject(new _Error('ERR_INVALID_CONFIG_SCOPE_ID'));
+        }
+        const boundScopes = _MapGet(pluginConfigScopes, pluginId);
+        if (!boundScopes || !_MapHas(boundScopes, scopeId)) {
+          return _PromiseReject(new _Error(`ERR_CONFIG_SCOPE_NOT_DECLARED:${scopeId}`));
+        }
+        if (!hostBridge || typeof hostBridge.readConfigScope !== 'function') {
+          return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_UNAVAILABLE'));
+        }
+        return _PromiseResolve(hostBridge.readConfigScope(pluginId, scopeId)).then((res) => {
+          if (res && typeof res === 'object') {
+            return deepFreezeClone(res);
+          }
+          return _ObjectFreeze({
+            ok: false,
+            scopeId,
+            status: 'error',
+            data: null,
+            rawText: null,
+            sha256: null,
+            reason: 'ERR_CONFIG_READ_FAILED',
+          });
+        });
+      },
+
+      writeConfigScope(scopeId, nextDataOrRawJson, opts) {
+        assertActive();
+        if (!hasConfigBridge) {
+          return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_NOT_DECLARED'));
+        }
+        if (typeof scopeId !== 'string' || !scopeId) {
+          return _PromiseReject(new _Error('ERR_INVALID_CONFIG_SCOPE_ID'));
+        }
+        const boundScopes = _MapGet(pluginConfigScopes, pluginId);
+        const scopeEntry = boundScopes ? _MapGet(boundScopes, scopeId) : null;
+        if (!scopeEntry) {
+          return _PromiseReject(new _Error(`ERR_CONFIG_SCOPE_NOT_DECLARED:${scopeId}`));
+        }
+        if (scopeEntry.access !== 'rw') {
+          return _PromiseReject(new _Error(`ERR_CONFIG_SCOPE_READ_ONLY:${scopeId}`));
+        }
+        if (!hostBridge || typeof hostBridge.writeConfigScope !== 'function') {
+          return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_UNAVAILABLE'));
+        }
+        let rawJson;
+        if (typeof nextDataOrRawJson === 'string') {
+          rawJson = nextDataOrRawJson;
+        } else if (nextDataOrRawJson && typeof nextDataOrRawJson === 'object' && !_ArrayIsArray(nextDataOrRawJson)) {
+          try {
+            const clean = sanitizeJsonPayload(nextDataOrRawJson);
+            rawJson = _JSONStringify(clean);
+          } catch (err) {
+            const msg = err && err.message ? err.message : 'ERR_CONFIG_INVALID_JSON';
+            return _PromiseReject(
+              new _Error(
+                msg === 'ERR_SETTINGS_UNSAFE_PROTO_KEY'
+                  ? 'ERR_CONFIG_UNSAFE_PROTO_KEY'
+                  : msg === 'ERR_SETTINGS_INVALID_JSON'
+                    ? 'ERR_CONFIG_INVALID_JSON'
+                    : msg
+              )
+            );
+          }
+        } else {
+          return _PromiseReject(new _Error('ERR_CONFIG_MUST_BE_OBJECT'));
+        }
+        if (typeof rawJson !== 'string') {
+          return _PromiseReject(new _Error('ERR_CONFIG_INVALID_JSON'));
+        }
+        const forwardOpts = {};
+        if (opts && typeof opts === 'object' && _ObjectHasOwn(opts, 'expectedSha256') && opts.expectedSha256 !== undefined) {
+          if (opts.expectedSha256 !== null && typeof opts.expectedSha256 !== 'string') {
+            return _PromiseReject(new _Error('ERR_INVALID_EXPECTED_SHA256'));
+          }
+          forwardOpts.expectedSha256 = opts.expectedSha256;
+        }
+        return _PromiseResolve(hostBridge.writeConfigScope(pluginId, scopeId, rawJson, forwardOpts)).then((res) => {
+          if (res && typeof res === 'object') {
+            return deepFreezeClone(res);
+          }
+          return _ObjectFreeze({
+            ok: false,
+            reason: 'ERR_CONFIG_WRITE_FAILED',
+            currentSha256: null,
+            snapshot: null,
+          });
+        });
+      },
+
       addManagedListener(target, type, listener, opts) {
         assertActive();
         if (!target || typeof target.addEventListener !== 'function') {
@@ -665,7 +806,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     disposePlugin,
     reportPluginError,
     getErrors: () => _ArraySlice(recordedErrors),
-    getBridgeStatus: () => ({ booted, docGenId, hasBridge: !!hostBridge }),
+    getBridgeStatus: () => ({ booted, docGenId, hostProfileId, hasBridge: !!hostBridge }),
     listSettingsTabs: () => (settingsTabs ? settingsTabs.listTabs() : []),
   });
 

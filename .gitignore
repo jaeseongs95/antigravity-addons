@@ -1,4 +1,5 @@
 node_modules/
+dist/remote/
 *.log
 .DS_Store
 Thumbs.db
