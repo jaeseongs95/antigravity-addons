@@ -256,13 +256,18 @@ function createModalPortal(
           ? 'auto'
           : null;
 
-    const applySurfaceBounds = (targetSurface) => {
+    const applySurfaceBounds = (targetSurface, anchorEl = null) => {
       if (!surfaceGeometry || typeof surfaceGeometry.getSurfaceBounds !== 'function') {
         return null;
       }
-      const bounds = surfaceGeometry.getSurfaceBounds(targetSurface || 'auto');
+      const queryArg = anchorEl ? { surface: targetSurface || 'auto', anchorEl } : targetSurface || 'auto';
+      const bounds = surfaceGeometry.getSurfaceBounds(queryArg);
       if (bounds && dlg.style) {
         dlg.setAttribute('data-addon-host-modal-surface', bounds.surfaceId);
+        if (typeof bounds.source === 'string' && bounds.source) {
+          dlg.setAttribute('data-addon-host-modal-surface-source', bounds.source);
+        }
+        dlg.setAttribute('data-addon-host-modal-surface-matched', bounds.matched ? 'true' : 'false');
         if (bounds.viewport && bounds.viewport.width > 0 && bounds.viewport.height > 0) {
           dlg.style.position = 'fixed';
           dlg.style.inset = '';
@@ -288,17 +293,18 @@ function createModalPortal(
       shadowRoot,
       prevFocus,
       surfaceTarget: requestedSurface,
+      anchorEl: opts.anchorEl && typeof opts.anchorEl === 'object' ? opts.anchorEl : null,
       onResizeCleanup: null,
       ignoreOutsideClickEls: Array.isArray(opts.ignoreOutsideClickEls) ? opts.ignoreOutsideClickEls : [],
       onClose: opts.onClose || null,
     };
 
     if (requestedSurface && surfaceGeometry) {
-      applySurfaceBounds(requestedSurface);
+      applySurfaceBounds(requestedSurface, entry.anchorEl);
       if (win && typeof win.addEventListener === 'function') {
         const handleResize = () => {
           if (entry.closing || !stack.includes(entry)) return;
-          applySurfaceBounds(entry.surfaceTarget);
+          applySurfaceBounds(entry.surfaceTarget, entry.anchorEl);
         };
         win.addEventListener('resize', handleResize);
         entry.onResizeCleanup = () => {
@@ -339,10 +345,17 @@ function createModalPortal(
         if (entry.closing || !stack.includes(entry)) return null;
         if (typeof nextSurface === 'string' && nextSurface.trim()) {
           entry.surfaceTarget = nextSurface.trim();
+        } else if (nextSurface && typeof nextSurface === 'object') {
+          if (typeof nextSurface.surface === 'string' && nextSurface.surface.trim()) {
+            entry.surfaceTarget = nextSurface.surface.trim();
+          }
+          if (nextSurface.anchorEl !== undefined) {
+            entry.anchorEl = nextSurface.anchorEl && typeof nextSurface.anchorEl === 'object' ? nextSurface.anchorEl : null;
+          }
         } else if (!entry.surfaceTarget) {
           entry.surfaceTarget = 'auto';
         }
-        return applySurfaceBounds(entry.surfaceTarget);
+        return applySurfaceBounds(entry.surfaceTarget, entry.anchorEl);
       },
     });
   }

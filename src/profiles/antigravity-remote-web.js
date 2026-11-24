@@ -44,16 +44,20 @@ function resolveAntigravityRemoteWebPaths(env = process.env) {
 
 const REMOTE_WEB_UI_ANCHORS = Object.freeze({
   sidebar: Object.freeze([
+    '[data-testid="sidebar-split"] > :first-child',
+    '[data-testid="conversation-list-sidebar"]',
     '[data-testid="sidebar"]',
     '[data-testid="left-sidebar"]',
     '[data-remote-addon-host-slot-host="sidebar"]',
   ]),
   'overview-pane': Object.freeze([
     '[data-testid="overview-panel"]',
+    '[data-testid="overview-panel-host"]',
     '[data-testid="right-sidebar"]',
     '[data-remote-addon-host-slot-host="overview-pane"]',
   ]),
   'status-bar': Object.freeze([
+    '[data-testid="layout-status-bar"]',
     '[data-testid="status-bar"]',
     '[data-testid="app-status-bar"]',
     '[data-remote-addon-host-slot-host="status-bar"]',
@@ -64,11 +68,14 @@ const REMOTE_WEB_UI_ANCHORS = Object.freeze({
     '[data-remote-addon-host-slot-host="settings-pane"]',
   ]),
   'automation-page': Object.freeze([
+    '[data-testid="sidecars-view"]',
     '[data-testid="automation-view"]',
     '[data-remote-addon-host-slot-host="automation-page"]',
   ]),
   'customizations-page': Object.freeze([
     '[data-testid="customizations-view"]',
+    '[data-testid="customizations-installed"]',
+    '[data-testid="customizations-marketplace"]',
     '[data-remote-addon-host-slot-host="customizations-page"]',
   ]),
   'modal-root': Object.freeze(['body']),
@@ -87,25 +94,70 @@ const REMOTE_WEB_UI_SURFACES = Object.freeze({
   'customizations-page': Object.freeze({
     priority: 80,
     selectors: Object.freeze(['[data-testid="customizations-view"]']),
-    excludeLeftSelectors: Object.freeze(['[data-testid="sidebar"]', '[data-testid="left-sidebar"]', 'aside', 'nav']),
-    excludeRightSelectors: Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
-    excludeBottomSelectors: Object.freeze(['[data-testid="status-bar"]', '[data-testid="app-status-bar"]']),
+    excludeLeftSelectors: Object.freeze([
+      '[data-testid="sidebar-split"] > :first-child',
+      '[data-testid="conversation-list-sidebar"]',
+      '[data-testid="sidebar"]',
+      '[data-testid="left-sidebar"]',
+      'aside',
+      'nav',
+    ]),
+    excludeRightSelectors: Object.freeze([
+      '[data-testid="overview-panel"]',
+      '[data-testid="overview-panel-host"]',
+      '[data-testid="right-sidebar"]',
+    ]),
+    excludeBottomSelectors: Object.freeze([
+      '[data-testid="layout-status-bar"]',
+      '[data-testid="status-bar"]',
+      '[data-testid="app-status-bar"]',
+    ]),
     safeInsets: Object.freeze({ top: 0, right: 0, bottom: 0, left: 0 }),
   }),
   'automation-page': Object.freeze({
     priority: 75,
-    selectors: Object.freeze(['[data-testid="automation-view"]']),
-    excludeLeftSelectors: Object.freeze(['[data-testid="sidebar"]', '[data-testid="left-sidebar"]', 'aside', 'nav']),
-    excludeRightSelectors: Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
-    excludeBottomSelectors: Object.freeze(['[data-testid="status-bar"]', '[data-testid="app-status-bar"]']),
+    selectors: Object.freeze(['[data-testid="sidecars-view"]', '[data-testid="automation-view"]']),
+    excludeLeftSelectors: Object.freeze([
+      '[data-testid="sidebar-split"] > :first-child',
+      '[data-testid="conversation-list-sidebar"]',
+      '[data-testid="sidebar"]',
+      '[data-testid="left-sidebar"]',
+      'aside',
+      'nav',
+    ]),
+    excludeRightSelectors: Object.freeze([
+      '[data-testid="overview-panel"]',
+      '[data-testid="overview-panel-host"]',
+      '[data-testid="right-sidebar"]',
+    ]),
+    excludeBottomSelectors: Object.freeze([
+      '[data-testid="layout-status-bar"]',
+      '[data-testid="status-bar"]',
+      '[data-testid="app-status-bar"]',
+    ]),
     safeInsets: Object.freeze({ top: 0, right: 0, bottom: 0, left: 0 }),
   }),
   workspace: Object.freeze({
     priority: 50,
-    selectors: Object.freeze(['[data-testid="workspace-main"]', 'main', '[role="main"]']),
-    excludeLeftSelectors: Object.freeze(['[data-testid="sidebar"]', '[data-testid="left-sidebar"]', 'aside', 'nav']),
-    excludeRightSelectors: Object.freeze(['[data-testid="overview-panel"]', '[data-testid="right-sidebar"]']),
-    excludeBottomSelectors: Object.freeze(['[data-testid="status-bar"]', '[data-testid="app-status-bar"]']),
+    selectors: Object.freeze(['[data-testid="conversation-view"]', '[data-testid="workspace-main"]', 'main', '[role="main"]']),
+    excludeLeftSelectors: Object.freeze([
+      '[data-testid="sidebar-split"] > :first-child',
+      '[data-testid="conversation-list-sidebar"]',
+      '[data-testid="sidebar"]',
+      '[data-testid="left-sidebar"]',
+      'aside',
+      'nav',
+    ]),
+    excludeRightSelectors: Object.freeze([
+      '[data-testid="overview-panel"]',
+      '[data-testid="overview-panel-host"]',
+      '[data-testid="right-sidebar"]',
+    ]),
+    excludeBottomSelectors: Object.freeze([
+      '[data-testid="layout-status-bar"]',
+      '[data-testid="status-bar"]',
+      '[data-testid="app-status-bar"]',
+    ]),
     safeInsets: Object.freeze({ top: 0, right: 0, bottom: 0, left: 0 }),
   }),
 });

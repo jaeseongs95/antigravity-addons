@@ -336,3 +336,149 @@ test('TC-SG-006: Kernel addonHost exposes getSurfaceBounds/getActiveSurface/list
   assert.throws(() => handle.getActiveSurface(), /ERR_PLUGIN_HANDLE_DISPOSED/);
   assert.throws(() => handle.listSurfaces(), /ERR_PLUGIN_HANDLE_DISPOSED/);
 });
+
+test('TC-SG-007: Real Antigravity 2.0 DOM selectors (sidebar-split / conversation-list-sidebar / layout-status-bar / sidecars-view / conversation-view) and anchorEl container fallback center modals accurately', () => {
+  // 1. Real Antigravity 2.0 Customizations page DOM (ZERO legacy customizations-view / aside / nav)
+  const { doc, win, makeEl, selectorMatches } = makeGeometryMockDom({ viewportWidth: 1440, viewportHeight: 900 });
+  const sidebarSplitPane = makeEl('div', { left: 0, top: 36, right: 260, bottom: 872, width: 260, height: 836 });
+  const convoSidebar = makeEl('div', { left: 0, top: 84, right: 260, bottom: 812, width: 260, height: 728 });
+  const layoutStatusBar = makeEl('div', { left: 0, top: 872, right: 1440, bottom: 900, width: 1440, height: 28 });
+
+  selectorMatches['[data-testid="sidebar-split"] > :first-child'] = [sidebarSplitPane];
+  selectorMatches['[data-testid="conversation-list-sidebar"]'] = [convoSidebar];
+  selectorMatches['[data-testid="layout-status-bar"]'] = [layoutStatusBar];
+
+  const kernel = createRendererKernel(doc, win);
+  const token = 'test-token-real-dom-v252-123456';
+  assert.equal(
+    kernel.boot({
+      docGenId: 1,
+      hostToken: token,
+      hostProfileId: 'antigravity-desktop',
+      uiAnchors: ANTIGRAVITY_HOST_PROFILE.uiAnchors,
+      uiSurfaces: ANTIGRAVITY_HOST_PROFILE.uiSurfaces,
+    }).ok,
+    true
+  );
+
+  const handle = kernel.createPluginHandle(
+    {
+      pluginId: 'mcp-manager-real-dom',
+      version: '3.0.1',
+      trustLevel: 'trusted',
+      uiSlots: [{ slot: 'modal', slotId: 'mcp.overlay', shadow: false }],
+    },
+    token
+  );
+
+  const bounds = handle.getSurfaceBounds('customizations-page');
+  assert.equal(bounds.surfaceId, 'customizations-page');
+  assert.equal(bounds.matched, true);
+  assert.equal(bounds.source, 'chrome-subtracted');
+  assert.equal(bounds.left, 260);
+  assert.equal(bounds.top, 36);
+  assert.equal(bounds.right, 1440);
+  assert.equal(bounds.bottom, 872);
+  assert.equal(bounds.width, 1180);
+  assert.equal(bounds.height, 836);
+  assert.equal(bounds.centerX, 850);
+  assert.equal(bounds.centerY, 454);
+  assert.equal(bounds.insetLeft, 260);
+  assert.equal(bounds.insetBottom, 28);
+
+  const modal = handle.openModal('mcp.overlay', { surface: 'customizations-page' });
+  assert.equal(modal.element.getAttribute('data-addon-host-modal-surface'), 'customizations-page');
+  assert.equal(modal.element.getAttribute('data-addon-host-modal-surface-source'), 'chrome-subtracted');
+  assert.equal(modal.element.getAttribute('data-addon-host-modal-surface-matched'), 'true');
+  assert.equal(modal.element.style.left, '260px');
+  assert.equal(modal.element.style.bottom, '28px');
+  modal.close();
+
+  // 2. Real Antigravity 2.0 Automations (sidecars-view) and Conversation (conversation-view) direct matches
+  selectorMatches['[data-testid="sidecars-view"]'] = [
+    makeEl('div', { left: 260, top: 36, right: 1440, bottom: 872, width: 1180, height: 836 }),
+  ];
+  const autoBounds = handle.getSurfaceBounds('automation-page');
+  assert.equal(autoBounds.matched, true);
+  assert.equal(autoBounds.source, 'selector');
+  assert.equal(autoBounds.centerX, 850);
+
+  selectorMatches['[data-testid="conversation-view"]'] = [
+    makeEl('div', { left: 260, top: 36, right: 1120, bottom: 872, width: 860, height: 836 }),
+  ];
+  const wsBounds = handle.getSurfaceBounds('workspace');
+  assert.equal(wsBounds.matched, true);
+  assert.equal(wsBounds.source, 'selector');
+  assert.equal(wsBounds.centerX, 690);
+
+  // 3. Collapsed left sidebar (width: 0) must NOT falsely offset left
+  const collapsedDom = makeGeometryMockDom({ viewportWidth: 1440, viewportHeight: 900 });
+  collapsedDom.selectorMatches['[data-testid="sidebar-split"] > :first-child'] = [
+    collapsedDom.makeEl('div', { left: 0, top: 36, right: 0, bottom: 872, width: 0, height: 836 }),
+  ];
+  collapsedDom.selectorMatches['[data-testid="layout-status-bar"]'] = [
+    collapsedDom.makeEl('div', { left: 0, top: 872, right: 1440, bottom: 900, width: 1440, height: 28 }),
+  ];
+  const collapsedSg = createSurfaceGeometry(collapsedDom.doc, collapsedDom.win, {
+    uiSurfaces: ANTIGRAVITY_REMOTE_WEB_PROFILE.uiSurfaces,
+    uiAnchors: ANTIGRAVITY_REMOTE_WEB_PROFILE.uiAnchors,
+  });
+  const collapsedBounds = collapsedSg.getSurfaceBounds('customizations-page');
+  assert.equal(collapsedBounds.matched, true);
+  assert.equal(collapsedBounds.source, 'chrome-subtracted');
+  assert.equal(collapsedBounds.left, 0);
+  assert.equal(collapsedBounds.centerX, 720);
+  assert.equal(collapsedBounds.insetBottom, 28);
+
+  // 4. Vendor-neutral anchorEl container fallback when ZERO profile selectors match (resilient to future DOM renames)
+  const renamedDom = makeGeometryMockDom({ viewportWidth: 1440, viewportHeight: 900 });
+  const rootWrapper = renamedDom.makeEl('div', { left: 0, top: 0, right: 1440, bottom: 900, width: 1440, height: 900 });
+  const contentPane = renamedDom.makeEl('div', { left: 280, top: 36, right: 1440, bottom: 872, width: 1160, height: 836 });
+  const innerCard = renamedDom.makeEl('div', { left: 420, top: 200, right: 820, bottom: 260, width: 400, height: 60 });
+  const triggerBtn = renamedDom.makeEl('button', { left: 440, top: 210, right: 560, bottom: 242, width: 120, height: 32 });
+  renamedDom.doc.body.appendChild(rootWrapper);
+  rootWrapper.appendChild(contentPane);
+  contentPane.appendChild(innerCard);
+  innerCard.appendChild(triggerBtn);
+
+  const renamedKernel = createRendererKernel(renamedDom.doc, renamedDom.win);
+  assert.equal(
+    renamedKernel.boot({
+      docGenId: 1,
+      hostToken: token,
+      hostProfileId: 'antigravity-desktop',
+      uiAnchors: ANTIGRAVITY_HOST_PROFILE.uiAnchors,
+      uiSurfaces: ANTIGRAVITY_HOST_PROFILE.uiSurfaces,
+    }).ok,
+    true
+  );
+  const renamedHandle = renamedKernel.createPluginHandle(
+    {
+      pluginId: 'mcp-manager-anchor-fallback',
+      version: '3.0.1',
+      trustLevel: 'trusted',
+      uiSlots: [{ slot: 'modal', slotId: 'mcp.overlay', shadow: false }],
+    },
+    token
+  );
+
+  // Without anchorEl -> viewport fallback
+  const noAnchorBounds = renamedHandle.getSurfaceBounds('customizations-page');
+  assert.equal(noAnchorBounds.matched, false);
+  assert.equal(noAnchorBounds.source, 'viewport');
+
+  // With anchorEl -> picks right-hand contentPane (ignoring full-viewport rootWrapper and tiny innerCard)
+  const anchorModal = renamedHandle.openModal('mcp.overlay', {
+    surface: 'customizations-page',
+    anchorEl: triggerBtn,
+  });
+  assert.equal(anchorModal.element.getAttribute('data-addon-host-modal-surface'), 'customizations-page');
+  assert.equal(anchorModal.element.getAttribute('data-addon-host-modal-surface-source'), 'anchor-container');
+  assert.equal(anchorModal.element.getAttribute('data-addon-host-modal-surface-matched'), 'true');
+  assert.equal(anchorModal.element.style.left, '280px');
+  assert.equal(anchorModal.element.style.bottom, '28px');
+  anchorModal.close();
+
+  handle.dispose();
+  renamedHandle.dispose();
+});

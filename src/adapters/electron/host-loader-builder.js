@@ -194,14 +194,36 @@ function serializeDeduplicatedConfigJs(obj) {
     }
   }
 
-  return { defs, expr };
+  // 3. Deduplicate repeated non-key string value literals shared across defs & expr (e.g. uiAnchors & uiSurfaces selectors)
+  const valCounts = new Map();
+  const valRe = /"(?:\\.|[^"\\]){18,}"(?!\s*:)/g;
+  const scanTarget = defs.join('\n') + '\n' + expr;
+  while ((m = valRe.exec(scanTarget)) !== null) {
+    valCounts.set(m[0], (valCounts.get(m[0]) || 0) + 1);
+  }
+  const strDefs = [];
+  let sIdx = 0;
+  for (const [literal, count] of valCounts.entries()) {
+    if (count < 2) continue;
+    const varName = `_S${sIdx}`;
+    const savings = count * literal.length - (literal.length + 14 + varName.length + count * varName.length);
+    if (savings < 12) continue;
+    sIdx += 1;
+    strDefs.push(`const ${varName} = ${literal};`);
+    for (let i = 0; i < defs.length; i += 1) {
+      defs[i] = defs[i].split(literal).join(varName);
+    }
+    expr = expr.split(literal).join(varName);
+  }
+
+  return { defs: [...strDefs, ...defs], expr };
 }
 
 function buildHostLoaderScriptSource(
   paths,
   profile,
   {
-    hostVersion = '2.5.1',
+    hostVersion = '2.5.2',
     strictTrustPolicy = true,
     mainHookTimeoutMs = 5000,
     rendererExecTimeoutMs = 10000,
