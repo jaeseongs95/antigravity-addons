@@ -18,6 +18,8 @@ const IPC_CHANNELS = Object.freeze({
   SAVE_SETTINGS: 'addon-host:v2:save-settings',
   CONFIG_READ: 'addon-host:v2:config-read',
   CONFIG_WRITE: 'addon-host:v2:config-write',
+  HOST_ADMIN_STATE: 'addon-host:v2:host-admin-state',
+  HOST_ADMIN_SET_REMOTE_PREF: 'addon-host:v2:host-admin-set-remote-pref',
   REPORT_ERROR: 'addon-host:v2:report-error',
   PING: 'addon-host:v2:ping',
 });

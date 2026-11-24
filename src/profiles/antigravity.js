@@ -40,6 +40,11 @@ function resolveAntigravityPaths(env = process.env) {
   const asarLockPath = path.join(agyDir, 'addon-host-asar.lock');
   const backupsDir = path.join(agyDir, 'backups');
   const trustPolicyPath = path.join(agyDir, 'trust-policy.json');
+  const remotePrefsPath = path.join(agyDir, 'remote-preferences.json');
+  const remoteDistDir =
+    env && typeof env.AGY_REMOTE_DIST_DIR === 'string' && env.AGY_REMOTE_DIST_DIR.trim()
+      ? path.resolve(env.AGY_REMOTE_DIST_DIR.trim())
+      : path.join(agyDir, 'remote-dist');
   const runtimeDir = path.join(agyDir, 'runtime');
 
   let asarPath = env.AGY_ASAR_PATH || '';
@@ -79,6 +84,8 @@ function resolveAntigravityPaths(env = process.env) {
     ASAR_LOCK_PATH: asarLockPath,
     BACKUPS_DIR: backupsDir,
     TRUST_POLICY_PATH: trustPolicyPath,
+    REMOTE_PREFS_PATH: remotePrefsPath,
+    REMOTE_DIST_DIR: remoteDistDir,
     RUNTIME_DIR: runtimeDir,
     APP_EXECUTABLE_PATH: appExecutablePath,
   };
@@ -127,6 +134,15 @@ function resolveAntigravityConfigScopes(paths = {}) {
 const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
   id: 'antigravity-desktop',
   supportedCapabilities: Object.freeze(['renderer', 'mainHook']),
+  remoteProfileId: 'antigravity-remote-web',
+  remoteSupportedCapabilities: Object.freeze(['renderer']),
+  settingsUi: Object.freeze({
+    navId: 'addon-manager',
+    navLabel: Object.freeze({
+      en: 'Addon Manager',
+      ko: '애드온 관리',
+    }),
+  }),
   patchMarker: PATCH_MARKER,
   priorHostMarkers: PRIOR_HOST_MARKERS,
   loaderEnvVar: LOADER_ENV_VAR,

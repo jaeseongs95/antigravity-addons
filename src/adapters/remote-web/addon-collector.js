@@ -26,6 +26,11 @@ const { isPluginEnabledInConfig } = require('../electron/config-reader');
 const { loadRawManifestsFromDir } = require('../../runtime/main/init-main');
 const { loadTrustPolicyFile, readVerifiedRendererScript } = require('../../runtime/main/trust-verifier');
 const { readSettingsFileSnapshot } = require('../../runtime/main/settings-bridge');
+const {
+  DEFAULT_REMOTE_PREFS_FILENAME,
+  readRemotePreferencesFile,
+  isAddonEnabledInRemotePreferences,
+} = require('../../runtime/main/host-admin-service');
 
 function buildPackedPluginMeta(addon, verified) {
   const manifest = addon.manifest;
@@ -82,8 +87,9 @@ function collectRemoteWebAddons({
   pluginsRootDir = null,
   configJsonPath = undefined,
   trustPolicyPath = undefined,
+  remotePrefsPath = undefined,
   settingsDataDir = null,
-  hostVersion = '2.3.0',
+  hostVersion = '2.5.0',
   strictTrustPolicy = true,
   includeSettingsSnapshots = false,
   fsPort = null,
@@ -97,6 +103,12 @@ function collectRemoteWebAddons({
   const effectivePluginsRoot = pluginsRootDir || resolvedPaths.PLUGINS_ROOT_DIR || null;
   const effectiveConfigPath = configJsonPath !== undefined ? configJsonPath : resolvedPaths.CONFIG_JSON_PATH || null;
   const effectiveTrustPath = trustPolicyPath !== undefined ? trustPolicyPath : resolvedPaths.TRUST_POLICY_PATH || null;
+  const effectiveRemotePrefsPath =
+    remotePrefsPath !== undefined
+      ? remotePrefsPath
+      : addonsDir
+        ? path.join(path.dirname(path.resolve(addonsDir)), DEFAULT_REMOTE_PREFS_FILENAME)
+        : resolvedPaths.REMOTE_PREFS_PATH || null;
   const effectiveSettingsDir =
     settingsDataDir ||
     (effectiveAddonsDir ? path.dirname(path.resolve(effectiveAddonsDir)) : resolvedPaths.HOST_DATA_DIR || null);
@@ -127,6 +139,7 @@ function collectRemoteWebAddons({
 
   const policyRes = loadTrustPolicyFile(effectiveTrustPath);
   const policy = policyRes.policy;
+  const remotePrefs = effectiveRemotePrefsPath ? readRemotePreferencesFile(effectiveRemotePrefsPath) : { ok: true, addons: {} };
 
   const packed = [];
   const rejected = (plan.rejected || []).map((r) => ({
@@ -141,6 +154,14 @@ function collectRemoteWebAddons({
   const skippedMainHookPlugins = [];
 
   for (const addon of plan.active || []) {
+    if (!isAddonEnabledInRemotePreferences(remotePrefs, addon.pluginId)) {
+      disabled.push({
+        pluginId: addon.pluginId,
+        reason: 'DISABLED_BY_REMOTE_PREFERENCES',
+      });
+      continue;
+    }
+
     if (Array.isArray(addon.skippedCapabilities) && addon.skippedCapabilities.includes('mainHook')) {
       skippedMainHookPlugins.push(addon.pluginId);
     }

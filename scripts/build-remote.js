@@ -68,9 +68,9 @@ function writeFileLf(filePath, content) {
 function readPackageVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
-    return typeof pkg.version === 'string' && pkg.version ? pkg.version : '2.4.0';
+    return typeof pkg.version === 'string' && pkg.version ? pkg.version : '2.5.0';
   } catch (_err) {
-    return '2.4.0';
+    return '2.5.0';
   }
 }
 
@@ -418,6 +418,7 @@ function buildDistRemote({
   pluginsRootDir = undefined,
   configJsonPath = undefined,
   trustPolicyPath = undefined,
+  remotePrefsPath = undefined,
   settingsDataDir = undefined,
   strictTrustPolicy = true,
   includeSettingsSnapshots = false,
@@ -448,6 +449,7 @@ function buildDistRemote({
       pluginsRootDir,
       configJsonPath,
       trustPolicyPath,
+      remotePrefsPath,
       settingsDataDir,
       hostVersion: effectiveVersion,
       strictTrustPolicy,
@@ -543,6 +545,7 @@ function parseCliArgs(argv) {
     pluginsRootDir: undefined,
     configJsonPath: undefined,
     trustPolicyPath: undefined,
+    remotePrefsPath: undefined,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -555,6 +558,7 @@ function parseCliArgs(argv) {
     else if (a === '--plugins-root' && argv[i + 1]) opts.pluginsRootDir = path.resolve(argv[++i]);
     else if (a === '--config-json' && argv[i + 1]) opts.configJsonPath = path.resolve(argv[++i]);
     else if (a === '--trust-policy' && argv[i + 1]) opts.trustPolicyPath = path.resolve(argv[++i]);
+    else if (a === '--remote-prefs' && argv[i + 1]) opts.remotePrefsPath = path.resolve(argv[++i]);
   }
   return opts;
 }

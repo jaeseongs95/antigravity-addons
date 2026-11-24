@@ -18,6 +18,7 @@ const { createModalPortal } = require('./modal-portal');
 const { createRegionObserver } = require('./region-observer');
 const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
 const { wrapHostBridgePort } = require('./host-bridge-port');
+const { createHostSettingsUi } = require('./host-settings-ui');
 
 // I4: Capture JS primordials BEFORE any plugin executes in shared Isolated World 998
 const _Error = Error;
@@ -172,6 +173,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   let modalPortal = null;
   let regionObserver = null;
   let settingsTabs = null;
+  let hostSettingsUi = null;
 
   const pluginDisposers = new _Map(); // pluginId -> Set<Function>
   const pluginMarkDisposed = new _Map(); // pluginId -> Set<Function>
@@ -292,8 +294,28 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     });
     regionObserver = createRegionObserver(doc, win);
     settingsTabs = createSettingsTabCoordinator();
+    if (
+      cfg.settingsUi &&
+      typeof cfg.settingsUi === 'object' &&
+      hostBridge &&
+      typeof hostBridge.getHostAdminState === 'function'
+    ) {
+      hostSettingsUi = createHostSettingsUi(doc, win, {
+        hostBridge,
+        settingsUi: cfg.settingsUi,
+        extraNoTranslateAttributes,
+      });
+      hostSettingsUi.start();
+    }
     booted = true;
-    return { ok: true, alreadyBooted: false, docGenId, hostProfileId, hasBridge: !!hostBridge };
+    return {
+      ok: true,
+      alreadyBooted: false,
+      docGenId,
+      hostProfileId,
+      hasBridge: !!hostBridge,
+      hasHostSettingsUi: !!hostSettingsUi,
+    };
   }
 
   function addPluginDisposer(pluginId, fn) {

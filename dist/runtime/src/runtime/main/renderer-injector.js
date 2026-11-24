@@ -189,6 +189,7 @@ function createRendererInjector({
       extraNoTranslateAttributes: Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [],
       uiAnchors: profile.uiAnchors || {},
       uiSurfaces: profile.uiSurfaces || {},
+      settingsUi: profile.settingsUi || null,
       worldId,
     };
 
