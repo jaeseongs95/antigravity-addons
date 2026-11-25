@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "b69d0f90",
-  "buildSha256": "b69d0f90b93502d54e7910c6cd5032daa86e111a4e4b48fcf8bae81ba58919dc",
+  "buildSha8": "40931634",
+  "buildSha256": "40931634339ac97b3250e3e287f4c736ea74b5b01a8fc3e37a1b042e43921e89",
   "fileCount": 31,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
@@ -24,9 +24,9 @@
     "src/core/slot-registry.js": "e17349af5514e088fb786b63229ec25f23de3b16cc2285b7828cb15d81b5832e",
     "src/core/trust-policy-port.js": "b7f00db398e17cdfaa7b22b75d88fa7b32b3a1077955557c6c525e63f88b2e3b",
     "src/runtime/main/config-bridge.js": "758b00c117a1c9384b12ee3d0be6a0bab900c5bce8a52f95e827b5f5501a5347",
-    "src/runtime/main/host-admin-service.js": "c780ad75f3620de4a779eba71bfba58b104e89ed1d28b3c18a1eb3fc26707a09",
+    "src/runtime/main/host-admin-service.js": "300485c22ae3ea44106a8ca7fdc816d971186dc2a058905fffa73892929759ca",
     "src/runtime/main/host-origin-resolver.js": "faed20a13ba9d26139743b9e79a0bbdf5c9e80c2103f81ee9e7b2a693fd0ad44",
-    "src/runtime/main/init-main.js": "2aaab2cd60f12ceb0696cd32823346a1dd5cd7e46d653c5e8faad65e688e44fb",
+    "src/runtime/main/init-main.js": "9f60dc0bd9362cc81877cf680ca4fde90d8a31fd71dcca939cf35f31329794b0",
     "src/runtime/main/main-hook-runner.js": "7aaa3ea2b8cf3664592eed241b1521e7fbffa1a49d7bc35ff3f298cb4a4a9682",
     "src/runtime/main/portal-arbiter.js": "3dbb4c85ada7a7d9046956aef130d655ce1b05c8dfb196bb4230b12f7a473704",
     "src/runtime/main/preload-registrar.js": "c323aa7c2a4da31091fe57ca66e0d90b4c549883b739dcbed513fae766a79c47",

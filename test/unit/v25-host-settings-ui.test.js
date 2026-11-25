@@ -7,12 +7,19 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
+const { spawnSync } = require('node:child_process');
+
 const {
+  DEFAULT_HOST_CLI_META_FILENAME,
+  isCommandOnPath,
+  readHostCliMetaFile,
+  resolveBuildRemoteCommand,
   readRemotePreferencesFile,
   isAddonEnabledInRemotePreferences,
   writeRemotePreferencesFileAtomic,
   createHostAdminService,
 } = require('../../src/runtime/main/host-admin-service');
+const { createElectronHostLifecyclePort } = require('../../src/adapters/electron/electron-host-lifecycle-port');
 const { createHostSettingsUi, NAV_ATTR, PANE_ATTR } = require('../../src/runtime/renderer/host-settings-ui');
 const { createRendererKernel } = require('../../src/runtime/renderer/kernel');
 const { loadRawManifestsFromDir, buildHostLoaderScriptSource } = require('../../src/adapters/electron/host-loader-builder');
@@ -969,4 +976,280 @@ test('TC-V25-007: host-settings-ui mounts reliably across div/li/wrapped/icon-sp
   assert.equal(uiLang.ensureMount(), true);
   assert.equal(uiLang.getElements().navElement.textContent, '애드온 관리');
   uiLang.dispose();
+});
+
+test('TC-V25-008: buildCommand resolves PATH -> host-cli.json -> fallback cleanly and installHost persists host-cli.json without loader leak', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-v254-cmd-'));
+  try {
+    const winBinDir = path.join(tmpDir, 'win-bin');
+    const posixBinDir = path.join(tmpDir, 'posix-bin');
+    const unicodeCliDir = path.join(tmpDir, '개발자 work');
+    const remoteDistDir = path.join(tmpDir, 'remote-dist');
+    fs.mkdirSync(winBinDir, { recursive: true });
+    fs.mkdirSync(posixBinDir, { recursive: true });
+    fs.mkdirSync(unicodeCliDir, { recursive: true });
+
+    // Tier 1 (Windows PATHEXT): addon-host.cmd found on PATH
+    fs.writeFileSync(path.join(winBinDir, 'addon-host.cmd'), '@echo off\r\n', 'utf8');
+    assert.equal(
+      isCommandOnPath('addon-host', {
+        pathEnv: `"${winBinDir}"`,
+        pathExtEnv: '.EXE;.CMD',
+        platform: 'win32',
+      }),
+      true
+    );
+    const tier1Win = resolveBuildRemoteCommand({
+      remoteDistDir,
+      pathEnv: winBinDir,
+      pathExtEnv: '.EXE;.CMD',
+      platform: 'win32',
+    });
+    assert.equal(tier1Win.source, 'path');
+    assert.equal(tier1Win.runnable, true);
+    assert.equal(tier1Win.command, `addon-host --build-remote --out-dir "${remoteDistDir}"`);
+
+    // Tier 1 (POSIX +x): addon-host found on PATH (skip drive-letter paths on win32 where ':' is POSIX delimiter)
+    if (process.platform !== 'win32') {
+      const posixBin = path.join(posixBinDir, 'addon-host');
+      fs.writeFileSync(posixBin, '#!/bin/sh\n', 'utf8');
+      fs.chmodSync(posixBin, 0o755);
+      assert.equal(
+        isCommandOnPath('addon-host', {
+          pathEnv: posixBinDir,
+          platform: 'linux',
+        }),
+        true
+      );
+      fs.chmodSync(posixBin, 0o644);
+      assert.equal(isCommandOnPath('addon-host', { pathEnv: posixBinDir, platform: 'linux' }), false);
+    }
+
+    // Tier 2 (host-cli.json with spaces & Korean Unicode path when PATH misses)
+    const unicodeCli = path.join(unicodeCliDir, 'addon-host.js');
+    fs.writeFileSync(unicodeCli, "'use strict';\n", 'utf8');
+    const metaPath = path.join(tmpDir, DEFAULT_HOST_CLI_META_FILENAME);
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({ schemaVersion: 1, cliEntryPath: unicodeCli, updatedAt: '2026-11-25T00:00:00.000Z' }),
+      'utf8'
+    );
+    const tier2 = resolveBuildRemoteCommand({
+      remoteDistDir,
+      hostCliMetaPath: metaPath,
+      pathEnv: '',
+      platform: 'win32',
+    });
+    assert.equal(tier2.source, 'cli-entry');
+    assert.equal(tier2.runnable, true);
+    assert.equal(tier2.cliEntryPath, path.resolve(unicodeCli));
+    assert.equal(tier2.command, `node "${path.resolve(unicodeCli)}" --build-remote --out-dir "${remoteDistDir}"`);
+
+    // Tier 2 security guards: shell metacharacters, missing target, directory meta fail closed to Tier 3
+    const badMetaPath = path.join(tmpDir, 'bad-cli.json');
+    fs.writeFileSync(
+      badMetaPath,
+      JSON.stringify({ schemaVersion: 1, cliEntryPath: path.join(tmpDir, '$(evil).js') }),
+      'utf8'
+    );
+    const badRead = readHostCliMetaFile(badMetaPath);
+    assert.equal(badRead.ok, false);
+    assert.equal(badRead.error, 'ERR_HOST_CLI_ENTRY_INVALID');
+
+    const missingMetaPath = path.join(tmpDir, 'missing-cli.json');
+    fs.writeFileSync(
+      missingMetaPath,
+      JSON.stringify({ schemaVersion: 1, cliEntryPath: path.join(tmpDir, 'does-not-exist.js') }),
+      'utf8'
+    );
+    const tier3 = resolveBuildRemoteCommand({
+      remoteDistDir,
+      hostCliMetaPath: missingMetaPath,
+      pathEnv: '',
+      platform: 'win32',
+    });
+    assert.equal(tier3.source, 'fallback');
+    assert.equal(tier3.runnable, false);
+    assert.equal(tier3.command, `addon-host --build-remote --out-dir "${remoteDistDir}"`);
+
+    // Integration: installHost() persists host-cli.json in HOST_DATA_DIR, never leaks into loader shim or plugins/
+    const hostDataDir = path.join(tmpDir, 'inst-host-data');
+    const pluginsRootDir = path.join(tmpDir, 'inst-plugins');
+    const addonsDir = path.join(hostDataDir, 'addons.d');
+    const loaderPath = path.join(hostDataDir, 'addon-host-loader.js');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    fs.mkdirSync(pluginsRootDir, { recursive: true });
+
+    const realBinPath = path.join(REPO_ROOT, 'bin', 'addon-host.js');
+    const lifecyclePort = createElectronHostLifecyclePort({
+      cliEntryPath: realBinPath,
+      transport: {
+        id: 'stub-asar',
+        isInstalled: () => true,
+        diagnose: () => ({}),
+        install: () => ({ status: 'INSTALLED' }),
+        upgrade: () => ({ status: 'UPGRADED' }),
+        rollback: () => ({ status: 'ROLLED_BACK' }),
+      },
+    });
+    const ctx = lifecyclePort.resolveContext(ANTIGRAVITY_HOST_PROFILE, {
+      HOME: tmpDir,
+      USERPROFILE: tmpDir,
+    }, {
+      HOST_DATA_DIR: hostDataDir,
+      ADDONS_DIR: addonsDir,
+      PLUGINS_ROOT_DIR: pluginsRootDir,
+      LOADER_SCRIPT_PATH: loaderPath,
+      REMOTE_DIST_DIR: remoteDistDir,
+      ASAR_PATH: path.join(tmpDir, 'fake.asar'),
+    });
+    const instRes = lifecyclePort.installHost(ctx);
+    assert.equal(instRes.ok, true);
+
+    const writtenMetaPath = path.join(hostDataDir, DEFAULT_HOST_CLI_META_FILENAME);
+    assert.equal(fs.existsSync(writtenMetaPath), true);
+    assert.equal(fs.readdirSync(pluginsRootDir).length, 0, 'Must never write under pluginsRootDir');
+
+    const shimSrc = fs.readFileSync(loaderPath, 'utf8');
+    assert.equal(shimSrc.includes(realBinPath), false, 'addon-host-loader.js must not leak CLI repo path');
+
+    const svc = createHostAdminService({
+      hostVersion: '2.5.4',
+      buildSha8: instRes.buildSha8,
+      profile: ANTIGRAVITY_HOST_PROFILE,
+      addonsDir,
+      pluginsRootDir,
+      remoteDistDir,
+      pathEnv: '',
+      loadRawManifests: loadRawManifestsFromDir,
+      planDesktopAddons: () => ({ active: [], disabled: [], rejected: [] }),
+    });
+    const st = svc.getState();
+    assert.equal(st.remoteBundle.buildCommandSource, 'cli-entry');
+    assert.equal(st.remoteBundle.buildCommandRunnable, true);
+    assert.equal(
+      st.remoteBundle.buildCommand,
+      `node "${path.resolve(realBinPath)}" --build-remote --out-dir "${remoteDistDir}"`
+    );
+
+    // Execute the resolved CLI entry with --build-remote --no-addons --check to prove exit 0
+    const execRes = spawnSync(process.execPath, [realBinPath, '--build-remote', '--no-addons', '--check'], {
+      encoding: 'utf8',
+    });
+    assert.equal(execRes.status, 0, execRes.stderr);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-V25-009: createHostAdminService marks remoteBundle needsRebuild=true when packed rendererSha256 or version becomes stale', () => {
+  const fx = setupFixtureEnv();
+  try {
+    const fsPort = createNodeFileSystemPort();
+    const p1Path = path.join(fx.pluginsRootDir, 'ko-translator', 'renderer.js');
+    const p2Path = path.join(fx.pluginsRootDir, 'statusbar-ui', 'renderer.js');
+    const p1ManifestPath = path.join(fx.addonsDir, 'ko-translator.json');
+    const manifestOutPath = path.join(fx.remoteDistDir, 'build-manifest.json');
+
+    const p1InitSha = sha256(fs.readFileSync(p1Path, 'utf8'));
+    const p2InitSha = sha256(fs.readFileSync(p2Path, 'utf8'));
+
+    fs.writeFileSync(
+      manifestOutPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        buildSha8: '1a25fb86',
+        mode: 'packed',
+        addons: [
+          { pluginId: 'ko-translator', version: '2.3.0', rendererSha256: p1InitSha },
+          { pluginId: 'statusbar-ui', version: '1.2.0', rendererSha256: p2InitSha },
+        ],
+        files: { 'remote.user.js': 'abc', 'bookmarklet.txt': 'def' },
+      }),
+      'utf8'
+    );
+
+    const makeService = () =>
+      createHostAdminService({
+        hostVersion: '2.5.4',
+        buildSha8: 'abcd1234',
+        profile: ANTIGRAVITY_HOST_PROFILE,
+        addonsDir: fx.addonsDir,
+        pluginsRootDir: fx.pluginsRootDir,
+        remotePrefsPath: fx.remotePrefsPath,
+        remoteDistDir: fx.remoteDistDir,
+        strictTrustPolicy: true,
+        fsPort,
+        isEnabledInDesktopConfig: () => true,
+        loadRawManifests: loadRawManifestsFromDir,
+        planDesktopAddons: () =>
+          planAddonExecution(loadRawManifestsFromDir(fx.addonsDir), {
+            pluginsRootDir: fx.pluginsRootDir,
+            checkFilesExist: true,
+            hostProfileId: ANTIGRAVITY_HOST_PROFILE.id,
+            supportedCapabilities: ANTIGRAVITY_HOST_PROFILE.supportedCapabilities,
+            hostVersion: '2.5.4',
+            strictTrustPolicy: true,
+            fsPort,
+            isEnabled: () => true,
+          }),
+        readCurrentPolicy: () => JSON.parse(fs.readFileSync(fx.trustPolicyPath, 'utf8')),
+        getLifecycleStates: () => ({ 'ko-translator': 'ACTIVE', 'statusbar-ui': 'ACTIVE' }),
+      });
+
+    // 1. Fresh bundle matching live hashes & versions -> up-to-date
+    const stFresh = makeService().getState();
+    assert.equal(stFresh.remoteBundle.needsRebuild, false);
+    assert.deepEqual(stFresh.remoteBundle.stalePluginIds, []);
+
+    // 2. Upgrade trusted plugin renderer.js & trust-policy.json (same pluginId) -> stale!
+    const p1UpgradedSrc = "'use strict'; /* v2.3.1 */ void addonHost.pluginId;\n";
+    const p1UpgradedSha = sha256(p1UpgradedSrc);
+    fs.writeFileSync(p1Path, p1UpgradedSrc, 'utf8');
+    const policy = JSON.parse(fs.readFileSync(fx.trustPolicyPath, 'utf8'));
+    policy.approved['ko-translator'].rendererSha256 = p1UpgradedSha;
+    fs.writeFileSync(fx.trustPolicyPath, JSON.stringify(policy), 'utf8');
+
+    const stStaleTrusted = makeService().getState();
+    assert.equal(stStaleTrusted.remoteBundle.needsRebuild, true);
+    assert.deepEqual(stStaleTrusted.remoteBundle.stalePluginIds, ['ko-translator']);
+
+    // 3. Modify restricted plugin renderer.js as well -> both flagged stale!
+    const p2UpgradedSrc = "'use strict'; /* updated */ void addonHost.pluginId;\n";
+    const p2UpgradedSha = sha256(p2UpgradedSrc);
+    fs.writeFileSync(p2Path, p2UpgradedSrc, 'utf8');
+
+    const stStaleBoth = makeService().getState();
+    assert.equal(stStaleBoth.remoteBundle.needsRebuild, true);
+    assert.deepEqual(stStaleBoth.remoteBundle.stalePluginIds, ['ko-translator', 'statusbar-ui']);
+
+    // 4. Rebuild build-manifest.json with matching hashes -> up-to-date again
+    fs.writeFileSync(
+      manifestOutPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        buildSha8: '2b36fc97',
+        mode: 'packed',
+        addons: [
+          { pluginId: 'ko-translator', version: '2.3.0', rendererSha256: p1UpgradedSha },
+          { pluginId: 'statusbar-ui', version: '1.2.0', rendererSha256: p2UpgradedSha },
+        ],
+        files: { 'remote.user.js': 'abc', 'bookmarklet.txt': 'def' },
+      }),
+      'utf8'
+    );
+    const stRebuilt = makeService().getState();
+    assert.equal(stRebuilt.remoteBundle.needsRebuild, false);
+    assert.deepEqual(stRebuilt.remoteBundle.stalePluginIds, []);
+
+    // 5. Version-only bump in manifest -> flagged stale even with identical rendererSha256
+    const p1Manifest = JSON.parse(fs.readFileSync(p1ManifestPath, 'utf8'));
+    p1Manifest.version = '2.3.1';
+    fs.writeFileSync(p1ManifestPath, JSON.stringify(p1Manifest), 'utf8');
+    const stVerStale = makeService().getState();
+    assert.equal(stVerStale.remoteBundle.needsRebuild, true);
+    assert.deepEqual(stVerStale.remoteBundle.stalePluginIds, ['ko-translator']);
+  } finally {
+    fx.cleanup();
+  }
 });

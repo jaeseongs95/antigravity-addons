@@ -27,12 +27,47 @@ const { createAsarPatchTransport } = require('./asar-patch-transport');
 const { buildHostLoaderScriptSource } = require('./host-loader-builder');
 
 const DIST_RUNTIME_DIR = path.resolve(__dirname, '..', '..', '..', 'dist', 'runtime');
+const DEFAULT_CLI_ENTRY_PATH = path.resolve(__dirname, '..', '..', '..', 'bin', 'addon-host.js');
+const HOST_CLI_META_FILENAME = 'host-cli.json';
 const REQUIRED_RUNTIME_FILES = Object.freeze([
   'build-manifest.json',
   'main/init-main.js',
   'preload/preload-bridge.cjs',
   'renderer/kernel-bundle.cjs',
 ]);
+
+function writeHostCliMetaIfAvailable(hostDataDir, cliEntryPath) {
+  if (!hostDataDir || typeof hostDataDir !== 'string' || !cliEntryPath || typeof cliEntryPath !== 'string') {
+    return null;
+  }
+  try {
+    const resolvedCli = path.resolve(cliEntryPath);
+    if (!fs.existsSync(resolvedCli) || !fs.statSync(resolvedCli).isFile()) {
+      return null;
+    }
+    const metaPath = path.join(hostDataDir, HOST_CLI_META_FILENAME);
+    if (fs.existsSync(metaPath)) {
+      const lstat = fs.lstatSync(metaPath);
+      if (lstat.isSymbolicLink() || !lstat.isFile()) {
+        return null;
+      }
+    }
+    const payload =
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          cliEntryPath: resolvedCli,
+          updatedAt: new Date().toISOString(),
+        },
+        null,
+        2
+      ) + '\n';
+    writeAtomicSync(metaPath, payload);
+    return metaPath;
+  } catch (_err) {
+    return null;
+  }
+}
 
 function copyDirRecursive(srcDir, dstDir) {
   fs.mkdirSync(dstDir, { recursive: true });
@@ -169,7 +204,11 @@ function resolveElectronPaths(profile, env = process.env, pathOverrides = null) 
   return { hostProfileId: activeProfile.id, activeProfile, paths: resolved };
 }
 
-function createElectronHostLifecyclePort({ transport = null, distRuntimeDir = DIST_RUNTIME_DIR } = {}) {
+function createElectronHostLifecyclePort({
+  transport = null,
+  distRuntimeDir = DIST_RUNTIME_DIR,
+  cliEntryPath = DEFAULT_CLI_ENTRY_PATH,
+} = {}) {
   const activeTransport = transport || createAsarPatchTransport();
 
   function stageAndApply(
@@ -351,6 +390,8 @@ function createElectronHostLifecyclePort({ transport = null, distRuntimeDir = DI
           asar,
         };
       }
+
+      writeHostCliMetaIfAvailable(paths.HOST_DATA_DIR, cliEntryPath);
 
       const status =
         asar.status === 'SKIPPED_NO_ASAR'
