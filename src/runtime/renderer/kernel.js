@@ -903,6 +903,59 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     return _MapDelete(stagedHandles, runNonce);
   }
 
+  function selectSettingsTab(pluginId, tabId, token) {
+    assertHostToken(token);
+    if (!booted || !settingsTabs || typeof settingsTabs.selectTab !== 'function') {
+      return { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED' };
+    }
+    const res = settingsTabs.selectTab(pluginId, tabId);
+    if (res && res.ok === false && res.reason === 'ERR_SETTINGS_TAB_SELECT_FAILED') {
+      reportPluginError(pluginId, res.error || res.reason);
+    } else if (res && res.ok === true && res.result && typeof res.result.then === 'function') {
+      res.result.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : _String(err)));
+    }
+    return res;
+  }
+
+  function listHostActions(token) {
+    assertHostToken(token);
+    const out = [];
+    _MapForEach(pluginActions, (map) => {
+      _MapForEach(map, (a) => {
+        _ArrayPush(out, {
+          pluginId: a.pluginId,
+          actionId: a.actionId,
+          label: a.label,
+          runnable: typeof a.run === 'function',
+        });
+      });
+    });
+    return out;
+  }
+
+  function invokeHostAction(targetPluginId, actionId, args, token) {
+    assertHostToken(token);
+    if (typeof targetPluginId !== 'string' || !targetPluginId || typeof actionId !== 'string' || !actionId) {
+      return { ok: false, reason: 'ERR_ACTION_NOT_FOUND' };
+    }
+    const map = _MapGet(pluginActions, targetPluginId);
+    const a = map && _MapGet(map, actionId);
+    if (!a || typeof a.run !== 'function') {
+      return { ok: false, reason: `ERR_ACTION_NOT_FOUND:${targetPluginId}:${actionId}` };
+    }
+    try {
+      const result = _ReflectApply(a.run, undefined, _ArrayIsArray(args) ? args : []);
+      if (result && typeof result.then === 'function') {
+        result.catch((err) => reportPluginError(targetPluginId, err && err.message ? err.message : _String(err)));
+      }
+      return { ok: true, reason: null, result };
+    } catch (err) {
+      const detail = err && err.message ? err.message : _String(err);
+      reportPluginError(targetPluginId, detail);
+      return { ok: false, reason: 'ERR_ACTION_EXEC_FAILED', error: detail };
+    }
+  }
+
   const api = _ObjectFreeze({
     boot,
     createPluginHandle,
@@ -915,6 +968,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     getErrors: () => _ArraySlice(recordedErrors),
     getBridgeStatus: () => ({ booted, docGenId, hostProfileId, hasBridge: !!hostBridge }),
     listSettingsTabs: () => (settingsTabs ? settingsTabs.listTabs() : []),
+    selectSettingsTab,
+    listHostActions,
+    invokeHostAction,
     getSurfaceBounds: (surfaceIdOrOpts) => (surfaceGeometry ? surfaceGeometry.getSurfaceBounds(surfaceIdOrOpts) : null),
     getActiveSurface: () => (surfaceGeometry ? surfaceGeometry.getActiveSurface() : null),
     listSurfaces: () => (surfaceGeometry ? surfaceGeometry.listSurfaces() : _ObjectFreeze(['viewport'])),

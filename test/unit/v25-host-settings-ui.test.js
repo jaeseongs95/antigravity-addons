@@ -1286,10 +1286,10 @@ test('TC-V25-009: createHostAdminService marks remoteBundle needsRebuild=true wh
   }
 });
 
-test('TC-V25-010: v2.6.0 MV3 extension status, 64KB bookmarklet IPC cap, !hasExtension rebuild trigger, and dynamic Settings UI action hierarchy', async () => {
+test('TC-V25-010: v2.7.0 universal Userscript + LAN QR status, 64KB bookmarklet IPC cap, !hasUserscript rebuild trigger, and dynamic Settings UI action hierarchy', async () => {
   const fx = setupFixtureEnv();
   try {
-    // 1. Healthy v2.6.0 dist reports extensionDir, userscriptPath, and small runnable bookmarklet
+    // 1. Healthy dist reports userscriptPath, extensionDir, and small runnable bookmarklet
     const okStatus = readRemoteBundleStatus(fx.remoteDistDir);
     assert.equal(okStatus.hasExtension, true);
     assert.equal(okStatus.extensionDir, path.join(fx.remoteDistDir, 'extension'));
@@ -1308,12 +1308,12 @@ test('TC-V25-010: v2.6.0 MV3 extension status, 64KB bookmarklet IPC cap, !hasExt
     assert.equal(bigStatus.bookmarkletText, null);
     assert.equal(bigStatus.bookmarkletChars, Buffer.byteLength(oversizedText, 'utf8'));
 
-    // 3. Removing extension/ (legacy v2.5.4 remote-dist) sets hasExtension=false & forces needsRebuild=true
-    fs.rmSync(path.join(fx.remoteDistDir, 'extension'), { recursive: true, force: true });
+    // 3. Removing userscript forces hasUserscript=false & needsRebuild=true; serveCommand is exposed
+    fs.rmSync(path.join(fx.remoteDistDir, 'remote.user.js'), { force: true });
     const fsPort = createNodeFileSystemPort();
     const policy = JSON.parse(fs.readFileSync(fx.trustPolicyPath, 'utf8'));
     const svc = createHostAdminService({
-      hostVersion: '2.6.0',
+      hostVersion: '2.7.0',
       buildSha8: 'abcd1234',
       profile: ANTIGRAVITY_HOST_PROFILE,
       addonsDir: fx.addonsDir,
@@ -1328,13 +1328,15 @@ test('TC-V25-010: v2.6.0 MV3 extension status, 64KB bookmarklet IPC cap, !hasExt
       readCurrentPolicy: () => policy,
       getLifecycleStates: () => ({}),
     });
-    const legacyState = svc.getState();
-    assert.equal(legacyState.remoteBundle.built, true);
-    assert.equal(legacyState.remoteBundle.hasExtension, false);
-    assert.equal(legacyState.remoteBundle.extensionDir, null);
-    assert.equal(legacyState.remoteBundle.needsRebuild, true);
+    const missingUserState = svc.getState();
+    assert.equal(missingUserState.remoteBundle.built, true);
+    assert.equal(missingUserState.remoteBundle.hasUserscript, false);
+    assert.equal(missingUserState.remoteBundle.userscriptPath, null);
+    assert.equal(missingUserState.remoteBundle.needsRebuild, true);
+    assert.equal(typeof missingUserState.remoteBundle.serveCommand, 'string');
+    assert.ok(missingUserState.remoteBundle.serveCommand.includes('--serve-remote'));
 
-    // 4. Settings UI dynamic action hierarchy & hidden unrunnable bookmarklet button
+    // 4. Settings UI dynamic action hierarchy: Userscript primary + LAN QR serve button + secondary extension
     const { doc } = createFakeDom();
     const modal = doc.createElement('div');
     modal.className = 'settings-modal-container';
@@ -1370,6 +1372,7 @@ test('TC-V25-010: v2.6.0 MV3 extension status, 64KB bookmarklet IPC cap, !hasExt
       bookmarkletRunnable: false,
       bookmarkletText: null,
       buildCommand: 'node "C:\\repo\\bin\\addon-host.js" --build-remote',
+      serveCommand: 'node "C:\\repo\\bin\\addon-host.js" --serve-remote --once',
     };
 
     const ui = createHostSettingsUi(doc, {}, {
@@ -1378,7 +1381,7 @@ test('TC-V25-010: v2.6.0 MV3 extension status, 64KB bookmarklet IPC cap, !hasExt
       hostBridge: {
         getHostAdminState: async () => ({
           ok: true,
-          host: { version: '2.6.0', buildSha8: '1234abcd', profileId: 'antigravity-desktop' },
+          host: { version: '2.7.0', buildSha8: '1234abcd', profileId: 'antigravity-desktop' },
           summary: { totalCount: 0, desktopActiveCount: 0, remoteEligibleCount: 0, remoteEnabledCount: 0 },
           addons: [],
           remoteBundle: bundleFixture,
@@ -1392,20 +1395,23 @@ test('TC-V25-010: v2.6.0 MV3 extension status, 64KB bookmarklet IPC cap, !hasExt
 
     const sr = ui.getElements().shadowRoot;
     const cmdBtnUp = sr.querySelector('[data-ah-action="copy-command"]');
-    const extBtnUp = sr.querySelector('[data-ah-action="copy-extension-path"]');
     const userBtnUp = sr.querySelector('[data-ah-action="copy-userscript-path"]');
+    const serveBtnUp = sr.querySelector('[data-ah-action="copy-serve-command"]');
+    const extBtnUp = sr.querySelector('[data-ah-action="copy-extension-path"]');
     const bmBtnHidden = sr.querySelector('[data-ah-action="copy-bookmarklet"]');
     const guideEl = sr.querySelector('.ah-install-guide');
 
     assert.ok(cmdBtnUp);
-    assert.ok(extBtnUp);
     assert.ok(userBtnUp);
+    assert.ok(serveBtnUp);
+    assert.ok(extBtnUp);
     assert.equal(bmBtnHidden, null, 'Unrunnable bookmarklet button must be hidden');
-    assert.ok(guideEl && guideEl.textContent.includes('chrome://extensions'));
-    assert.equal(extBtnUp.className.includes('ah-btn-primary'), true, 'Copy extension path is primary when up to date');
+    assert.ok(guideEl && guideEl.textContent.includes('.user.js'));
+    assert.equal(userBtnUp.className.includes('ah-btn-primary'), true, 'Copy userscript path is primary when up to date');
+    assert.equal(extBtnUp.className.includes('ah-btn-primary'), false, 'Copy extension path is secondary when userscript is present');
     assert.equal(cmdBtnUp.className.includes('ah-btn-primary'), false, 'Copy command is secondary when up to date');
 
-    // When needsRebuild is true, Copy command becomes primary and Copy extension path becomes secondary
+    // When needsRebuild is true, Copy command becomes primary and Copy userscript path becomes secondary
     bundleFixture = {
       ...bundleFixture,
       needsRebuild: true,
@@ -1415,10 +1421,10 @@ test('TC-V25-010: v2.6.0 MV3 extension status, 64KB bookmarklet IPC cap, !hasExt
     };
     await ui.refresh();
     const cmdBtnStale = sr.querySelector('[data-ah-action="copy-command"]');
-    const extBtnStale = sr.querySelector('[data-ah-action="copy-extension-path"]');
+    const userBtnStale = sr.querySelector('[data-ah-action="copy-userscript-path"]');
     const bmBtnShown = sr.querySelector('[data-ah-action="copy-bookmarklet"]');
     assert.equal(cmdBtnStale.className.includes('ah-btn-primary'), true);
-    assert.equal(extBtnStale.className.includes('ah-btn-primary'), false);
+    assert.equal(userBtnStale.className.includes('ah-btn-primary'), false);
     assert.ok(bmBtnShown, 'Runnable small bookmarklet button should render when bookmarkletRunnable=true');
     ui.dispose();
   } finally {

@@ -24,6 +24,75 @@ const {
 const { createRemoteHostBridge } = require('./remote-host-bridge');
 
 const KERNEL_BOOT_STATE = new WeakMap();
+const WINDOW_ADDON_REGISTRIES = new WeakMap();
+const WINDOW_ACTIVE_CONTROLLERS = new WeakMap();
+
+function resolveRegistryHost(win) {
+  if (win && typeof win === 'object') return win;
+  if (typeof globalThis !== 'undefined' && globalThis && typeof globalThis === 'object') {
+    return globalThis;
+  }
+  return null;
+}
+
+function getOrCreateAddonRegistry(win) {
+  const host = resolveRegistryHost(win);
+  if (!host) return [];
+  let list = WINDOW_ADDON_REGISTRIES.get(host);
+  if (!list) {
+    list = [];
+    WINDOW_ADDON_REGISTRIES.set(host, list);
+  }
+  return list;
+}
+
+function validateAddonDescriptor(descriptor) {
+  if (!descriptor || typeof descriptor !== 'object') {
+    return { ok: false, reason: 'ERR_INVALID_ADDON_DESCRIPTOR' };
+  }
+  const meta = descriptor.pluginMeta;
+  if (!meta || typeof meta !== 'object' || typeof meta.pluginId !== 'string' || !meta.pluginId.trim()) {
+    return { ok: false, reason: 'ERR_INVALID_ADDON_META' };
+  }
+  if (typeof descriptor.run !== 'function') {
+    return { ok: false, reason: 'ERR_PACKED_ADDON_RUN_FN_REQUIRED' };
+  }
+  return { ok: true, pluginId: meta.pluginId.trim() };
+}
+
+function registerAddon(descriptor, { win = null } = {}) {
+  const check = validateAddonDescriptor(descriptor);
+  if (!check.ok) {
+    return { ok: false, queued: false, mounted: false, reason: check.reason };
+  }
+  const host = resolveRegistryHost(win || (typeof globalThis !== 'undefined' ? globalThis.window || globalThis : null));
+  const list = getOrCreateAddonRegistry(host);
+  for (let i = 0; i < list.length; i += 1) {
+    if (list[i] && list[i].pluginMeta && list[i].pluginMeta.pluginId === check.pluginId) {
+      return { ok: false, queued: false, mounted: false, pluginId: check.pluginId, reason: 'ERR_DUPLICATE_ADDON_ID' };
+    }
+  }
+  list.push(descriptor);
+
+  const activeController = host ? WINDOW_ACTIVE_CONTROLLERS.get(host) : null;
+  if (activeController && !activeController.disposed && typeof activeController.mountAddon === 'function') {
+    const mountPromise = activeController.mountAddon(descriptor);
+    return {
+      ok: true,
+      queued: false,
+      mounted: true,
+      pluginId: check.pluginId,
+      promise: mountPromise,
+    };
+  }
+  return { ok: true, queued: true, mounted: false, pluginId: check.pluginId };
+}
+
+function getRegisteredAddons(win = null) {
+  const host = resolveRegistryHost(win || (typeof globalThis !== 'undefined' ? globalThis.window || globalThis : null));
+  const list = getOrCreateAddonRegistry(host);
+  return list.slice();
+}
 
 function createSwappableBridgePort(kernelState) {
   function activePort() {
@@ -85,13 +154,17 @@ const DRAWER_CSS = `
   all: initial;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   color: #e6edf3;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.45;
+  box-sizing: border-box;
+}
+*, *::before, *::after {
+  box-sizing: border-box;
 }
 .rah-shell {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: max(12px, env(safe-area-inset-bottom, 0px));
   z-index: 2147483000;
   display: flex;
   flex-direction: column;
@@ -104,14 +177,16 @@ const DRAWER_CSS = `
   background: rgba(18, 22, 30, 0.94);
   color: #e6edf3;
   border-radius: 999px;
-  padding: 6px 12px;
-  font-size: 12px;
+  min-height: 44px;
+  padding: 8px 14px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  touch-action: manipulation;
 }
 .rah-pill:hover {
   background: rgba(28, 34, 46, 0.98);
@@ -119,7 +194,8 @@ const DRAWER_CSS = `
 }
 .rah-pill:focus-visible,
 .rah-btn:focus-visible,
-.rah-tab:focus-visible {
+.rah-tab:focus-visible,
+.rah-card-btn:focus-visible {
   outline: 2px solid #79c0ff;
   outline-offset: 2px;
 }
@@ -137,7 +213,7 @@ const DRAWER_CSS = `
   background: rgba(121, 192, 255, 0.16);
   color: #a5d6ff;
   border-radius: 999px;
-  padding: 1px 7px;
+  padding: 2px 8px;
   font-size: 11px;
 }
 .rah-badge.err {
@@ -145,11 +221,11 @@ const DRAWER_CSS = `
   color: #ffa198;
 }
 .rah-drawer {
-  width: min(360px, calc(100vw - 32px));
-  max-height: min(460px, calc(100vh - 96px));
-  background: rgba(15, 19, 26, 0.97);
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(500px, calc(100dvh - 88px));
+  background: rgba(15, 19, 26, 0.98);
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 12px;
+  border-radius: 14px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
   display: flex;
   flex-direction: column;
@@ -162,11 +238,12 @@ const DRAWER_CSS = `
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 .rah-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   color: #f0f6fc;
 }
@@ -178,17 +255,33 @@ const DRAWER_CSS = `
   appearance: none;
   background: rgba(255, 255, 255, 0.08);
   color: #e6edf3;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 6px;
-  padding: 3px 8px;
-  font-size: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  min-height: 44px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  touch-action: manipulation;
+}
+.rah-btn:hover:not(:disabled) {
+  background: rgba(121, 192, 255, 0.16);
+  border-color: rgba(121, 192, 255, 0.45);
+}
+.rah-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .rah-tabs {
   display: flex;
   gap: 4px;
-  padding: 8px 12px 0;
+  padding: 4px 12px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  overflow-x: auto;
 }
 .rah-tab {
   appearance: none;
@@ -196,10 +289,13 @@ const DRAWER_CSS = `
   color: #8b949e;
   border: none;
   border-bottom: 2px solid transparent;
-  padding: 6px 10px;
+  min-height: 44px;
+  padding: 8px 10px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
+  touch-action: manipulation;
 }
 .rah-tab[aria-selected="true"] {
   color: #f0f6fc;
@@ -211,28 +307,79 @@ const DRAWER_CSS = `
   display: flex;
   flex-direction: column;
   gap: 8px;
+  -webkit-overflow-scrolling: touch;
 }
 .rah-card {
   background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  text-align: left;
+  color: inherit;
+}
+.rah-card-btn {
+  appearance: none;
+  width: 100%;
+  min-height: 44px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.rah-card-btn:hover:not(:disabled) {
+  background: rgba(121, 192, 255, 0.12);
+  border-color: rgba(121, 192, 255, 0.45);
+}
+.rah-card-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 .rah-card-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+  width: 100%;
+}
+.rah-action-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.rah-action-btn {
+  flex: 1 1 auto;
+  min-width: 110px;
+}
+.rah-open-pill {
+  font-size: 11px;
+  color: #79c0ff;
+  font-weight: 600;
 }
 .rah-status-ok { color: #3fb950; font-weight: 600; }
 .rah-status-err { color: #f85149; font-weight: 600; }
 .rah-empty {
   color: #8b949e;
-  padding: 12px 4px;
+  padding: 14px 4px;
   text-align: center;
+}
+@media (max-width: 640px) {
+  .rah-shell {
+    left: max(12px, env(safe-area-inset-left, 0px));
+    right: max(12px, env(safe-area-inset-right, 0px));
+    bottom: max(12px, env(safe-area-inset-bottom, 0px));
+    align-items: stretch;
+  }
+  .rah-drawer {
+    width: 100%;
+    max-width: none;
+    max-height: 70dvh;
+    border-radius: 16px 16px 12px 12px;
+  }
+  .rah-pill {
+    align-self: flex-end;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
@@ -300,7 +447,7 @@ function mountFallbackSlotDock(doc, noTranslateAttrs) {
   return dock;
 }
 
-function createHostDrawerUi({ doc, win, profile, getState }) {
+function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab = null, onInvokeHostAction = null }) {
   const noTranslateAttrs = Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [];
   const { hostEl, shadowRoot } = createShadowContainer(doc, DRAWER_HOST_ID, {
     mode: 'open',
@@ -446,6 +593,7 @@ function createHostDrawerUi({ doc, win, profile, getState }) {
     clearChildrenSafe(bodyEl);
 
     if (activeTab === 'addons') {
+      const hostActions = Array.isArray(state.hostActions) ? state.hostActions : [];
       if (state.addons.length === 0) {
         bodyEl.appendChild(
           createElementSafe(
@@ -456,6 +604,13 @@ function createHostDrawerUi({ doc, win, profile, getState }) {
           )
         );
         return;
+      }
+      const actionsByPlugin = new Map();
+      for (let i = 0; i < hostActions.length; i += 1) {
+        const act = hostActions[i];
+        if (!act || !act.pluginId) continue;
+        if (!actionsByPlugin.has(act.pluginId)) actionsByPlugin.set(act.pluginId, []);
+        actionsByPlugin.get(act.pluginId).push(act);
       }
       for (let i = 0; i < state.addons.length; i += 1) {
         const item = state.addons[i];
@@ -475,6 +630,35 @@ function createHostDrawerUi({ doc, win, profile, getState }) {
           ? `${item.pluginId} · ${item.trustLevel} · ${item.error}`
           : `${item.pluginId} · ${item.trustLevel}${item.skippedCapabilities.length ? ` · skipped: ${item.skippedCapabilities.join(',')}` : ''}`;
         card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, subText));
+
+        const pluginActs = actionsByPlugin.get(item.pluginId) || [];
+        if (pluginActs.length > 0 && typeof onInvokeHostAction === 'function') {
+          const actionList = createElementSafe(doc, 'div', { class: 'rah-action-list' });
+          for (let j = 0; j < pluginActs.length; j += 1) {
+            const act = pluginActs[j];
+            const actBtn = createElementSafe(
+              doc,
+              'button',
+              {
+                type: 'button',
+                class: 'rah-btn rah-action-btn',
+                'data-host-action-plugin': act.pluginId,
+                'data-host-action-id': act.actionId,
+              },
+              act.label || act.actionId
+            );
+            if (act.runnable === false) {
+              actBtn.disabled = true;
+            } else {
+              actBtn.addEventListener('click', () => {
+                onInvokeHostAction(act.pluginId, act.actionId);
+                render();
+              });
+            }
+            actionList.appendChild(actBtn);
+          }
+          card.appendChild(actionList);
+        }
         bodyEl.appendChild(card);
       }
       return;
@@ -487,15 +671,34 @@ function createHostDrawerUi({ doc, win, profile, getState }) {
       }
       for (let i = 0; i < state.settingsTabs.length; i += 1) {
         const tab = state.settingsTabs[i];
-        const card = createElementSafe(doc, 'div', {
-          class: 'rah-card',
+        const canSelect = Boolean(tab.selectable !== false && typeof onSelectSettingsTab === 'function');
+        const card = createElementSafe(doc, 'button', {
+          type: 'button',
+          class: 'rah-card rah-card-btn',
           'data-settings-tab-id': tab.tabId || '',
+          'data-settings-tab-plugin': tab.pluginId || '',
+          'data-settings-tab-action': 'select',
         });
+        if (!canSelect) {
+          card.disabled = true;
+        }
         const row = createElementSafe(doc, 'div', { class: 'rah-card-row' });
         row.appendChild(createElementSafe(doc, 'strong', { class: 'rah-tab-label' }, tab.label || tab.tabId));
-        row.appendChild(createElementSafe(doc, 'span', { class: 'rah-meta' }, tab.pluginId));
+        row.appendChild(
+          createElementSafe(doc, 'span', { class: canSelect ? 'rah-open-pill' : 'rah-meta' }, canSelect ? 'Open' : tab.pluginId)
+        );
         card.appendChild(row);
-        card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, `tabId: ${tab.tabId}`));
+        card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, `${tab.pluginId} · ${tab.tabId}`));
+        if (canSelect) {
+          card.addEventListener('click', () => {
+            const res = onSelectSettingsTab(tab.pluginId, tab.tabId);
+            if (!res || res.ok !== false) {
+              setOpen(false);
+            } else {
+              render();
+            }
+          });
+        }
         bodyEl.appendChild(card);
       }
       return;
@@ -683,19 +886,40 @@ async function bootRemoteWebHost({
       getState: () => ({
         addons: addonStates,
         settingsTabs: typeof activeKernel.listSettingsTabs === 'function' ? activeKernel.listSettingsTabs() : [],
+        hostActions: typeof activeKernel.listHostActions === 'function' ? activeKernel.listHostActions(hostToken) : [],
         errors: bridge.getErrors(),
       }),
+      onSelectSettingsTab(pluginId, tabId) {
+        if (typeof activeKernel.selectSettingsTab !== 'function') {
+          return { ok: false, reason: 'ERR_SELECT_SETTINGS_TAB_UNAVAILABLE' };
+        }
+        return activeKernel.selectSettingsTab(pluginId, tabId, hostToken);
+      },
+      onInvokeHostAction(pluginId, actionId) {
+        if (typeof activeKernel.invokeHostAction !== 'function') {
+          return { ok: false, reason: 'ERR_INVOKE_HOST_ACTION_UNAVAILABLE' };
+        }
+        return activeKernel.invokeHostAction(pluginId, actionId, [], hostToken);
+      },
     });
   }
 
-  for (let i = 0; i < (packedAddons || []).length; i += 1) {
-    const addon = packedAddons[i];
+  const mountedPluginIds = new Set();
+
+  async function mountAddon(addon) {
     const meta = addon && addon.pluginMeta;
-    if (!meta || typeof meta.pluginId !== 'string') continue;
+    if (!meta || typeof meta.pluginId !== 'string' || !meta.pluginId.trim()) {
+      return { ok: false, status: 'rejected', pluginId: null, error: 'ERR_INVALID_ADDON_META' };
+    }
+    const pluginId = meta.pluginId.trim();
+    if (mountedPluginIds.has(pluginId)) {
+      return { ok: false, status: 'duplicate', pluginId, error: 'ERR_DUPLICATE_ADDON_ID' };
+    }
+    mountedPluginIds.add(pluginId);
 
     const record = {
-      pluginId: meta.pluginId,
-      displayName: meta.displayName || meta.pluginId,
+      pluginId,
+      displayName: meta.displayName || pluginId,
       version: meta.version || '0.0.0',
       trustLevel: meta.trustLevel || 'restricted',
       skippedCapabilities: Array.isArray(meta.skippedCapabilities) ? meta.skippedCapabilities.slice() : [],
@@ -706,8 +930,11 @@ async function bootRemoteWebHost({
 
     let initialSettings = addon.initialSettingsSnapshot || null;
     if (meta.hasSettingsBridge && meta.trustLevel === 'trusted') {
-      bridge.bindSettingsPlugin(meta.pluginId, addon.settingsSpec || {});
-      const persisted = bridge.loadPersistedSettings(meta.pluginId);
+      bridge.bindSettingsPlugin(pluginId, addon.settingsSpec || {});
+      const persisted =
+        typeof bridge.hydrateSettings === 'function'
+          ? await bridge.hydrateSettings(pluginId)
+          : bridge.loadPersistedSettings(pluginId);
       if (persisted) {
         initialSettings = persisted;
       }
@@ -719,17 +946,17 @@ async function bootRemoteWebHost({
     } catch (err) {
       record.status = 'failed';
       record.error = err && err.message ? err.message : String(err);
-      bridge.port.reportError(meta.pluginId, record.error);
+      bridge.port.reportError(pluginId, record.error);
       if (drawerUi) drawerUi.render();
-      continue;
+      return { ok: false, status: 'failed', pluginId, error: record.error };
     }
 
     if (!stageRes || stageRes.ok !== true || typeof stageRes.runNonce !== 'string') {
       record.status = 'failed';
       record.error = (stageRes && stageRes.reason) || 'ERR_STAGE_HANDLE_FAILED';
-      bridge.port.reportError(meta.pluginId, record.error);
+      bridge.port.reportError(pluginId, record.error);
       if (drawerUi) drawerUi.render();
-      continue;
+      return { ok: false, status: 'failed', pluginId, error: record.error };
     }
 
     const runNonce = stageRes.runNonce;
@@ -755,14 +982,32 @@ async function bootRemoteWebHost({
         }
       }
       activeKernel.clearStagedHandle(runNonce, hostToken);
-      activeKernel.disposePlugin(meta.pluginId, hostToken);
+      activeKernel.disposePlugin(pluginId, hostToken);
       if (typeof activeKernel.reportPluginError === 'function') {
-        activeKernel.reportPluginError(meta.pluginId, record.error);
+        activeKernel.reportPluginError(pluginId, record.error);
       } else {
-        bridge.port.reportError(meta.pluginId, record.error);
+        bridge.port.reportError(pluginId, record.error);
       }
     }
     if (drawerUi) drawerUi.render();
+    return {
+      ok: record.status === 'active',
+      status: record.status,
+      pluginId,
+      error: record.error,
+    };
+  }
+
+  const queuedRegistered = getRegisteredAddons(win);
+  const initialAddons = [];
+  if (Array.isArray(packedAddons)) {
+    for (let i = 0; i < packedAddons.length; i += 1) initialAddons.push(packedAddons[i]);
+  }
+  for (let i = 0; i < queuedRegistered.length; i += 1) {
+    initialAddons.push(queuedRegistered[i]);
+  }
+  for (let i = 0; i < initialAddons.length; i += 1) {
+    await mountAddon(initialAddons[i]);
   }
 
   let disposed = false;
@@ -773,6 +1018,23 @@ async function bootRemoteWebHost({
     trustedTypes: ttGuard,
     bridge,
     drawerUi,
+    mountAddon,
+    selectSettingsTab(pluginId, tabId) {
+      if (disposed || typeof activeKernel.selectSettingsTab !== 'function') {
+        return { ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' };
+      }
+      return activeKernel.selectSettingsTab(pluginId, tabId, hostToken);
+    },
+    listHostActions() {
+      if (disposed || typeof activeKernel.listHostActions !== 'function') return [];
+      return activeKernel.listHostActions(hostToken);
+    },
+    invokeHostAction(pluginId, actionId, args = []) {
+      if (disposed || typeof activeKernel.invokeHostAction !== 'function') {
+        return { ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' };
+      }
+      return activeKernel.invokeHostAction(pluginId, actionId, args, hostToken);
+    },
     get disposed() {
       return disposed;
     },
@@ -785,6 +1047,10 @@ async function bootRemoteWebHost({
     dispose() {
       if (disposed) return;
       disposed = true;
+      const host = resolveRegistryHost(win);
+      if (host && WINDOW_ACTIVE_CONTROLLERS.get(host) === controller) {
+        WINDOW_ACTIVE_CONTROLLERS.delete(host);
+      }
       for (let i = 0; i < addonStates.length; i += 1) {
         activeKernel.disposePlugin(addonStates[i].pluginId, hostToken);
       }
@@ -809,6 +1075,11 @@ async function bootRemoteWebHost({
     },
   };
 
+  const registryHost = resolveRegistryHost(win);
+  if (registryHost) {
+    WINDOW_ACTIVE_CONTROLLERS.set(registryHost, controller);
+  }
+
   Object.defineProperty(win, instanceKey, {
     value: controller,
     writable: false,
@@ -828,5 +1099,7 @@ module.exports = {
   DRAWER_HOST_ID,
   SLOT_DOCK_ID,
   ACTIVE_HOST_ATTR,
+  registerAddon,
+  getRegisteredAddons,
   bootRemoteWebHost,
 };

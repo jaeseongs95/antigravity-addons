@@ -6,7 +6,19 @@
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
 > *(Formerly `antigravity-native-addon-host` — existing `addon-host` CLI command, `ADDON_HOST_LOADER_V2` marker, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Single, vendor-independent native desktop & remote web addon host framework (`v2.6.0`) with unpacked MV3 Browser Extension (`world: "ISOLATED"`) + Userscript Remote Web delivery, built-in Settings `Addon Manager` (`애드온 관리`) UI, zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent native desktop & universal remote web addon host framework (`v2.7.0`) with cross-device Userscript (`@inject-into content` + `GM_*` storage + modular `@require` host library) + 0-dep LAN QR mobile transfer (`--serve-remote`) + secondary unpacked MV3 extension, built-in Settings `Addon Manager` (`애드온 관리`) UI, zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+
+## Key Updates in v2.7.0 (Universal Cross-Device Remote Web Delivery, Interactive Mobile Drawer & Modular `@require` Host)
+
+- **Universal Userscript Primary Delivery & Modular `@require` Host Library**:
+  - Promotes universal cross-device Userscript (`antigravity-remote.user.js` + `antigravity-remote.meta.js`) to the primary Remote Web delivery path for **iOS/iPadOS Safari (`Userscripts`)**, **Android Firefox (`Violentmonkey`)**, and **Desktop browsers (`Violentmonkey`/`Tampermonkey`)**, keeping unpacked MV3 Chrome/Edge extension (`remote-dist/extension/`) as a secondary desktop option.
+  - Emits `antigravity-remote-host.lib.js` (0-addon runtime library) and adds `globalThis.__addonHostRemoteRuntime.registerAddon(descriptor)` so independent plugins can compose via `@require` without bundling the host.
+  - Upgrades Userscript headers to `@inject-into content`, `@grant GM_getValue`/`GM_setValue`/`GM_deleteValue` (with automatic `GM_*` → `localStorage` → `memory-ephemeral` storage fallback), and optional `--update-base-url <https-url>` (`@updateURL`/`@downloadURL`).
+- **0-Dep LAN QR Mobile Transfer (`addon-host --serve-remote`)**:
+  - Adds a zero-dependency ISO/IEC 18004 QR encoder (`src/adapters/remote-web/qr-ascii.js`) and tokenized LAN HTTP server (`src/adapters/remote-web/remote-lan-server.js`) with a 128-bit random URL token, exact route allowlist, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `300s` auto-shutdown TTL, and `--once` auto-close after the first `.user.js` download.
+- **Interactive Mobile-First Remote Drawer & Smart `configBridge` Filtering**:
+  - Upgrades `kernel.js` / `settings-tab-coordinator.js` / `remote-bootstrap.js` with host-token-guarded `selectSettingsTab`, `listHostActions`, and `invokeHostAction`: Settings Tabs and Quick Actions inside the Shadow-DOM drawer are now clickable buttons (`>= 44px` touch targets, `@media (max-width: 640px)` full-width bottom sheet, `env(safe-area-inset-*)`).
+  - Excludes desktop-only `configBridge` addons by default (`ERR_REMOTE_REQUIRES_LOCAL_CONFIG_BRIDGE`, overridable via explicit `antigravity-remote-web` opt-in or `--include-offline-config-bridge`) and updates Desktop `Settings > Addon Manager` to prioritize Userscript & LAN QR copy actions.
 
 ## Key Updates in v2.6.0 (Unpacked MV3 Browser Extension Delivery, Kernel Slimming & CSP/TrustedTypes Hardening)
 
@@ -102,11 +114,12 @@ node ./bin/addon-host.js trust list
 node ./bin/addon-host.js trust approve <pluginId>
 node ./bin/addon-host.js trust revoke <pluginId>
 
-# Build & verify Remote Web Userscript / Bookmarklet bundle
+# Build, verify & transfer Remote Web Universal Userscript bundle (LAN QR)
 npm run check:remote
 npm run build:remote
 node ./bin/addon-host.js --profile remote-web --status
 node ./bin/addon-host.js --build-remote --no-addons --check
+node ./bin/addon-host.js --serve-remote --once
 
 # Install, upgrade (V1 -> V2), or roll back the shared app.asar bootstrap hook
 node ./bin/addon-host.js --install

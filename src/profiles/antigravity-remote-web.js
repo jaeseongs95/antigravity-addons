@@ -28,6 +28,7 @@ const DEFAULT_EXCLUDED_URL_PROTOCOLS = Object.freeze([
 ]);
 const DEFAULT_TRUSTED_TYPES_POLICY_NAME = 'antigravity-remote-addon-host';
 const DEFAULT_STORAGE_NAMESPACE = 'agy-remote-addon-host:v2';
+const DEFAULT_UPDATE_BASE_URL = 'https://github.com/jaeseongs95/antigravity-addons/releases/latest/download';
 
 function resolveAntigravityRemoteWebPaths(env = process.env) {
   const base = resolveAntigravityPaths(env);
@@ -178,6 +179,8 @@ const ANTIGRAVITY_REMOTE_WEB_PROFILE = Object.freeze({
   excludedUrlProtocols: DEFAULT_EXCLUDED_URL_PROTOCOLS,
   trustedTypesPolicyName: DEFAULT_TRUSTED_TYPES_POLICY_NAME,
   storageNamespace: DEFAULT_STORAGE_NAMESPACE,
+  excludeOfflineConfigBridge: true,
+  defaultUpdateBaseUrl: DEFAULT_UPDATE_BASE_URL,
   extraNoTranslateAttributes: Object.freeze(['data-agy-no-translate']),
   uiAnchors: REMOTE_WEB_UI_ANCHORS,
   uiSurfaces: REMOTE_WEB_UI_SURFACES,
@@ -224,6 +227,7 @@ module.exports = {
   DEFAULT_EXCLUDED_URL_PROTOCOLS,
   DEFAULT_TRUSTED_TYPES_POLICY_NAME,
   DEFAULT_STORAGE_NAMESPACE,
+  DEFAULT_UPDATE_BASE_URL,
   REMOTE_WEB_UI_ANCHORS,
   REMOTE_WEB_UI_SURFACES,
   REMOTE_WEB_UI_GRID_MERGES,

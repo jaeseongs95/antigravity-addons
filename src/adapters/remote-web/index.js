@@ -11,6 +11,8 @@ const remoteHostBridge = require('./remote-host-bridge');
 const addonCollector = require('./addon-collector');
 const remoteBootstrap = require('./remote-bootstrap');
 const extensionManifest = require('./extension-manifest');
+const qrAscii = require('./qr-ascii');
+const remoteLanServer = require('./remote-lan-server');
 
 module.exports = {
   ...originGuard,
@@ -20,4 +22,6 @@ module.exports = {
   ...addonCollector,
   ...remoteBootstrap,
   ...extensionManifest,
+  ...qrAscii,
+  ...remoteLanServer,
 };
