@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "1e285f6a",
-  "buildSha256": "1e285f6a9626152beb42597fe5a9feb224b9c63e80814e38728538bdd5687ed7",
+  "buildSha8": "dac28bb0",
+  "buildSha256": "dac28bb06daecc4a6fd981282320fa24db4789ac529c97e97a3ec2600da77221",
   "fileCount": 31,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
     "preload/preload-bridge.cjs": "d395cf0b392b746fcefbcd079c3c91a37350cb4b9115c1d58e5f58e2bd2489c2",
-    "renderer/kernel-bundle.cjs": "5cf714790700c479d9d012d07f91b299ba8bbcb6889e3a05857a695c66e41db1",
+    "renderer/kernel-bundle.cjs": "1d6721a0ec3bf0b65700a0325612991648a87bb8b0bd466d659edea17d4c7607",
     "schemas/addon-manifest.v1.schema.json": "effb7a2775a2b753146bd272d4856bd6b8b0fee4fef4da6c4d2fed29638e679c",
     "schemas/addon-manifest.v2.schema.json": "152112923460a84e2121c6d96368c2ed44981324f51826f3ca9388d9e4240d46",
     "src/adapters/electron/config-reader.js": "0b109b40f977682a36cbb849ed353caf91760e25736d253b2dc496bb8ebf77e3",

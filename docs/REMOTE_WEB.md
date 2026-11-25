@@ -2,18 +2,26 @@
 
 [한국어 문서 (Korean)](./REMOTE_WEB.ko.md)
 
-`antigravity-addons` v2.7.0 delivers a **universal Remote Web Host** (`antigravity-remote-web`) built directly on top of the shared renderer kernel (`src/runtime/renderer/kernel.js`) and `HostBridgePort` contract.
+`antigravity-addons` v2.8.0 delivers a **universal Remote Web Host** (`antigravity-remote-web`) built directly on top of the shared renderer kernel (`src/runtime/renderer/kernel.js`) and `HostBridgePort` contract.
 
-Its primary design goal is **universal cross-device and cross-browser usability** (iOS/iPadOS, Android, and any desktop browser). Any compliant `AddonManifest.v2` renderer plugin written for `antigravity-desktop` runs on Antigravity Remote Web (`https://antigravity.google.com/*`) without rewriting against a separate web-only API.
+Its primary design goal is **1-click public HTTPS installation and multi-addon coexistence across every device and network (LTE/5G, work/travel devices, zero private IP or home PC required)**. Any compliant `AddonManifest.v2` renderer plugin can publish its own standalone HTTPS `@require` Userscript using `addon-host --build-addon-userscript`.
 
-## Platform Support Matrix (Universal Userscript Primary)
+## Delivery Matrix (Public HTTPS Primary)
 
-| Platform / Browser | Primary Delivery | Notes & Honest Caveats |
+| Method | Network Requirement | Install Flow | Best For |
+| --- | --- | --- | --- |
+| **Primary: Public HTTPS Per-Addon `.user.js` (`@require`)** | **Anywhere** (LTE/5G, external PC/mobile, home PC off) | 1-click `.user.js` HTTPS link on each addon's GitHub Release (auto-updating) | **Universal cross-device usage** (multi-sandbox coexistence in one drawer) |
+| **Secondary: Portable Single-File `.user.js`** | **Anywhere after import** (no PC needed) | Run `addon-host --build-remote`, transfer `antigravity-remote.user.js` once via cloud/messenger and import | Private/local unpublished addons |
+| **Optional Helper: Same-Wi-Fi LAN QR (`--serve-remote`)** | **Same Wi-Fi + open firewall only** (private IP) | Ephemeral LAN copy helper for local phone transfer | Quick local copy on same router |
+| **Secondary Desktop Fallback: Unpacked MV3 Extension** | Local desktop Chromium only | Load `remote-dist/extension/` via `chrome://extensions` (`world: "ISOLATED"`) | Desktop Chrome/Edge without Userscript manager |
+
+## Platform Support Matrix
+
+| Platform / Browser | Recommended Userscript Manager | Notes & Honest Caveats |
 | --- | --- | --- |
-| **iOS / iPadOS Safari** | **Userscripts** (free open-source App Store extension) + `antigravity-remote.user.js` | Runs as a Safari Web Extension. *Standalone Home-Screen PWA web apps on iOS do not execute Safari extensions.* |
-| **Android Firefox** | **Violentmonkey** add-on + `antigravity-remote.user.js` | Installable directly from Mozilla Add-ons. *Stock Android Chrome does not support extensions or Userscripts.* |
-| **macOS / Windows / Linux Browsers** (Chrome, Edge, Firefox, Safari, Brave, Arc) | **Violentmonkey / Tampermonkey / Userscripts** + `antigravity-remote.user.js` | Isolated execution via `@inject-into content`, `GM_getValue`/`GM_setValue` persistence, optional `@updateURL`/`@downloadURL` auto-updates. |
-| **Local Desktop Chrome / Edge (Secondary)** | Unpacked MV3 extension (`remote-dist/extension/`) | Secondary convenience path when no Userscript manager is installed (`world: "ISOLATED"`). |
+| **iOS / iPadOS Safari** | **Userscripts** (free open-source App Store extension) | Runs as a Safari Web Extension. *Standalone Home-Screen PWA web apps on iOS do not execute Safari extensions.* |
+| **Android Firefox** | **Violentmonkey** add-on | Installable directly from Mozilla Add-ons. *Stock Android Chrome does not support extensions or Userscripts.* |
+| **macOS / Windows / Linux Browsers** (Chrome, Edge, Firefox, Safari, Brave, Arc) | **Violentmonkey / Tampermonkey / Userscripts** | Isolated execution via `@inject-into content`, `GM_getValue`/`GM_setValue` persistence, HTTPS `@updateURL`/`@downloadURL` auto-updates, and multi-sandbox coexistence in one drawer. |
 
 > **Verification boundary**: Bookmarklets (`javascript:`) are blocked by `antigravity.google.com`'s 3-policy intersected CSP (`script-src 'nonce-...'` + `require-trusted-types-for 'script'`) and browser length limits. Authenticated post-login DOM selectors and in-browser external translation API CORS behavior depend on a live signed-in session.
 
@@ -48,9 +56,24 @@ Its primary design goal is **universal cross-device and cross-browser usability*
    - `mainHook`-only addons are rejected fail-closed (`ERR_UNSUPPORTED_HOST_CAPABILITY`).
 5. **Trust Pinning**: Trusted addons (`trustLevel: "trusted"` or declaring `settingsBridge` / `configBridge` / `document-transform`) require matching SHA-256 approval in `trust-policy.json`.
 
-## Modular `@require` Plugin Composition (`v2.7.0`)
+## Modular Public HTTPS `@require` Addon Delivery & Multi-Sandbox Coexistence (`v2.8.0`)
 
-`antigravity-remote-host.lib.js` is a standalone, 0-addon Remote Web host library. Independent plugin authors can load the host via `@require` and register their own addon via `registerAddon()`:
+`antigravity-remote-host.lib.js` is a standalone, 0-addon public HTTPS host library. Starting in **`v2.8.0`**, multiple independent Userscripts running in separate Userscript-manager sandboxes automatically coexist inside a **single unified Shadow-DOM drawer (`#remote-addon-host-drawer-root`) and shared slot dock** while keeping each sandbox's `hostToken` and `GM_*` storage strictly isolated.
+
+Any plugin repository can deterministically generate its own Acorn-AST-verified `<pluginId>.user.js` + `<pluginId>.meta.js` for GitHub Releases in one command:
+
+```bash
+node ./bin/addon-host.js --build-addon-userscript \
+  --manifest path/to/addon-manifest.json \
+  --plugin-dir path/to/plugin-root \
+  --out-dir dist/userscript \
+  --update-base-url https://github.com/<owner>/<repo>/releases/latest/download/
+```
+
+Optional flags:
+- `--host-lib-url <https-url>`: Custom HTTPS `@require` host library URL (defaults to `https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js`)
+- `--connect <hostname>` (repeatable) + `--grant-xhr`: Declare strict `@connect` hostnames and `GM_xmlhttpRequest` when needed (wildcards `*` rejected)
+- `--check`: Prove byte-exact determinism across two temporary builds with 0 AST violations
 
 ```js
 // ==UserScript==

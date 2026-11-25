@@ -148,6 +148,46 @@ const FALLBACK_ANCHOR_KEYS = Object.freeze([
 const DRAWER_HOST_ID = 'remote-addon-host-drawer-root';
 const SLOT_DOCK_ID = 'remote-addon-host-slot-dock';
 const ACTIVE_HOST_ATTR = 'data-remote-addon-host-active';
+const MOUNTED_PLUGINS_ATTR = 'data-remote-addon-host-plugins';
+
+function readMountedPlugins(docEl) {
+  const out = new Set();
+  if (!docEl || typeof docEl.getAttribute !== 'function') return out;
+  const raw = docEl.getAttribute(MOUNTED_PLUGINS_ATTR);
+  if (typeof raw !== 'string' || !raw.trim()) return out;
+  const parts = raw.split(',');
+  for (let i = 0; i < parts.length; i += 1) {
+    const id = parts[i].trim();
+    if (id) out.add(id);
+  }
+  return out;
+}
+
+function writeMountedPlugins(docEl, pluginSet) {
+  if (!docEl) return;
+  const list = Array.from(pluginSet).filter(Boolean).sort();
+  if (list.length === 0) {
+    if (typeof docEl.removeAttribute === 'function') {
+      docEl.removeAttribute(MOUNTED_PLUGINS_ATTR);
+    }
+  } else if (typeof docEl.setAttribute === 'function') {
+    docEl.setAttribute(MOUNTED_PLUGINS_ATTR, list.join(','));
+  }
+}
+
+function claimMountedPlugin(docEl, pluginId) {
+  if (!docEl || !pluginId) return;
+  const set = readMountedPlugins(docEl);
+  set.add(pluginId);
+  writeMountedPlugins(docEl, set);
+}
+
+function releaseMountedPlugins(docEl, pluginIds) {
+  if (!docEl || !pluginIds || pluginIds.size === 0) return;
+  const set = readMountedPlugins(docEl);
+  pluginIds.forEach((id) => set.delete(id));
+  writeMountedPlugins(docEl, set);
+}
 
 const DRAWER_CSS = `
 :host {
@@ -364,6 +404,20 @@ const DRAWER_CSS = `
   padding: 14px 4px;
   text-align: center;
 }
+.rah-pane,
+.rah-primary-items,
+.rah-peer-items,
+.rah-peer-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rah-pane[hidden],
+.rah-empty[hidden],
+.rah-peer-items:empty,
+.rah-peer-group:empty {
+  display: none;
+}
 @media (max-width: 640px) {
   .rah-shell {
     left: max(12px, env(safe-area-inset-left, 0px));
@@ -447,6 +501,214 @@ function mountFallbackSlotDock(doc, noTranslateAttrs) {
   return dock;
 }
 
+function hasClassSafe(node, className) {
+  if (!node || typeof node.getAttribute !== 'function') return false;
+  const cls = String(node.getAttribute('class') || '');
+  return cls.split(/\s+/).includes(className);
+}
+
+function findFirstInSubtree(root, predicate) {
+  if (!root || !root.children) return null;
+  const queue = Array.from(root.children);
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    if (!cur) continue;
+    if (predicate(cur)) return cur;
+    if (cur.children && cur.children.length > 0) {
+      for (let i = 0; i < cur.children.length; i += 1) queue.push(cur.children[i]);
+    }
+  }
+  return null;
+}
+
+function findAllInSubtree(root, predicate) {
+  const out = [];
+  if (!root || !root.children) return out;
+  const queue = Array.from(root.children);
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    if (!cur) continue;
+    if (predicate(cur)) out.push(cur);
+    if (cur.children && cur.children.length > 0) {
+      for (let i = 0; i < cur.children.length; i += 1) queue.push(cur.children[i]);
+    }
+  }
+  return out;
+}
+
+function syncDrawerShellSummary(shadowRoot) {
+  if (!shadowRoot) return;
+  const shell = findFirstInSubtree(shadowRoot, (n) => hasClassSafe(n, 'rah-shell'));
+  if (!shell) return;
+  let activeCount = Number(shell.getAttribute('data-rah-primary-active') || 0) || 0;
+  let totalCount = Number(shell.getAttribute('data-rah-primary-total') || 0) || 0;
+  let errorCount = Number(shell.getAttribute('data-rah-primary-errors') || 0) || 0;
+
+  const addonsPeerHost = findFirstInSubtree(
+    shadowRoot,
+    (n) => typeof n.getAttribute === 'function' && n.getAttribute('data-rah-peer-items') === 'addons'
+  );
+  if (addonsPeerHost && addonsPeerHost.children) {
+    const peerGroups = addonsPeerHost.children;
+    for (let i = 0; i < peerGroups.length; i += 1) {
+      const g = peerGroups[i];
+      if (!g || typeof g.getAttribute !== 'function' || !g.getAttribute('data-rah-peer-sandbox')) continue;
+      activeCount += Number(g.getAttribute('data-rah-active') || 0) || 0;
+      totalCount += Number(g.getAttribute('data-rah-total') || 0) || 0;
+      errorCount += Number(g.getAttribute('data-rah-errors') || 0) || 0;
+    }
+  }
+
+  const countBadge = findFirstInSubtree(
+    shadowRoot,
+    (n) => typeof n.getAttribute === 'function' && n.getAttribute('data-rah-count-badge') !== null
+  );
+  const errBadge = findFirstInSubtree(
+    shadowRoot,
+    (n) => typeof n.getAttribute === 'function' && n.getAttribute('data-rah-err-badge') !== null
+  );
+  const dotEl = findFirstInSubtree(
+    shadowRoot,
+    (n) => typeof n.getAttribute === 'function' && n.getAttribute('data-rah-dot') !== null
+  );
+  if (countBadge) setTextSafe(countBadge, `${activeCount}/${totalCount}`);
+  if (dotEl && errBadge) {
+    if (errorCount > 0) {
+      dotEl.setAttribute('class', 'rah-dot has-error');
+      errBadge.removeAttribute('hidden');
+      setTextSafe(errBadge, `${errorCount} err`);
+    } else {
+      dotEl.setAttribute('class', 'rah-dot');
+      errBadge.setAttribute('hidden', 'true');
+    }
+  }
+
+  const panes = ['addons', 'settings', 'errors'];
+  for (let i = 0; i < panes.length; i += 1) {
+    const paneName = panes[i];
+    const paneEl = findFirstInSubtree(
+      shadowRoot,
+      (n) => typeof n.getAttribute === 'function' && n.getAttribute('data-rah-pane') === paneName
+    );
+    if (!paneEl) continue;
+    const emptyEl = findFirstInSubtree(paneEl, (n) => hasClassSafe(n, 'rah-empty'));
+    if (!emptyEl) continue;
+    const hasCards = Boolean(findFirstInSubtree(paneEl, (n) => hasClassSafe(n, 'rah-card')));
+    if (hasCards) {
+      emptyEl.setAttribute('hidden', 'true');
+    } else {
+      emptyEl.removeAttribute('hidden');
+    }
+  }
+}
+
+function renderAddonCardList(doc, container, addons, hostActions, onInvokeHostAction, onAfterAction) {
+  clearChildrenSafe(container);
+  const actionsByPlugin = new Map();
+  for (let i = 0; i < hostActions.length; i += 1) {
+    const act = hostActions[i];
+    if (!act || !act.pluginId) continue;
+    if (!actionsByPlugin.has(act.pluginId)) actionsByPlugin.set(act.pluginId, []);
+    actionsByPlugin.get(act.pluginId).push(act);
+  }
+  for (let i = 0; i < addons.length; i += 1) {
+    const item = addons[i];
+    const card = createElementSafe(doc, 'div', { class: 'rah-card' });
+    const row = createElementSafe(doc, 'div', { class: 'rah-card-row' });
+    row.appendChild(createElementSafe(doc, 'strong', null, `${item.displayName} (${item.version})`));
+    row.appendChild(
+      createElementSafe(
+        doc,
+        'span',
+        { class: item.status === 'active' ? 'rah-status-ok' : 'rah-status-err' },
+        item.status
+      )
+    );
+    card.appendChild(row);
+    const subText = item.error
+      ? `${item.pluginId} · ${item.trustLevel} · ${item.error}`
+      : `${item.pluginId} · ${item.trustLevel}${item.skippedCapabilities.length ? ` · skipped: ${item.skippedCapabilities.join(',')}` : ''}`;
+    card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, subText));
+
+    const pluginActs = actionsByPlugin.get(item.pluginId) || [];
+    if (pluginActs.length > 0 && typeof onInvokeHostAction === 'function') {
+      const actionList = createElementSafe(doc, 'div', { class: 'rah-action-list' });
+      for (let j = 0; j < pluginActs.length; j += 1) {
+        const act = pluginActs[j];
+        const actBtn = createElementSafe(
+          doc,
+          'button',
+          {
+            type: 'button',
+            class: 'rah-btn rah-action-btn',
+            'data-host-action-plugin': act.pluginId,
+            'data-host-action-id': act.actionId,
+          },
+          act.label || act.actionId
+        );
+        if (act.runnable === false) {
+          actBtn.disabled = true;
+        } else {
+          actBtn.addEventListener('click', () => {
+            onInvokeHostAction(act.pluginId, act.actionId);
+            if (typeof onAfterAction === 'function') onAfterAction();
+          });
+        }
+        actionList.appendChild(actBtn);
+      }
+      card.appendChild(actionList);
+    }
+    container.appendChild(card);
+  }
+}
+
+function renderSettingsTabCardList(doc, container, settingsTabs, onSelectSettingsTab, onSelectedOk, onSelectedFail) {
+  clearChildrenSafe(container);
+  for (let i = 0; i < settingsTabs.length; i += 1) {
+    const tab = settingsTabs[i];
+    const canSelect = Boolean(tab.selectable !== false && typeof onSelectSettingsTab === 'function');
+    const card = createElementSafe(doc, 'button', {
+      type: 'button',
+      class: 'rah-card rah-card-btn',
+      'data-settings-tab-id': tab.tabId || '',
+      'data-settings-tab-plugin': tab.pluginId || '',
+      'data-settings-tab-action': 'select',
+    });
+    if (!canSelect) {
+      card.disabled = true;
+    }
+    const row = createElementSafe(doc, 'div', { class: 'rah-card-row' });
+    row.appendChild(createElementSafe(doc, 'strong', { class: 'rah-tab-label' }, tab.label || tab.tabId));
+    row.appendChild(
+      createElementSafe(doc, 'span', { class: canSelect ? 'rah-open-pill' : 'rah-meta' }, canSelect ? 'Open' : tab.pluginId)
+    );
+    card.appendChild(row);
+    card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, `${tab.pluginId} · ${tab.tabId}`));
+    if (canSelect) {
+      card.addEventListener('click', () => {
+        const res = onSelectSettingsTab(tab.pluginId, tab.tabId);
+        if (!res || res.ok !== false) {
+          if (typeof onSelectedOk === 'function') onSelectedOk();
+        } else if (typeof onSelectedFail === 'function') {
+          onSelectedFail();
+        }
+      });
+    }
+    container.appendChild(card);
+  }
+}
+
+function renderErrorCardList(doc, container, errors) {
+  clearChildrenSafe(container);
+  for (let i = errors.length - 1; i >= 0; i -= 1) {
+    const err = errors[i];
+    const card = createElementSafe(doc, 'div', { class: 'rah-card' });
+    card.appendChild(createElementSafe(doc, 'strong', null, err.pluginId));
+    card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, err.detail));
+    container.appendChild(card);
+  }
+}
+
 function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab = null, onInvokeHostAction = null }) {
   const noTranslateAttrs = Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [];
   const { hostEl, shadowRoot } = createShadowContainer(doc, DRAWER_HOST_ID, {
@@ -460,7 +722,12 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
   styleEl.textContent = DRAWER_CSS;
   shadowRoot.appendChild(styleEl);
 
-  const shell = createElementSafe(doc, 'div', { class: 'rah-shell' });
+  const shell = createElementSafe(doc, 'div', {
+    class: 'rah-shell',
+    'data-rah-primary-active': '0',
+    'data-rah-primary-total': '0',
+    'data-rah-primary-errors': '0',
+  });
 
   const drawer = createElementSafe(doc, 'section', {
     id: 'rah-drawer-panel',
@@ -489,18 +756,24 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
   const tabsRow = createElementSafe(doc, 'div', { class: 'rah-tabs', role: 'tablist' });
   const bodyEl = createElementSafe(doc, 'div', { class: 'rah-body', role: 'tabpanel' });
 
+  const paneDefs = [
+    {
+      id: 'addons',
+      label: 'Addons',
+      emptyText: 'No addons packed in this remote bundle. Install modular addon Userscripts or run addon-host --build-remote.',
+    },
+    { id: 'settings', label: 'Settings Tabs', emptyText: 'No plugin settings tabs registered.' },
+    { id: 'errors', label: 'Diagnostics', emptyText: 'No runtime errors recorded.' },
+  ];
+
   let activeTab = 'addons';
   let isOpen = false;
 
-  const tabDefs = [
-    { id: 'addons', label: 'Addons' },
-    { id: 'settings', label: 'Settings Tabs' },
-    { id: 'errors', label: 'Diagnostics' },
-  ];
   const tabButtons = new Map();
+  const paneRefs = new Map();
 
-  for (let i = 0; i < tabDefs.length; i += 1) {
-    const def = tabDefs[i];
+  for (let i = 0; i < paneDefs.length; i += 1) {
+    const def = paneDefs[i];
     const btn = createElementSafe(
       doc,
       'button',
@@ -518,6 +791,18 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
     });
     tabButtons.set(def.id, btn);
     tabsRow.appendChild(btn);
+
+    const paneAttrs = { class: 'rah-pane', 'data-rah-pane': def.id };
+    if (def.id !== activeTab) paneAttrs.hidden = 'true';
+    const paneEl = createElementSafe(doc, 'div', paneAttrs);
+    const primaryItems = createElementSafe(doc, 'div', { class: 'rah-primary-items', 'data-rah-primary-items': def.id });
+    const peerItems = createElementSafe(doc, 'div', { class: 'rah-peer-items', 'data-rah-peer-items': def.id });
+    const emptyEl = createElementSafe(doc, 'div', { class: 'rah-empty' }, def.emptyText);
+    paneEl.appendChild(primaryItems);
+    paneEl.appendChild(peerItems);
+    paneEl.appendChild(emptyEl);
+    bodyEl.appendChild(paneEl);
+    paneRefs.set(def.id, { paneEl, primaryItems, peerItems, emptyEl });
   }
 
   drawer.appendChild(header);
@@ -530,10 +815,10 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
     'aria-expanded': 'false',
     'aria-controls': 'rah-drawer-panel',
   });
-  const dotEl = createElementSafe(doc, 'span', { class: 'rah-dot', 'aria-hidden': 'true' });
+  const dotEl = createElementSafe(doc, 'span', { class: 'rah-dot', 'data-rah-dot': '1', 'aria-hidden': 'true' });
   const labelEl = createElementSafe(doc, 'span', null, 'Addons');
-  const countBadge = createElementSafe(doc, 'span', { class: 'rah-badge' }, '0');
-  const errBadge = createElementSafe(doc, 'span', { class: 'rah-badge err', hidden: 'true' }, '0 err');
+  const countBadge = createElementSafe(doc, 'span', { class: 'rah-badge', 'data-rah-count-badge': '1' }, '0/0');
+  const errBadge = createElementSafe(doc, 'span', { class: 'rah-badge err', 'data-rah-err-badge': '1', hidden: 'true' }, '0 err');
   pillBtn.appendChild(dotEl);
   pillBtn.appendChild(labelEl);
   pillBtn.appendChild(countBadge);
@@ -576,145 +861,44 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
     const failedCount = state.addons.filter((a) => a.status === 'failed').length;
     const errorCount = Math.max(state.errors.length, failedCount);
 
-    setTextSafe(countBadge, `${activeCount}/${state.addons.length}`);
-    if (errorCount > 0) {
-      dotEl.setAttribute('class', 'rah-dot has-error');
-      errBadge.removeAttribute('hidden');
-      setTextSafe(errBadge, `${errorCount} err`);
-    } else {
-      dotEl.setAttribute('class', 'rah-dot');
-      errBadge.setAttribute('hidden', 'true');
-    }
+    shell.setAttribute('data-rah-primary-active', String(activeCount));
+    shell.setAttribute('data-rah-primary-total', String(state.addons.length));
+    shell.setAttribute('data-rah-primary-errors', String(errorCount));
 
     for (const [id, btn] of tabButtons.entries()) {
       btn.setAttribute('aria-selected', id === activeTab ? 'true' : 'false');
-    }
-
-    clearChildrenSafe(bodyEl);
-
-    if (activeTab === 'addons') {
-      const hostActions = Array.isArray(state.hostActions) ? state.hostActions : [];
-      if (state.addons.length === 0) {
-        bodyEl.appendChild(
-          createElementSafe(
-            doc,
-            'div',
-            { class: 'rah-empty' },
-            'No addons packed in this remote bundle. Run addon-host --build-remote to pack installed addons.'
-          )
-        );
-        return;
-      }
-      const actionsByPlugin = new Map();
-      for (let i = 0; i < hostActions.length; i += 1) {
-        const act = hostActions[i];
-        if (!act || !act.pluginId) continue;
-        if (!actionsByPlugin.has(act.pluginId)) actionsByPlugin.set(act.pluginId, []);
-        actionsByPlugin.get(act.pluginId).push(act);
-      }
-      for (let i = 0; i < state.addons.length; i += 1) {
-        const item = state.addons[i];
-        const card = createElementSafe(doc, 'div', { class: 'rah-card' });
-        const row = createElementSafe(doc, 'div', { class: 'rah-card-row' });
-        row.appendChild(createElementSafe(doc, 'strong', null, `${item.displayName} (${item.version})`));
-        row.appendChild(
-          createElementSafe(
-            doc,
-            'span',
-            { class: item.status === 'active' ? 'rah-status-ok' : 'rah-status-err' },
-            item.status
-          )
-        );
-        card.appendChild(row);
-        const subText = item.error
-          ? `${item.pluginId} · ${item.trustLevel} · ${item.error}`
-          : `${item.pluginId} · ${item.trustLevel}${item.skippedCapabilities.length ? ` · skipped: ${item.skippedCapabilities.join(',')}` : ''}`;
-        card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, subText));
-
-        const pluginActs = actionsByPlugin.get(item.pluginId) || [];
-        if (pluginActs.length > 0 && typeof onInvokeHostAction === 'function') {
-          const actionList = createElementSafe(doc, 'div', { class: 'rah-action-list' });
-          for (let j = 0; j < pluginActs.length; j += 1) {
-            const act = pluginActs[j];
-            const actBtn = createElementSafe(
-              doc,
-              'button',
-              {
-                type: 'button',
-                class: 'rah-btn rah-action-btn',
-                'data-host-action-plugin': act.pluginId,
-                'data-host-action-id': act.actionId,
-              },
-              act.label || act.actionId
-            );
-            if (act.runnable === false) {
-              actBtn.disabled = true;
-            } else {
-              actBtn.addEventListener('click', () => {
-                onInvokeHostAction(act.pluginId, act.actionId);
-                render();
-              });
-            }
-            actionList.appendChild(actBtn);
-          }
-          card.appendChild(actionList);
+      const ref = paneRefs.get(id);
+      if (ref) {
+        if (id === activeTab) {
+          ref.paneEl.removeAttribute('hidden');
+        } else {
+          ref.paneEl.setAttribute('hidden', 'true');
         }
-        bodyEl.appendChild(card);
       }
-      return;
     }
 
-    if (activeTab === 'settings') {
-      if (!state.settingsTabs || state.settingsTabs.length === 0) {
-        bodyEl.appendChild(createElementSafe(doc, 'div', { class: 'rah-empty' }, 'No plugin settings tabs registered.'));
-        return;
-      }
-      for (let i = 0; i < state.settingsTabs.length; i += 1) {
-        const tab = state.settingsTabs[i];
-        const canSelect = Boolean(tab.selectable !== false && typeof onSelectSettingsTab === 'function');
-        const card = createElementSafe(doc, 'button', {
-          type: 'button',
-          class: 'rah-card rah-card-btn',
-          'data-settings-tab-id': tab.tabId || '',
-          'data-settings-tab-plugin': tab.pluginId || '',
-          'data-settings-tab-action': 'select',
-        });
-        if (!canSelect) {
-          card.disabled = true;
-        }
-        const row = createElementSafe(doc, 'div', { class: 'rah-card-row' });
-        row.appendChild(createElementSafe(doc, 'strong', { class: 'rah-tab-label' }, tab.label || tab.tabId));
-        row.appendChild(
-          createElementSafe(doc, 'span', { class: canSelect ? 'rah-open-pill' : 'rah-meta' }, canSelect ? 'Open' : tab.pluginId)
-        );
-        card.appendChild(row);
-        card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, `${tab.pluginId} · ${tab.tabId}`));
-        if (canSelect) {
-          card.addEventListener('click', () => {
-            const res = onSelectSettingsTab(tab.pluginId, tab.tabId);
-            if (!res || res.ok !== false) {
-              setOpen(false);
-            } else {
-              render();
-            }
-          });
-        }
-        bodyEl.appendChild(card);
-      }
-      return;
-    }
+    const addonsPane = paneRefs.get('addons');
+    const settingsPane = paneRefs.get('settings');
+    const errorsPane = paneRefs.get('errors');
 
-    if (state.errors.length === 0) {
-      bodyEl.appendChild(createElementSafe(doc, 'div', { class: 'rah-empty' }, 'No runtime errors recorded.'));
-      return;
-    }
-    for (let i = state.errors.length - 1; i >= 0; i -= 1) {
-      const err = state.errors[i];
-      const card = createElementSafe(doc, 'div', { class: 'rah-card' });
-      card.appendChild(createElementSafe(doc, 'strong', null, err.pluginId));
-      card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, err.detail));
-      bodyEl.appendChild(card);
-    }
+    renderAddonCardList(
+      doc,
+      addonsPane.primaryItems,
+      state.addons,
+      Array.isArray(state.hostActions) ? state.hostActions : [],
+      onInvokeHostAction,
+      render
+    );
+    renderSettingsTabCardList(
+      doc,
+      settingsPane.primaryItems,
+      Array.isArray(state.settingsTabs) ? state.settingsTabs : [],
+      onSelectSettingsTab,
+      () => setOpen(false),
+      render
+    );
+    renderErrorCardList(doc, errorsPane.primaryItems, Array.isArray(state.errors) ? state.errors : []);
+    syncDrawerShellSummary(shadowRoot);
   }
 
   render();
@@ -731,6 +915,116 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
       if (hostEl && hostEl.parentNode && typeof hostEl.parentNode.removeChild === 'function') {
         hostEl.parentNode.removeChild(hostEl);
       }
+    },
+  });
+}
+
+function attachPeerDrawerContributor({
+  doc,
+  shadowRoot,
+  sandboxId,
+  getState,
+  onSelectSettingsTab = null,
+  onInvokeHostAction = null,
+}) {
+  if (!shadowRoot) return null;
+  const addonsPeerHost = findFirstInSubtree(
+    shadowRoot,
+    (n) => typeof n.getAttribute === 'function' && n.getAttribute('data-rah-peer-items') === 'addons'
+  );
+  const settingsPeerHost = findFirstInSubtree(
+    shadowRoot,
+    (n) => typeof n.getAttribute === 'function' && n.getAttribute('data-rah-peer-items') === 'settings'
+  );
+  const errorsPeerHost = findFirstInSubtree(
+    shadowRoot,
+    (n) => typeof n.getAttribute === 'function' && n.getAttribute('data-rah-peer-items') === 'errors'
+  );
+  if (!addonsPeerHost || !settingsPeerHost || !errorsPeerHost) return null;
+
+  const addonsGroup = createElementSafe(doc, 'div', {
+    class: 'rah-peer-group',
+    'data-rah-peer-sandbox': sandboxId,
+    'data-rah-active': '0',
+    'data-rah-total': '0',
+    'data-rah-errors': '0',
+  });
+  const settingsGroup = createElementSafe(doc, 'div', {
+    class: 'rah-peer-group',
+    'data-rah-peer-sandbox': sandboxId,
+  });
+  const errorsGroup = createElementSafe(doc, 'div', {
+    class: 'rah-peer-group',
+    'data-rah-peer-sandbox': sandboxId,
+  });
+
+  addonsPeerHost.appendChild(addonsGroup);
+  settingsPeerHost.appendChild(settingsGroup);
+  errorsPeerHost.appendChild(errorsGroup);
+
+  function closeSharedDrawer() {
+    const panel = findFirstInSubtree(
+      shadowRoot,
+      (n) => typeof n.getAttribute === 'function' && n.getAttribute('id') === 'rah-drawer-panel'
+    );
+    const pill = findFirstInSubtree(shadowRoot, (n) => hasClassSafe(n, 'rah-pill'));
+    if (panel) panel.setAttribute('hidden', 'true');
+    if (pill) pill.setAttribute('aria-expanded', 'false');
+  }
+
+  function render() {
+    const state = getState();
+    const activeCount = state.addons.filter((a) => a.status === 'active').length;
+    const failedCount = state.addons.filter((a) => a.status === 'failed').length;
+    const errorCount = Math.max(state.errors.length, failedCount);
+    addonsGroup.setAttribute('data-rah-active', String(activeCount));
+    addonsGroup.setAttribute('data-rah-total', String(state.addons.length));
+    addonsGroup.setAttribute('data-rah-errors', String(errorCount));
+
+    renderAddonCardList(
+      doc,
+      addonsGroup,
+      state.addons,
+      Array.isArray(state.hostActions) ? state.hostActions : [],
+      onInvokeHostAction,
+      render
+    );
+    renderSettingsTabCardList(
+      doc,
+      settingsGroup,
+      Array.isArray(state.settingsTabs) ? state.settingsTabs : [],
+      onSelectSettingsTab,
+      closeSharedDrawer,
+      render
+    );
+    renderErrorCardList(doc, errorsGroup, Array.isArray(state.errors) ? state.errors : []);
+    syncDrawerShellSummary(shadowRoot);
+  }
+
+  render();
+
+  return Object.freeze({
+    hostEl: shadowRoot.host || null,
+    shadowRoot,
+    setOpen(nextOpen) {
+      const panel = shadowRoot.querySelector('#rah-drawer-panel');
+      const pill = shadowRoot.querySelector('.rah-pill');
+      if (panel) {
+        if (nextOpen) panel.removeAttribute('hidden');
+        else panel.setAttribute('hidden', 'true');
+      }
+      if (pill) pill.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+    },
+    render,
+    dispose() {
+      const groups = [addonsGroup, settingsGroup, errorsGroup];
+      for (let i = 0; i < groups.length; i += 1) {
+        const g = groups[i];
+        if (g && g.parentNode && typeof g.parentNode.removeChild === 'function') {
+          g.parentNode.removeChild(g);
+        }
+      }
+      syncDrawerShellSummary(shadowRoot);
     },
   });
 }
@@ -790,6 +1084,15 @@ async function bootRemoteWebHost({
     return { ok: true, alreadyBooted: true, controller: win[instanceKey] };
   }
 
+  const queuedRegistered = getRegisteredAddons(win);
+  const candidateAddons = [];
+  if (Array.isArray(packedAddons)) {
+    for (let i = 0; i < packedAddons.length; i += 1) candidateAddons.push(packedAddons[i]);
+  }
+  for (let i = 0; i < queuedRegistered.length; i += 1) {
+    candidateAddons.push(queuedRegistered[i]);
+  }
+
   const docEl = doc.documentElement || null;
   const hasActiveAttr = Boolean(
     docEl && typeof docEl.getAttribute === 'function' && docEl.getAttribute(ACTIVE_HOST_ATTR) === profile.id
@@ -797,8 +1100,23 @@ async function bootRemoteWebHost({
   const existingDrawer =
     mountDrawer !== false && typeof doc.getElementById === 'function' ? doc.getElementById(DRAWER_HOST_ID) : null;
   const hasExistingDrawer = Boolean(existingDrawer && existingDrawer.isConnected !== false);
-  if (hasActiveAttr || hasExistingDrawer) {
-    return { ok: true, alreadyBooted: true, crossWorld: true, controller: null };
+  const isPeerCoexist = hasActiveAttr || hasExistingDrawer;
+
+  let initialAddons = candidateAddons;
+  if (isPeerCoexist) {
+    const alreadyMounted = readMountedPlugins(docEl);
+    const seenNew = new Set();
+    initialAddons = [];
+    for (let i = 0; i < candidateAddons.length; i += 1) {
+      const cand = candidateAddons[i];
+      const pid = cand && cand.pluginMeta && typeof cand.pluginMeta.pluginId === 'string' ? cand.pluginMeta.pluginId.trim() : '';
+      if (!pid || alreadyMounted.has(pid) || seenNew.has(pid)) continue;
+      seenNew.add(pid);
+      initialAddons.push(cand);
+    }
+    if (initialAddons.length === 0) {
+      return { ok: true, alreadyBooted: true, crossWorld: true, controller: null };
+    }
   }
 
   const ttGuard = createScopedTrustedTypesGuard(win, {
@@ -869,39 +1187,57 @@ async function bootRemoteWebHost({
   if (!existingKernelState) {
     KERNEL_BOOT_STATE.set(activeKernel, kernelState);
   }
-  if (docEl && typeof docEl.setAttribute === 'function') {
+  if (!isPeerCoexist && docEl && typeof docEl.setAttribute === 'function') {
     docEl.setAttribute(ACTIVE_HOST_ATTR, profile.id);
   }
 
   let fallbackDockEl = null;
+  let ownsFallbackDock = false;
   if (mountFallbackDock !== false) {
+    const preExistingDock = typeof doc.getElementById === 'function' ? doc.getElementById(SLOT_DOCK_ID) : null;
     fallbackDockEl = mountFallbackSlotDock(doc, safeExtraNoTranslateAttributes);
+    ownsFallbackDock = !isPeerCoexist && !preExistingDock && Boolean(fallbackDockEl);
   }
 
+  const drawerCallbacks = {
+    getState: () => ({
+      addons: addonStates,
+      settingsTabs: typeof activeKernel.listSettingsTabs === 'function' ? activeKernel.listSettingsTabs() : [],
+      hostActions: typeof activeKernel.listHostActions === 'function' ? activeKernel.listHostActions(hostToken) : [],
+      errors: bridge.getErrors(),
+    }),
+    onSelectSettingsTab(pluginId, tabId) {
+      if (typeof activeKernel.selectSettingsTab !== 'function') {
+        return { ok: false, reason: 'ERR_SELECT_SETTINGS_TAB_UNAVAILABLE' };
+      }
+      return activeKernel.selectSettingsTab(pluginId, tabId, hostToken);
+    },
+    onInvokeHostAction(pluginId, actionId) {
+      if (typeof activeKernel.invokeHostAction !== 'function') {
+        return { ok: false, reason: 'ERR_INVOKE_HOST_ACTION_UNAVAILABLE' };
+      }
+      return activeKernel.invokeHostAction(pluginId, actionId, [], hostToken);
+    },
+  };
+
   if (mountDrawer !== false) {
-    drawerUi = createHostDrawerUi({
-      doc,
-      win,
-      profile,
-      getState: () => ({
-        addons: addonStates,
-        settingsTabs: typeof activeKernel.listSettingsTabs === 'function' ? activeKernel.listSettingsTabs() : [],
-        hostActions: typeof activeKernel.listHostActions === 'function' ? activeKernel.listHostActions(hostToken) : [],
-        errors: bridge.getErrors(),
-      }),
-      onSelectSettingsTab(pluginId, tabId) {
-        if (typeof activeKernel.selectSettingsTab !== 'function') {
-          return { ok: false, reason: 'ERR_SELECT_SETTINGS_TAB_UNAVAILABLE' };
-        }
-        return activeKernel.selectSettingsTab(pluginId, tabId, hostToken);
-      },
-      onInvokeHostAction(pluginId, actionId) {
-        if (typeof activeKernel.invokeHostAction !== 'function') {
-          return { ok: false, reason: 'ERR_INVOKE_HOST_ACTION_UNAVAILABLE' };
-        }
-        return activeKernel.invokeHostAction(pluginId, actionId, [], hostToken);
-      },
-    });
+    if (isPeerCoexist) {
+      if (existingDrawer && existingDrawer.shadowRoot) {
+        drawerUi = attachPeerDrawerContributor({
+          doc,
+          shadowRoot: existingDrawer.shadowRoot,
+          sandboxId: generateHostToken(win),
+          ...drawerCallbacks,
+        });
+      }
+    } else {
+      drawerUi = createHostDrawerUi({
+        doc,
+        win,
+        profile,
+        ...drawerCallbacks,
+      });
+    }
   }
 
   const mountedPluginIds = new Set();
@@ -912,10 +1248,11 @@ async function bootRemoteWebHost({
       return { ok: false, status: 'rejected', pluginId: null, error: 'ERR_INVALID_ADDON_META' };
     }
     const pluginId = meta.pluginId.trim();
-    if (mountedPluginIds.has(pluginId)) {
+    if (mountedPluginIds.has(pluginId) || readMountedPlugins(docEl).has(pluginId)) {
       return { ok: false, status: 'duplicate', pluginId, error: 'ERR_DUPLICATE_ADDON_ID' };
     }
     mountedPluginIds.add(pluginId);
+    claimMountedPlugin(docEl, pluginId);
 
     const record = {
       pluginId,
@@ -998,14 +1335,6 @@ async function bootRemoteWebHost({
     };
   }
 
-  const queuedRegistered = getRegisteredAddons(win);
-  const initialAddons = [];
-  if (Array.isArray(packedAddons)) {
-    for (let i = 0; i < packedAddons.length; i += 1) initialAddons.push(packedAddons[i]);
-  }
-  for (let i = 0; i < queuedRegistered.length; i += 1) {
-    initialAddons.push(queuedRegistered[i]);
-  }
   for (let i = 0; i < initialAddons.length; i += 1) {
     await mountAddon(initialAddons[i]);
   }
@@ -1015,6 +1344,7 @@ async function bootRemoteWebHost({
     docGenId,
     profileId: profile.id,
     origin: verifiedOrigin,
+    peerCoexist: isPeerCoexist,
     trustedTypes: ttGuard,
     bridge,
     drawerUi,
@@ -1054,13 +1384,15 @@ async function bootRemoteWebHost({
       for (let i = 0; i < addonStates.length; i += 1) {
         activeKernel.disposePlugin(addonStates[i].pluginId, hostToken);
       }
+      releaseMountedPlugins(docEl, mountedPluginIds);
       if (drawerUi) {
         drawerUi.dispose();
       }
-      if (fallbackDockEl && fallbackDockEl.parentNode && typeof fallbackDockEl.parentNode.removeChild === 'function') {
+      if (ownsFallbackDock && fallbackDockEl && fallbackDockEl.parentNode && typeof fallbackDockEl.parentNode.removeChild === 'function') {
         fallbackDockEl.parentNode.removeChild(fallbackDockEl);
       }
       if (
+        !isPeerCoexist &&
         docEl &&
         typeof docEl.getAttribute === 'function' &&
         typeof docEl.removeAttribute === 'function' &&
@@ -1090,6 +1422,7 @@ async function bootRemoteWebHost({
   return {
     ok: true,
     alreadyBooted: false,
+    peerCoexist: isPeerCoexist,
     controller,
   };
 }
@@ -1099,6 +1432,7 @@ module.exports = {
   DRAWER_HOST_ID,
   SLOT_DOCK_ID,
   ACTIVE_HOST_ATTR,
+  MOUNTED_PLUGINS_ATTR,
   registerAddon,
   getRegisteredAddons,
   bootRemoteWebHost,
