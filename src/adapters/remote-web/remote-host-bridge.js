@@ -133,9 +133,127 @@ function createMemoryStorageFallback() {
   };
 }
 
+function detectSyncGmApi(win) {
+  const getFn =
+    (win && typeof win.GM_getValue === 'function' && win.GM_getValue) ||
+    (typeof globalThis !== 'undefined' && typeof globalThis.GM_getValue === 'function' && globalThis.GM_getValue) ||
+    (typeof GM_getValue === 'function' ? GM_getValue : null);
+  const setFn =
+    (win && typeof win.GM_setValue === 'function' && win.GM_setValue) ||
+    (typeof globalThis !== 'undefined' && typeof globalThis.GM_setValue === 'function' && globalThis.GM_setValue) ||
+    (typeof GM_setValue === 'function' ? GM_setValue : null);
+  const delFn =
+    (win && typeof win.GM_deleteValue === 'function' && win.GM_deleteValue) ||
+    (typeof globalThis !== 'undefined' && typeof globalThis.GM_deleteValue === 'function' && globalThis.GM_deleteValue) ||
+    (typeof GM_deleteValue === 'function' ? GM_deleteValue : null);
+
+  if (typeof getFn === 'function' && typeof setFn === 'function') {
+    return { getFn, setFn, delFn };
+  }
+  return null;
+}
+
+function detectAsyncGmApi(win) {
+  const gmObj =
+    (win && win.GM && typeof win.GM === 'object' && win.GM) ||
+    (typeof globalThis !== 'undefined' && globalThis.GM && typeof globalThis.GM === 'object' && globalThis.GM) ||
+    (typeof GM !== 'undefined' && GM && typeof GM === 'object' ? GM : null);
+  if (gmObj && typeof gmObj.getValue === 'function' && typeof gmObj.setValue === 'function') {
+    return gmObj;
+  }
+  return null;
+}
+
+function createGmSyncStorageAdapter({ getFn, setFn, delFn }) {
+  return {
+    getItem(k) {
+      const val = getFn(String(k), null);
+      if (val === undefined || val === null) return null;
+      return typeof val === 'string' ? val : String(val);
+    },
+    setItem(k, v) {
+      setFn(String(k), String(v));
+    },
+    removeItem(k) {
+      if (typeof delFn === 'function') {
+        delFn(String(k));
+      } else {
+        setFn(String(k), null);
+      }
+    },
+  };
+}
+
+function createGmAsyncStorageAdapter(gmObj) {
+  const cache = new Map();
+  return {
+    async hydrateKey(k) {
+      const key = String(k);
+      try {
+        const val = await gmObj.getValue(key, null);
+        if (val === undefined || val === null) {
+          cache.delete(key);
+          return null;
+        }
+        const strVal = typeof val === 'string' ? val : String(val);
+        cache.set(key, strVal);
+        return strVal;
+      } catch (_err) {
+        return null;
+      }
+    },
+    getItem(k) {
+      const key = String(k);
+      return cache.has(key) ? cache.get(key) : null;
+    },
+    setItem(k, v) {
+      const key = String(k);
+      const val = String(v);
+      cache.set(key, val);
+      try {
+        const ret = gmObj.setValue(key, val);
+        if (ret && typeof ret.catch === 'function') {
+          ret.catch(() => {});
+        }
+      } catch (_err) {
+        // Keep in-memory cache coherent if async write rejects.
+      }
+    },
+    removeItem(k) {
+      const key = String(k);
+      cache.delete(key);
+      try {
+        const ret =
+          typeof gmObj.deleteValue === 'function' ? gmObj.deleteValue(key) : gmObj.setValue(key, null);
+        if (ret && typeof ret.catch === 'function') {
+          ret.catch(() => {});
+        }
+      } catch (_err) {
+        // Best-effort async delete.
+      }
+    },
+  };
+}
+
 function resolveStorage(storage, win) {
   if (storage && typeof storage.getItem === 'function' && typeof storage.setItem === 'function') {
     return { store: storage, kind: 'injected' };
+  }
+  try {
+    const syncGm = detectSyncGmApi(win);
+    if (syncGm) {
+      return { store: createGmSyncStorageAdapter(syncGm), kind: 'gm-sync' };
+    }
+  } catch (_err) {
+    // Fall through if GM_* probe fails.
+  }
+  try {
+    const asyncGm = detectAsyncGmApi(win);
+    if (asyncGm) {
+      return { store: createGmAsyncStorageAdapter(asyncGm), kind: 'gm-async' };
+    }
+  } catch (_err) {
+    // Fall through if GM.* probe fails.
   }
   try {
     if (win && win.localStorage && typeof win.localStorage.getItem === 'function') {
@@ -210,6 +328,14 @@ function createRemoteHostBridge({
       revision: existing ? existing.revision : Number.isInteger(spec && spec.revision) ? spec.revision : 0,
     });
     return true;
+  }
+
+  async function hydrateSettings(pluginId) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) return null;
+    if (store && typeof store.hydrateKey === 'function') {
+      await store.hydrateKey(storageKeyFor(pluginId));
+    }
+    return loadPersistedSettings(pluginId);
   }
 
   function loadPersistedSettings(pluginId) {
@@ -468,6 +594,7 @@ function createRemoteHostBridge({
   return Object.freeze({
     port,
     bindSettingsPlugin,
+    hydrateSettings,
     loadPersistedSettings,
     getErrors: () => recordedErrors.slice(),
     getPortalClaims: () => Array.from(activePortalClaims),

@@ -81,6 +81,24 @@ function buildPackedPluginMeta(addon, verified) {
   };
 }
 
+function isOfflineConfigBridgeAddon(manifest, profileId) {
+  if (!manifest || typeof manifest !== 'object') return false;
+  const hasConfigBridge = Boolean(
+    manifest.configBridge &&
+      typeof manifest.configBridge === 'object' &&
+      Array.isArray(manifest.configBridge.scopes) &&
+      manifest.configBridge.scopes.length > 0
+  );
+  if (!hasConfigBridge) return false;
+  const compat = manifest.compatibility && typeof manifest.compatibility === 'object' ? manifest.compatibility : null;
+  const explicitRemoteOptIn = Boolean(
+    compat &&
+      ((typeof compat.hostProfile === 'string' && compat.hostProfile === profileId) ||
+        (Array.isArray(compat.hostProfiles) && compat.hostProfiles.includes(profileId)))
+  );
+  return !explicitRemoteOptIn;
+}
+
 function collectRemoteWebAddons({
   profile,
   addonsDir = null,
@@ -89,9 +107,10 @@ function collectRemoteWebAddons({
   trustPolicyPath = undefined,
   remotePrefsPath = undefined,
   settingsDataDir = null,
-  hostVersion = '2.5.0',
+  hostVersion = '2.7.0',
   strictTrustPolicy = true,
   includeSettingsSnapshots = false,
+  includeOfflineConfigBridge = false,
   fsPort = null,
   isEnabled = null,
   env = process.env,
@@ -153,7 +172,18 @@ function collectRemoteWebAddons({
   }));
   const skippedMainHookPlugins = [];
 
+  const excludeOfflineConfigBridge = profile.excludeOfflineConfigBridge !== false && includeOfflineConfigBridge !== true;
+
   for (const addon of plan.active || []) {
+    if (excludeOfflineConfigBridge && isOfflineConfigBridgeAddon(addon.manifest, profile.id)) {
+      rejected.push({
+        pluginId: addon.pluginId,
+        reason: 'ERR_REMOTE_REQUIRES_LOCAL_CONFIG_BRIDGE',
+        errors: ['Addon declares desktop-only configBridge scopes without explicit remote-web opt-in'],
+      });
+      continue;
+    }
+
     if (!isAddonEnabledInRemotePreferences(remotePrefs, addon.pluginId)) {
       disabled.push({
         pluginId: addon.pluginId,
@@ -238,5 +268,6 @@ function collectRemoteWebAddons({
 
 module.exports = {
   buildPackedPluginMeta,
+  isOfflineConfigBridgeAddon,
   collectRemoteWebAddons,
 };

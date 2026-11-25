@@ -145,9 +145,9 @@ function syncRemoteDistInPlace(targetDir, fileMap) {
 function readPackageVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
-    return typeof pkg.version === 'string' && pkg.version ? pkg.version : '2.6.0';
+    return typeof pkg.version === 'string' && pkg.version ? pkg.version : '2.7.0';
   } catch (_err) {
-    return '2.6.0';
+    return '2.7.0';
   }
 }
 
@@ -231,10 +231,20 @@ ${addonLiterals.join(',\n')}
     });
   }
 
+  function registerAddon(descriptor, opts) {
+    return bootstrapMod.registerAddon(descriptor, opts);
+  }
+
+  function getRegisteredAddons(win) {
+    return bootstrapMod.getRegisteredAddons(win);
+  }
+
   const exported = Object.freeze({
     REMOTE_WEB_PROFILE,
     PACKED_ADDONS,
     bootRemoteWebHost,
+    registerAddon,
+    getRegisteredAddons,
     originGuard: originMod,
     trustedTypesGuard: ttMod,
     remoteHostBridge: bridgeMod,
@@ -275,10 +285,36 @@ function buildAutoBootSnippet() {
 `;
 }
 
-function buildUserscriptSource(runtimeSource, { profile = ANTIGRAVITY_REMOTE_WEB_PROFILE, version = '2.6.0' } = {}) {
+function normalizeUpdateBaseUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null;
+  let parsed;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch (_err) {
+    throw new Error(`ERR_INVALID_UPDATE_BASE_URL:${rawUrl}`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`ERR_UPDATE_BASE_URL_MUST_BE_HTTPS:${rawUrl}`);
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(`ERR_UPDATE_BASE_URL_UNSAFE:${rawUrl}`);
+  }
+  return parsed.href.replace(/\/+$/, '');
+}
+
+const USERSCRIPT_GRANTS = Object.freeze(['GM_getValue', 'GM_setValue', 'GM_deleteValue']);
+
+function buildUserscriptMetaHeader({
+  profile = ANTIGRAVITY_REMOTE_WEB_PROFILE,
+  version = '2.7.0',
+  updateBaseUrl = null,
+  userscriptFileName = 'antigravity-remote.user.js',
+  metaFileName = 'antigravity-remote.meta.js',
+} = {}) {
   const browserProfile = toBrowserRemoteWebProfile(profile);
   const matchLines = (browserProfile.allowedOrigins || []).map((origin) => `// @match        ${origin}/*`);
-  const header = [
+  const safeBaseUrl = normalizeUpdateBaseUrl(updateBaseUrl);
+  const lines = [
     '// ==UserScript==',
     `// @name         ${browserProfile.displayName} Addon Host`,
     `// @namespace    https://github.com/jaeseongs95/antigravity-addons`,
@@ -286,12 +322,30 @@ function buildUserscriptSource(runtimeSource, { profile = ANTIGRAVITY_REMOTE_WEB
     `// @description  Unified AddonManifest.v2 renderer addon host for ${browserProfile.displayName}`,
     ...matchLines,
     '// @run-at       document-idle',
-    '// @grant        none',
-    '// ==/UserScript==',
-    '',
-  ].join('\n');
+    '// @inject-into  content',
+    ...USERSCRIPT_GRANTS.map((grant) => `// @grant        ${grant}`),
+  ];
+  if (safeBaseUrl) {
+    lines.push(`// @updateURL    ${safeBaseUrl}/${metaFileName}`);
+    lines.push(`// @downloadURL  ${safeBaseUrl}/${userscriptFileName}`);
+  }
+  lines.push('// ==/UserScript==', '');
+  return lines.join('\n');
+}
 
+function buildUserscriptSource(
+  runtimeSource,
+  { profile = ANTIGRAVITY_REMOTE_WEB_PROFILE, version = '2.7.0', updateBaseUrl = null } = {}
+) {
+  const header = buildUserscriptMetaHeader({ profile, version, updateBaseUrl });
   return `${header}${toLf(runtimeSource)}\n${buildAutoBootSnippet()}`;
+}
+
+function buildHostLibrarySource({ profile = ANTIGRAVITY_REMOTE_WEB_PROFILE } = {}) {
+  return buildRemoteRuntimeBundleSource({
+    profile,
+    packedAddons: [],
+  });
 }
 
 function buildExtensionContentScriptSource(runtimeSource) {
@@ -585,10 +639,13 @@ function buildDistRemote({
   settingsDataDir = undefined,
   strictTrustPolicy = true,
   includeSettingsSnapshots = false,
+  includeOfflineConfigBridge = false,
+  updateBaseUrl = null,
   hostVersion = null,
   isEnabled = null,
 } = {}) {
   const effectiveVersion = hostVersion || readPackageVersion();
+  const safeUpdateBaseUrl = normalizeUpdateBaseUrl(updateBaseUrl);
   let collection = {
     ok: true,
     profileId: profile.id,
@@ -617,6 +674,7 @@ function buildDistRemote({
       hostVersion: effectiveVersion,
       strictTrustPolicy,
       includeSettingsSnapshots,
+      includeOfflineConfigBridge,
       isEnabled,
     });
   }
@@ -625,15 +683,26 @@ function buildDistRemote({
     profile,
     packedAddons: collection.addons,
   });
+  const hostLibSource = buildHostLibrarySource({ profile });
+  const userscriptMetaSource = buildUserscriptMetaHeader({
+    profile,
+    version: effectiveVersion,
+    updateBaseUrl: safeUpdateBaseUrl,
+  });
   const userscriptSource = buildUserscriptSource(runtimeSource, {
     profile,
     version: effectiveVersion,
+    updateBaseUrl: safeUpdateBaseUrl,
   });
   const extensionContentScriptSource = buildExtensionContentScriptSource(runtimeSource);
 
   const runtimeAst = verifyRemoteBundleAst(runtimeSource);
   if (!runtimeAst.ok) {
     throw new Error(`REMOTE_RUNTIME_AST_VIOLATIONS:${JSON.stringify(runtimeAst.violations)}`);
+  }
+  const hostLibAst = verifyRemoteBundleAst(hostLibSource);
+  if (!hostLibAst.ok) {
+    throw new Error(`REMOTE_HOST_LIB_AST_VIOLATIONS:${JSON.stringify(hostLibAst.violations)}`);
   }
   const userscriptAst = verifyRemoteBundleAst(userscriptSource);
   if (!userscriptAst.ok) {
@@ -673,6 +742,8 @@ function buildDistRemote({
   const extensionContentScriptRel = `extension/${EXTENSION_CONTENT_SCRIPT_FILENAME}`;
 
   const outputFiles = {
+    'antigravity-remote-host.lib.js': hostLibSource,
+    'antigravity-remote.meta.js': userscriptMetaSource,
     'antigravity-remote.user.js': userscriptSource,
     [extensionContentScriptRel]: extensionContentScriptSource,
     [extensionManifestRel]: extensionManifestJson,
@@ -712,6 +783,18 @@ function buildDistRemote({
     })),
     skippedMainHookPlugins: collection.skippedMainHookPlugins,
     rejectedCount: collection.rejected.length,
+    rejected: collection.rejected.map((r) => ({
+      pluginId: r.pluginId,
+      reason: r.reason,
+    })),
+    userscript: {
+      file: 'antigravity-remote.user.js',
+      metaFile: 'antigravity-remote.meta.js',
+      hostLibFile: 'antigravity-remote-host.lib.js',
+      injectInto: 'content',
+      grants: USERSCRIPT_GRANTS.slice(),
+      updateBaseUrl: safeUpdateBaseUrl,
+    },
     extension: {
       dir: 'extension',
       manifestVersion: extensionManifestObj.manifest_version,
@@ -745,7 +828,9 @@ function parseCliArgs(argv) {
     check: false,
     noAddons: false,
     includeSettingsSnapshots: false,
+    includeOfflineConfigBridge: false,
     strictTrustPolicy: true,
+    updateBaseUrl: null,
     outDir: DEFAULT_DIST_REMOTE_DIR,
     addonsDir: undefined,
     pluginsRootDir: undefined,
@@ -758,7 +843,9 @@ function parseCliArgs(argv) {
     if (a === '--check') opts.check = true;
     else if (a === '--no-addons') opts.noAddons = true;
     else if (a === '--include-settings-snapshots') opts.includeSettingsSnapshots = true;
+    else if (a === '--include-offline-config-bridge') opts.includeOfflineConfigBridge = true;
     else if (a === '--allow-untrusted-dev') opts.strictTrustPolicy = false;
+    else if (a === '--update-base-url' && argv[i + 1]) opts.updateBaseUrl = argv[++i];
     else if (a === '--out-dir' && argv[i + 1]) opts.outDir = path.resolve(argv[++i]);
     else if (a === '--addons-dir' && argv[i + 1]) opts.addonsDir = path.resolve(argv[++i]);
     else if (a === '--plugins-root' && argv[i + 1]) opts.pluginsRootDir = path.resolve(argv[++i]);
@@ -835,12 +922,16 @@ function main() {
       ok: true,
       mode: 'build',
       outDir: opts.outDir,
+      userscriptPath: path.join(opts.outDir, 'antigravity-remote.user.js'),
+      hostLibPath: path.join(opts.outDir, 'antigravity-remote-host.lib.js'),
+      metaPath: path.join(opts.outDir, 'antigravity-remote.meta.js'),
       extensionDir: path.join(opts.outDir, 'extension'),
       bundleMode: res.buildManifest.mode,
       buildSha8: res.buildManifest.buildSha8,
       addonCount: res.buildManifest.addonCount,
       skippedMainHookPlugins: res.buildManifest.skippedMainHookPlugins,
       rejectedCount: res.buildManifest.rejectedCount,
+      rejected: res.buildManifest.rejected,
       bookmarkletEmitted: res.buildManifest.bookmarklet.emitted,
       bookmarkletRunnable: res.buildManifest.bookmarklet.runnable,
       bookmarkletChars: res.buildManifest.bookmarklet.charLength,
@@ -856,7 +947,11 @@ if (require.main === module) {
 module.exports = {
   REMOTE_BROWSER_MODULES,
   BOOKMARKLET_MAX_RUNNABLE_CHARS,
+  USERSCRIPT_GRANTS,
+  normalizeUpdateBaseUrl,
   buildRemoteRuntimeBundleSource,
+  buildHostLibrarySource,
+  buildUserscriptMetaHeader,
   buildUserscriptSource,
   buildExtensionContentScriptSource,
   buildBookmarkletText,

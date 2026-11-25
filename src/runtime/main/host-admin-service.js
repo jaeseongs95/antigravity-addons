@@ -156,7 +156,8 @@ function readHostCliMetaFile(metaPath) {
   }
 }
 
-function resolveBuildRemoteCommand({
+function resolveCliSubcommand({
+  subcommandFlag = '--build-remote',
   remoteDistDir = null,
   cliCommandName = DEFAULT_CLI_COMMAND_NAME,
   cliEntryPath = null,
@@ -171,7 +172,7 @@ function resolveBuildRemoteCommand({
       : DEFAULT_CLI_COMMAND_NAME;
   const distTrimmed = typeof remoteDistDir === 'string' ? remoteDistDir.trim() : '';
   const safeDistDir = distTrimmed && !UNSAFE_SHELL_PATH_RE.test(distTrimmed) ? distTrimmed : null;
-  const argsSuffix = safeDistDir ? `--build-remote --out-dir "${safeDistDir}"` : '--build-remote';
+  const argsSuffix = safeDistDir ? `${subcommandFlag} --out-dir "${safeDistDir}"` : subcommandFlag;
 
   if (isCommandOnPath(safeCmd, { pathEnv, pathExtEnv, platform })) {
     return {
@@ -215,6 +216,14 @@ function resolveBuildRemoteCommand({
     runnable: false,
     cliEntryPath: null,
   };
+}
+
+function resolveBuildRemoteCommand(opts = {}) {
+  return resolveCliSubcommand({ ...opts, subcommandFlag: '--build-remote' });
+}
+
+function resolveServeRemoteCommand(opts = {}) {
+  return resolveCliSubcommand({ ...opts, subcommandFlag: '--serve-remote' });
 }
 
 function readRemotePreferencesFile(prefsPath) {
@@ -375,6 +384,10 @@ function readRemoteBundleStatus(remoteDistDir) {
     extensionDir: null,
     hasUserscript: false,
     userscriptPath: null,
+    hasHostLib: false,
+    hostLibPath: null,
+    hasUserscriptMeta: false,
+    userscriptMetaPath: null,
     hasBookmarklet: false,
     bookmarkletRunnable: false,
     bookmarkletChars: null,
@@ -414,6 +427,16 @@ function readRemoteBundleStatus(remoteDistDir) {
       : null;
     const hasUserscript = Boolean(candidateUserscriptPath && isRegularNonSymlinkFile(candidateUserscriptPath));
     const userscriptPath = hasUserscript ? candidateUserscriptPath : null;
+
+    const hostLibFileName = manifestFiles.find((name) => typeof name === 'string' && name.endsWith('.lib.js')) || null;
+    const candidateHostLibPath = hostLibFileName ? resolveSafeChildPath(remoteDistDir, hostLibFileName) : null;
+    const hasHostLib = Boolean(candidateHostLibPath && isRegularNonSymlinkFile(candidateHostLibPath));
+    const hostLibPath = hasHostLib ? candidateHostLibPath : null;
+
+    const metaFileName = manifestFiles.find((name) => typeof name === 'string' && name.endsWith('.meta.js')) || null;
+    const candidateMetaPath = metaFileName ? resolveSafeChildPath(remoteDistDir, metaFileName) : null;
+    const hasUserscriptMeta = Boolean(candidateMetaPath && isRegularNonSymlinkFile(candidateMetaPath));
+    const userscriptMetaPath = hasUserscriptMeta ? candidateMetaPath : null;
 
     const extDirRel =
       parsed.extension && typeof parsed.extension === 'object' && typeof parsed.extension.dir === 'string'
@@ -501,6 +524,10 @@ function readRemoteBundleStatus(remoteDistDir) {
       extensionDir,
       hasUserscript,
       userscriptPath,
+      hasHostLib,
+      hostLibPath,
+      hasUserscriptMeta,
+      userscriptMetaPath,
       hasBookmarklet,
       bookmarkletRunnable,
       bookmarkletChars,
@@ -520,8 +547,26 @@ function sameStringArray(a, b) {
   return true;
 }
 
+function isOfflineConfigBridgeManifest(manifest, remoteProfileId) {
+  if (!manifest || typeof manifest !== 'object') return false;
+  const hasConfigBridge = Boolean(
+    manifest.configBridge &&
+      typeof manifest.configBridge === 'object' &&
+      Array.isArray(manifest.configBridge.scopes) &&
+      manifest.configBridge.scopes.length > 0
+  );
+  if (!hasConfigBridge) return false;
+  const compat = manifest.compatibility && typeof manifest.compatibility === 'object' ? manifest.compatibility : null;
+  const explicitRemoteOptIn = Boolean(
+    compat &&
+      ((typeof compat.hostProfile === 'string' && compat.hostProfile === remoteProfileId) ||
+        (Array.isArray(compat.hostProfiles) && compat.hostProfiles.includes(remoteProfileId)))
+  );
+  return !explicitRemoteOptIn;
+}
+
 function createHostAdminService({
-  hostVersion = '2.6.0',
+  hostVersion = '2.7.0',
   buildSha8 = 'dev',
   profile = {},
   addonsDir = null,
@@ -678,6 +723,8 @@ function createHostAdminService({
         remoteBlockedReason = remoteRejectedById.get(pluginId).reason || 'ERR_INCOMPATIBLE_HOST_PROFILE';
       } else if (!remoteActiveById.has(pluginId)) {
         remoteBlockedReason = 'ERR_UNSUPPORTED_HOST_CAPABILITY';
+      } else if (isOfflineConfigBridgeManifest(activeManifest, effectiveRemoteProfileId)) {
+        remoteBlockedReason = 'ERR_REMOTE_REQUIRES_LOCAL_CONFIG_BRIDGE';
       } else if (trustLevel === 'trusted' && trustApproved === false) {
         remoteBlockedReason = trustRejectReason || 'ERR_TRUST_POLICY_NOT_APPROVED';
       } else {
@@ -738,10 +785,19 @@ function createHostAdminService({
     }
     const remoteBundleNeedsRebuild =
       !remoteBundle.built ||
-      !remoteBundle.hasExtension ||
+      !remoteBundle.hasUserscript ||
       !sameStringArray(remoteBundle.packedPluginIds, remoteEnabledIds) ||
       stalePluginIds.length > 0;
     const resolvedBuildCmd = resolveBuildRemoteCommand({
+      remoteDistDir: effectiveRemoteDistDir,
+      cliCommandName,
+      cliEntryPath,
+      hostCliMetaPath: effectiveHostCliMetaPath,
+      pathEnv,
+      pathExtEnv,
+      platform,
+    });
+    const resolvedServeCmd = resolveServeRemoteCommand({
       remoteDistDir: effectiveRemoteDistDir,
       cliCommandName,
       cliEntryPath,
@@ -775,6 +831,9 @@ function createHostAdminService({
         buildCommand: resolvedBuildCmd.command,
         buildCommandSource: resolvedBuildCmd.source,
         buildCommandRunnable: resolvedBuildCmd.runnable,
+        serveCommand: resolvedServeCmd.command,
+        serveCommandSource: resolvedServeCmd.source,
+        serveCommandRunnable: resolvedServeCmd.runnable,
       },
       remotePreferences: {
         ok: remotePrefs.ok,
@@ -831,6 +890,7 @@ module.exports = {
   isCommandOnPath,
   readHostCliMetaFile,
   resolveBuildRemoteCommand,
+  resolveServeRemoteCommand,
   readRemotePreferencesFile,
   isAddonEnabledInRemotePreferences,
   writeRemotePreferencesFileAtomic,

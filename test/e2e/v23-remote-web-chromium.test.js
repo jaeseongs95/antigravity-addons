@@ -413,3 +413,236 @@ app.whenReady().then(async () => {
     }
   }
 );
+
+test(
+  'TC-U6 (Real Chromium — v2.7.0): live 3-policy CSP + ppConfig + modular @require host lib + mobile 390x844 bottom-sheet drawer + clickable Settings Tab & Quick Action',
+  { skip: ELECTRON_BIN ? false : 'electron devDependency not installed' },
+  () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-v27-u6-e2e-'));
+    try {
+      const distRemoteDir = path.join(tmpDir, 'dist-remote');
+      const built = buildDistRemote({
+        targetDir: distRemoteDir,
+        profile: ANTIGRAVITY_REMOTE_WEB_PROFILE,
+        noAddons: true,
+        hostVersion: '2.7.0',
+      });
+      assert.equal(built.ok, true);
+
+      const hostLibPath = path.join(distRemoteDir, 'antigravity-remote-host.lib.js');
+      assert.equal(fs.existsSync(hostLibPath), true);
+
+      const runnerPath = path.join(tmpDir, 'chromium-u6-runner.cjs');
+      fs.writeFileSync(
+        runnerPath,
+        `'use strict';
+const http = require('node:http');
+const fs = require('node:fs');
+const { app, BrowserWindow } = require('electron');
+
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-dev-shm-usage');
+
+const hostLibCode = fs.readFileSync(${JSON.stringify(hostLibPath)}, 'utf8');
+
+function startStrictLiveCspServer() {
+  return new Promise((resolve) => {
+    const srv = http.createServer((_req, res) => {
+      // Exact 3-policy intersected CSP pattern matching live antigravity.google.com headers
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Security-Policy': [
+          "require-trusted-types-for 'script'; report-uri /_/csp",
+          "script-src 'nonce-liveE2E99' 'unsafe-inline'; object-src 'none'; base-uri 'self'",
+          "script-src 'nonce-liveE2E99' 'strict-dynamic' https:; object-src 'none'",
+        ],
+      });
+      res.end(
+        '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">' +
+        '<script nonce="liveE2E99">window["ppConfig"] = { productName: "GoogleAntigravity", sealIsEnforced: true, deleteIsEnforced: true };</script>' +
+        '</head><body><main id="app-root">Remote Workspace</main></body></html>'
+      );
+    });
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      resolve({ srv, origin: 'http://127.0.0.1:' + addr.port });
+    });
+  });
+}
+
+app.whenReady().then(async () => {
+  const target = await startStrictLiveCspServer();
+  const win = new BrowserWindow({
+    show: false,
+    width: 390,
+    height: 844,
+    useContentSize: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  const consoleErrors = [];
+  win.webContents.on('console-message', (_ev, level, message) => {
+    if (level >= 2) consoleErrors.push(String(message));
+  });
+
+  try {
+    await win.loadURL(target.origin + '/workspace');
+    // Load 0-addon host library into Isolated World 998 (matching @inject-into content)
+    await win.webContents.executeJavaScriptInIsolatedWorld(998, [{ code: hostLibCode }]);
+
+    const outcome = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+      {
+        code: \`(async () => {
+          const rt = globalThis.__addonHostRemoteRuntime;
+          if (!rt) return { ok: false, reason: 'NO_RUNTIME' };
+
+          // 1. Pre-boot modular registerAddon()
+          const reg1 = rt.registerAddon({
+            pluginMeta: {
+              schemaVersion: 2,
+              pluginId: 'u6-mobile-addon',
+              displayName: 'Mobile Modular Addon',
+              version: '1.0.0',
+              trustLevel: 'restricted',
+              capabilities: ['renderer'],
+              uiSlots: [{ slot: 'modal', slotId: 'u6-mobile-addon.modal', anchor: 'modal', shadow: true }],
+            },
+            run(addonHost) {
+              let count = 0;
+              addonHost.registerAction('ping-action', {
+                label: 'Ping Mobile',
+                run() {
+                  count += 1;
+                  document.documentElement.setAttribute('data-u6-action-count', String(count));
+                  return { count };
+                },
+              });
+              addonHost.registerSettingsTab('mobile-settings', {
+                label: 'Mobile Settings Modal',
+                onSelect() {
+                  const modal = addonHost.openModal('u6-mobile-addon.modal', { title: 'U6 Modal' });
+                  if (modal && modal.bodyEl) {
+                    const p = document.createElement('p');
+                    p.textContent = 'U6_MODAL_OPENED';
+                    modal.bodyEl.appendChild(p);
+                    document.documentElement.setAttribute('data-u6-modal-open', String(Boolean(modal.element && modal.element.open)));
+                  }
+                },
+              });
+            },
+          });
+
+          const boot = await rt.bootRemoteWebHost({
+            allowedOrigins: [\${JSON.stringify(target.origin)}],
+            allowLoopbackHttp: true,
+          });
+          if (!boot.ok) return { ok: false, reason: boot.reason };
+
+          const drawerHost = document.getElementById('remote-addon-host-drawer-root');
+          const sr = drawerHost && drawerHost.shadowRoot;
+          const pill = sr.querySelector('.rah-pill');
+          const pillRect = pill.getBoundingClientRect();
+
+          // Open mobile drawer -> verify bottom-sheet geometry
+          pill.click();
+          const panel = sr.querySelector('#rah-drawer-panel');
+          const panelRect = panel.getBoundingClientRect();
+
+          // Click Quick Action inside Addons tab
+          const actBtn = sr.querySelector('[data-host-action-plugin="u6-mobile-addon"][data-host-action-id="ping-action"]');
+          const actRect = actBtn ? actBtn.getBoundingClientRect() : null;
+          if (actBtn) actBtn.click();
+
+          // Switch to Settings Tabs & click tab -> opens modal dialog and auto-closes drawer
+          const tabs = sr.querySelectorAll('.rah-tab');
+          tabs[1].click();
+          const settingsBtn = sr.querySelector('[data-settings-tab-action="select"]');
+          const settingsRect = settingsBtn ? settingsBtn.getBoundingClientRect() : null;
+          if (settingsBtn) settingsBtn.click();
+          const drawerHiddenAfterSelect = panel.hasAttribute('hidden');
+
+          // 2. Post-boot dynamic registerAddon() mounts live
+          const reg2 = rt.registerAddon({
+            pluginMeta: {
+              schemaVersion: 2,
+              pluginId: 'u6-late-addon',
+              displayName: 'Late Dynamic Addon',
+              version: '1.0.0',
+              trustLevel: 'restricted',
+              capabilities: ['renderer'],
+              uiSlots: [],
+            },
+            run() {
+              document.documentElement.setAttribute('data-u6-late-mounted', 'yes');
+            },
+          });
+          const lateMount = reg2.promise ? await reg2.promise : null;
+
+          return {
+            ok: true,
+            reg1Queued: reg1.queued,
+            pillHeight: pillRect.height,
+            panelWidth: panelRect.width,
+            panelBottom: panelRect.bottom,
+            actBtnHeight: actRect ? actRect.height : 0,
+            settingsBtnHeight: settingsRect ? settingsRect.height : 0,
+            actionCount: document.documentElement.getAttribute('data-u6-action-count'),
+            modalOpen: document.documentElement.getAttribute('data-u6-modal-open'),
+            drawerHiddenAfterSelect,
+            lateMounted: document.documentElement.getAttribute('data-u6-late-mounted'),
+            lateStatus: lateMount ? lateMount.status : null,
+            addonCount: boot.controller.getAddonStates().length,
+          };
+        })()\`,
+      },
+    ]);
+
+    process.stdout.write(JSON.stringify({ outcome, consoleErrors }) + '\\n');
+    win.destroy();
+    target.srv.close();
+    app.exit(0);
+  } catch (err) {
+    process.stderr.write((err && err.stack ? err.stack : String(err)) + '\\n');
+    target.srv.close();
+    app.exit(1);
+  }
+});
+`,
+        'utf8'
+      );
+
+      const env = { ...process.env };
+      delete env.ELECTRON_RUN_AS_NODE;
+      const args = [runnerPath];
+      if (process.platform === 'linux') {
+        args.unshift('--no-sandbox', '--disable-gpu');
+      }
+      const rawOut = execFileSync(ELECTRON_BIN, args, {
+        env,
+        encoding: 'utf8',
+        timeout: 45000,
+      });
+      const result = JSON.parse(rawOut.trim().split(/\r?\n/).pop());
+      assert.deepEqual(result.consoleErrors, [], `Expected 0 console/CSP errors, got: ${JSON.stringify(result.consoleErrors)}`);
+      assert.equal(result.outcome.ok, true);
+      assert.equal(result.outcome.reg1Queued, true);
+      assert.ok(result.outcome.pillHeight >= 44, `Pill touch target must be >= 44px, got ${result.outcome.pillHeight}`);
+      assert.ok(result.outcome.panelWidth >= 360, `Mobile 390px bottom-sheet width should span viewport, got ${result.outcome.panelWidth}`);
+      assert.ok(result.outcome.actBtnHeight >= 44, `Quick action button must be >= 44px, got ${result.outcome.actBtnHeight}`);
+      assert.ok(result.outcome.settingsBtnHeight >= 44, `Settings tab button must be >= 44px, got ${result.outcome.settingsBtnHeight}`);
+      assert.equal(result.outcome.actionCount, '1');
+      assert.equal(result.outcome.modalOpen, 'true');
+      assert.equal(result.outcome.drawerHiddenAfterSelect, true);
+      assert.equal(result.outcome.lateMounted, 'yes');
+      assert.equal(result.outcome.lateStatus, 'active');
+      assert.equal(result.outcome.addonCount, 2);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+);

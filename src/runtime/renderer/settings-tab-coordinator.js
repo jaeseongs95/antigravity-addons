@@ -26,10 +26,39 @@ function createSettingsTabCoordinator() {
     const out = [];
     for (const [pluginId, map] of tabsByPlugin.entries()) {
       for (const tab of map.values()) {
-        out.push({ pluginId, tabId: tab.tabId, label: tab.label });
+        out.push({
+          pluginId,
+          tabId: tab.tabId,
+          label: tab.label,
+          selectable: typeof tab.onSelect === 'function',
+        });
       }
     }
     return out;
+  }
+
+  function selectTab(pluginId, tabId) {
+    if (typeof pluginId !== 'string' || !pluginId || typeof tabId !== 'string' || !tabId) {
+      return { ok: false, reason: 'ERR_SETTINGS_TAB_NOT_FOUND' };
+    }
+    const map = tabsByPlugin.get(pluginId);
+    const tab = map ? map.get(tabId) : null;
+    if (!tab) {
+      return { ok: false, reason: 'ERR_SETTINGS_TAB_NOT_FOUND' };
+    }
+    if (typeof tab.onSelect !== 'function') {
+      return { ok: false, reason: 'ERR_SETTINGS_TAB_NOT_SELECTABLE' };
+    }
+    try {
+      const result = tab.onSelect({ pluginId, tabId: tab.tabId, label: tab.label });
+      return { ok: true, reason: null, result };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'ERR_SETTINGS_TAB_SELECT_FAILED',
+        error: err && err.message ? err.message : String(err),
+      };
+    }
   }
 
   function disposePluginTabs(pluginId) {
@@ -39,6 +68,7 @@ function createSettingsTabCoordinator() {
   return Object.freeze({
     registerSettingsTab,
     listTabs,
+    selectTab,
     disposePluginTabs,
   });
 }

@@ -6,7 +6,19 @@
 > **언어**: [English (README.md)](./README.md) | 한국어  
 > *(구 `antigravity-native-addon-host` — 기존 `addon-host` CLI 명령, `ADDON_HOST_LOADER_V2` 패치 마커 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**로컬 MV3 브라우저 확장(`world: "ISOLATED"`) 및 Userscript 기반 원격 웹 배포, 내장 설정 화면 `애드온 관리(Addon Manager)` UI, 무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.6.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+**크로스 디바이스 범용 Userscript(`@inject-into content` + `GM_*` 저장소 + 모듈형 `@require` 호스트 라이브러리) · 무의존성 LAN QR 모바일 전송(`--serve-remote`) · 보조 MV3 확장 기반 원격 웹 배포, 내장 설정 화면 `애드온 관리(Addon Manager)` UI, 무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.7.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+
+## v2.7.0 주요 업데이트 (범용 원격 웹 전달 · 인터랙티브 모바일 드로어 · 모듈형 `@require` 호스트)
+
+- **범용 Userscript 1차 배포 및 모듈형 `@require` 호스트 라이브러리**:
+  - **iOS/iPadOS Safari (`Userscripts`)**, **Android Firefox (`Violentmonkey`)**, **데스크톱 브라우저 (`Violentmonkey`/`Tampermonkey`)**를 아우르는 범용 Userscript(`antigravity-remote.user.js` + `antigravity-remote.meta.js`)를 1차 배포 수단으로 승격하고, 로컬 압축해제형 MV3 확장(`remote-dist/extension/`)을 2차 보조 경로로 정리했습니다.
+  - 0-애드온 순수 호스트 라이브러리 `antigravity-remote-host.lib.js`와 `globalThis.__addonHostRemoteRuntime.registerAddon(descriptor)` API를 추가해 독립 플러그인들이 `@require`로 호스트를 공유할 수 있습니다.
+  - Userscript 헤더를 `@inject-into content`, `@grant GM_getValue`/`GM_setValue`/`GM_deleteValue`(`GM_*` → `localStorage` → `memory-ephemeral` 자동 폴백), 선택적 `--update-base-url <https-url>`(`@updateURL`/`@downloadURL`)로 고도화했습니다.
+- **무의존성 LAN QR 모바일 일회성 전송 (`addon-host --serve-remote`)**:
+  - 외부 패키지 0건의 ISO/IEC 18004 QR 인코더(`src/adapters/remote-web/qr-ascii.js`)와 128비트 랜덤 토큰 LAN HTTP 서버(`src/adapters/remote-web/remote-lan-server.js`)를 추가했습니다. 정확한 경로 화이트리스트, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, 기본 `300초` 자동 종료, `--once` 첫 다운로드 후 자동 종료를 지원합니다.
+- **인터랙티브 모바일 우선 드로어 및 데스크톱 `configBridge` 기본 제외**:
+  - `kernel.js` / `settings-tab-coordinator.js` / `remote-bootstrap.js`에 호스트 토큰 보호 `selectSettingsTab`·`listHostActions`·`invokeHostAction`을 추가하여 드로어 안의 Settings Tab과 Quick Action을 클릭으로 바로 실행할 수 있으며, `44px` 터치 타깃·`<= 640px` 하단 바텀 시트·`env(safe-area-inset-*)`를 적용했습니다.
+  - 로컬 파일시스템에 의존하는 데스크톱 `configBridge` 애드온은 원격 웹 번들에서 기본 제외(`ERR_REMOTE_REQUIRES_LOCAL_CONFIG_BRIDGE`, 명시적 `antigravity-remote-web` opt-in 또는 `--include-offline-config-bridge`로 재정의 가능)하고, 데스크톱 `설정 > 애드온 관리`의 1차 CTA를 `Userscript 경로 복사`·`모바일 QR 전달 명령 복사`로 전환했습니다.
 
 ## v2.6.0 주요 업데이트 (로컬 MV3 브라우저 확장 배포 · 커널 슬리밍 · CSP/TrustedTypes 보안 강화)
 
@@ -102,11 +114,12 @@ node ./bin/addon-host.js trust list
 node ./bin/addon-host.js trust approve <pluginId>
 node ./bin/addon-host.js trust revoke <pluginId>
 
-# Remote Web Userscript / Bookmarklet 번들 빌드 및 검증
+# Remote Web 범용 Userscript 번들 빌드 · 검증 · 모바일 LAN QR 전송
 npm run check:remote
 npm run build:remote
 node ./bin/addon-host.js --profile remote-web --status
 node ./bin/addon-host.js --build-remote --no-addons --check
+node ./bin/addon-host.js --serve-remote --once
 
 # 공유 app.asar 부트스트랩 설치, 업그레이드(V1 -> V2) 및 롤백
 node ./bin/addon-host.js --install

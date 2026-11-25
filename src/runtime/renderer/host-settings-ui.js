@@ -70,6 +70,7 @@ const COPY = Object.freeze({
     remoteToggleOn: 'Included',
     remoteToggleOff: 'Hidden',
     remoteReasonDesktopOnly: 'Desktop only',
+    remoteReasonConfigBridge: 'Local config bridge only',
     remoteReasonDisabledConfig: 'Disabled in config',
     remoteReasonTrustRequired: 'Trust approval required',
     remoteReasonUnsupported: 'Not supported on Remote Web',
@@ -77,13 +78,15 @@ const COPY = Object.freeze({
     syncTitleUpToDate: 'Remote Web bundle is synchronized',
     syncTitleNeedsRebuild: 'Remote Web bundle needs rebuild',
     syncTitleNotBuilt: 'Remote Web bundle has not been built yet',
-    syncDescUpToDate: 'Your Remote Web settings match the latest bundle. Load the extension folder once in your browser, or click Reload after rebuilding.',
-    syncDescNeedsRebuild: 'Visibility preferences are saved. Run the command below to rebuild the Remote Web browser extension & userscript, then reload the extension.',
-    syncDescNotBuilt: 'Run the command below to generate the Remote Web browser extension & userscript with your selected addons.',
+    syncDescUpToDate: 'Your Remote Web settings match the latest universal bundle. Install the Userscript on iOS Safari, Android Firefox, or any desktop browser, or run the mobile QR command on your LAN.',
+    syncDescNeedsRebuild: 'Visibility preferences are saved. Run the command below to rebuild the universal Remote Web Userscript, @require host library, and secondary extension.',
+    syncDescNotBuilt: 'Run the command below to generate the universal Remote Web Userscript, @require host library, and secondary browser extension.',
     copyCommand: 'Copy command',
+    copyServeCommand: 'Copy mobile QR command',
     copyExtensionPath: 'Copy extension path',
     copyUserscriptPath: 'Copy userscript path',
     copyBookmarklet: 'Copy bookmarklet',
+    userscriptGuide: 'Universal setup: Install the .user.js in Userscripts (iOS/iPadOS Safari), Violentmonkey (Android Firefox / Desktop), or Tampermonkey (Desktop), or run the LAN QR command to transfer directly to mobile. (Secondary desktop Chrome/Edge fallback: load the unpacked extension folder via chrome://extensions.)',
     extensionGuide: 'Browser setup: Open chrome://extensions (Edge supported) -> Enable Developer mode -> Load unpacked -> select the copied folder path. After future rebuilds, click Reload on the extension card.',
     copied: 'Copied',
     copyFailed: 'Copy failed',
@@ -126,6 +129,7 @@ const COPY = Object.freeze({
     remoteToggleOn: '표시함',
     remoteToggleOff: '숨김',
     remoteReasonDesktopOnly: '데스크톱 전용',
+    remoteReasonConfigBridge: '로컬 설정 브리지 전용',
     remoteReasonDisabledConfig: '앱 설정에서 꺼짐',
     remoteReasonTrustRequired: '신뢰 승인 필요',
     remoteReasonUnsupported: '원격 웹 미지원',
@@ -133,13 +137,15 @@ const COPY = Object.freeze({
     syncTitleUpToDate: '원격 웹 번들이 최신 상태입니다',
     syncTitleNeedsRebuild: '원격 웹 번들 재빌드가 필요합니다',
     syncTitleNotBuilt: '원격 웹 번들이 아직 생성되지 않았습니다',
-    syncDescUpToDate: '현재 선택한 원격 웹 표시 설정이 최신 번들과 일치합니다. 브라우저에서 확장 폴더를 한 번 로드하거나, 재빌드 후 확장 새로고침(↻)을 누르세요.',
-    syncDescNeedsRebuild: '변경된 원격 웹 표시 설정은 즉시 저장되었습니다. 아래 명령으로 브라우저 확장과 Userscript를 재빌드한 뒤 확장을 새로고침하세요.',
-    syncDescNotBuilt: '아래 명령을 실행하면 선택한 애드온이 포함된 원격 웹 브라우저 확장과 Userscript를 생성합니다.',
+    syncDescUpToDate: '현재 선택한 원격 웹 표시 설정이 최신 범용 번들과 일치합니다. iOS Safari·Android Firefox·데스크톱 브라우저에 Userscript를 설치하거나, 같은 Wi-Fi에서 모바일 QR 전달 명령을 실행하세요.',
+    syncDescNeedsRebuild: '변경된 원격 웹 표시 설정은 즉시 저장되었습니다. 아래 명령으로 범용 Remote Web Userscript, @require 호스트 라이브러리 및 보조 확장을 재빌드하세요.',
+    syncDescNotBuilt: '아래 명령을 실행하면 선택한 애드온이 포함된 범용 Remote Web Userscript, @require 호스트 라이브러리 및 보조 브라우저 확장을 생성합니다.',
     copyCommand: '명령 복사',
+    copyServeCommand: '모바일 QR 전달 명령 복사',
     copyExtensionPath: '확장 경로 복사',
     copyUserscriptPath: 'Userscript 경로 복사',
     copyBookmarklet: '북마클릿 복사',
+    userscriptGuide: '범용 설치: iOS/iPadOS Safari(Userscripts), Android Firefox·데스크톱(Violentmonkey/Tampermonkey)에 .user.js를 설치하거나 모바일 QR 전달 명령으로 같은 Wi-Fi에서 바로 전송하세요. (보조 데스크톱 Chrome/Edge 경로: chrome://extensions에서 압축해제된 확장 폴더 로드.)',
     extensionGuide: '브라우저 적용: chrome://extensions 열기(Edge 동일) → 개발자 모드 켜기 → 압축해제된 확장 프로그램 로드 → 복사한 확장 폴더 선택. 재빌드 후에는 확장 카드의 새로고침(↻)만 누르면 됩니다.',
     copied: '복사됨',
     copyFailed: '복사 실패',
@@ -745,6 +751,8 @@ function resolveRemoteReasonLabel(reason, t) {
   switch (reason) {
     case 'ERR_UNSUPPORTED_HOST_CAPABILITY':
       return t.remoteReasonDesktopOnly;
+    case 'ERR_REMOTE_REQUIRES_LOCAL_CONFIG_BRIDGE':
+      return t.remoteReasonConfigBridge;
     case 'DISABLED_IN_CONFIG':
       return t.remoteReasonDisabledConfig;
     case 'ERR_TRUST_POLICY_NOT_APPROVED':
@@ -1564,6 +1572,9 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const canCopyUserscript = Boolean(
       bundle.built && bundle.hasUserscript && typeof bundle.userscriptPath === 'string' && bundle.userscriptPath.length > 0
     );
+    const canCopyServeCommand = Boolean(
+      canCopyUserscript && typeof bundle.serveCommand === 'string' && bundle.serveCommand.length > 0
+    );
     const canCopyBookmarklet = Boolean(
       typeof bundle.bookmarkletText === 'string' &&
         bundle.bookmarkletText.length > 0 &&
@@ -1573,12 +1584,34 @@ function createHostSettingsUi(doc, win, opts = {}) {
             bundle.bookmarkletText.length <= 65536))
     );
 
-    if (canCopyExtension || canCopyUserscript || canCopyBookmarklet) {
+    if (canCopyUserscript || canCopyServeCommand || canCopyExtension || canCopyBookmarklet) {
       const deliveryRow = createEl('div', 'ah-delivery-row');
+      if (canCopyUserscript) {
+        const copyUserBtn = createEl(
+          'button',
+          !needsAttention ? 'ah-btn ah-btn-primary' : 'ah-btn',
+          t.copyUserscriptPath
+        );
+        copyUserBtn.setAttribute('type', 'button');
+        copyUserBtn.setAttribute('data-ah-action', 'copy-userscript-path');
+        copyUserBtn.addEventListener('click', () => {
+          copyText(bundle.userscriptPath, copyUserBtn, t);
+        });
+        deliveryRow.appendChild(copyUserBtn);
+      }
+      if (canCopyServeCommand) {
+        const copyServeBtn = createEl('button', 'ah-btn', t.copyServeCommand);
+        copyServeBtn.setAttribute('type', 'button');
+        copyServeBtn.setAttribute('data-ah-action', 'copy-serve-command');
+        copyServeBtn.addEventListener('click', () => {
+          copyText(bundle.serveCommand, copyServeBtn, t);
+        });
+        deliveryRow.appendChild(copyServeBtn);
+      }
       if (canCopyExtension) {
         const copyExtBtn = createEl(
           'button',
-          !needsAttention ? 'ah-btn ah-btn-primary' : 'ah-btn',
+          !needsAttention && !canCopyUserscript ? 'ah-btn ah-btn-primary' : 'ah-btn',
           t.copyExtensionPath
         );
         copyExtBtn.setAttribute('type', 'button');
@@ -1587,15 +1620,6 @@ function createHostSettingsUi(doc, win, opts = {}) {
           copyText(bundle.extensionDir, copyExtBtn, t);
         });
         deliveryRow.appendChild(copyExtBtn);
-      }
-      if (canCopyUserscript) {
-        const copyUserBtn = createEl('button', 'ah-btn', t.copyUserscriptPath);
-        copyUserBtn.setAttribute('type', 'button');
-        copyUserBtn.setAttribute('data-ah-action', 'copy-userscript-path');
-        copyUserBtn.addEventListener('click', () => {
-          copyText(bundle.userscriptPath, copyUserBtn, t);
-        });
-        deliveryRow.appendChild(copyUserBtn);
       }
       if (canCopyBookmarklet) {
         const copyBmBtn = createEl('button', 'ah-btn', t.copyBookmarklet);
@@ -1609,7 +1633,9 @@ function createHostSettingsUi(doc, win, opts = {}) {
       syncCard.appendChild(deliveryRow);
     }
 
-    if (canCopyExtension) {
+    if (canCopyUserscript) {
+      syncCard.appendChild(createEl('p', 'ah-install-guide', t.userscriptGuide));
+    } else if (canCopyExtension) {
       syncCard.appendChild(createEl('p', 'ah-install-guide', t.extensionGuide));
     }
 

@@ -683,7 +683,24 @@ test('TC-RW-009: build-remote.js produces deterministic host-only bundles, MV3 e
 
     const userJs = fs.readFileSync(path.join(dirA, 'antigravity-remote.user.js'), 'utf8');
     assert.ok(userJs.includes('// @match        https://antigravity.google.com/*'));
-    assert.ok(userJs.includes('// @grant        none'));
+    assert.ok(userJs.includes('// @inject-into  content'));
+    assert.ok(userJs.includes('// @grant        GM_getValue'));
+    assert.ok(userJs.includes('// @grant        GM_setValue'));
+    assert.ok(userJs.includes('// @grant        GM_deleteValue'));
+    assert.equal(resA.buildManifest.userscript.injectInto, 'content');
+
+    // v2.7.0 modular @require host library & .meta.js are deterministic and AST-clean
+    const hostLibA = fs.readFileSync(path.join(dirA, 'antigravity-remote-host.lib.js'), 'utf8');
+    const hostLibB = fs.readFileSync(path.join(dirB, 'antigravity-remote-host.lib.js'), 'utf8');
+    const metaA = fs.readFileSync(path.join(dirA, 'antigravity-remote.meta.js'), 'utf8');
+    const metaB = fs.readFileSync(path.join(dirB, 'antigravity-remote.meta.js'), 'utf8');
+    assert.equal(hostLibA, hostLibB);
+    assert.equal(metaA, metaB);
+    assert.equal(hostLibA.includes('==UserScript=='), false);
+    assert.ok(metaA.includes('// ==UserScript=='));
+    assert.ok(metaA.includes('// @inject-into  content'));
+    assert.equal(verifyRemoteBundleAst(hostLibA).ok, true);
+    assert.doesNotThrow(() => acorn.parse(hostLibA, { ecmaVersion: 'latest', sourceType: 'script' }));
 
     // MV3 unpacked browser extension output is deterministic, AST-clean, and ISOLATED world
     const extManifestRawA = fs.readFileSync(path.join(dirA, 'extension', 'manifest.json'), 'utf8');

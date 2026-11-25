@@ -17,6 +17,7 @@ const { createElectronAddonStorePort } = require('../src/adapters/electron/elect
 const { createElectronTrustPolicyPort } = require('../src/adapters/electron/trust-policy-store');
 const { ANTIGRAVITY_HOST_PROFILE } = require('../src/profiles/antigravity');
 const { ANTIGRAVITY_REMOTE_WEB_PROFILE } = require('../src/profiles/antigravity-remote-web');
+const { startRemoteLanServer } = require('../src/adapters/remote-web/remote-lan-server');
 
 function createRemoteWebHostLifecyclePort() {
   return Object.freeze({
@@ -133,11 +134,112 @@ function runBuildRemoteCommand(rawArgs) {
   return { ok: res.status === 0, exitCode: res.status };
 }
 
+function parseServeRemoteArgs(rawArgs) {
+  const defaultPaths = ANTIGRAVITY_REMOTE_WEB_PROFILE.resolvePaths(process.env);
+  const opts = {
+    distDir: defaultPaths.REMOTE_DIST_DIR,
+    bindHost: '0.0.0.0',
+    advertiseHost: null,
+    port: 0,
+    ttlSec: 300,
+    once: false,
+    json: false,
+  };
+  for (let i = 0; i < rawArgs.length; i += 1) {
+    const a = rawArgs[i];
+    if (a === '--out-dir' && rawArgs[i + 1]) opts.distDir = path.resolve(rawArgs[++i]);
+    else if (a === '--bind' && rawArgs[i + 1]) opts.bindHost = rawArgs[++i];
+    else if (a === '--host' && rawArgs[i + 1]) opts.advertiseHost = rawArgs[++i];
+    else if (a === '--port' && rawArgs[i + 1]) opts.port = Number(rawArgs[++i]) || 0;
+    else if (a === '--ttl' && rawArgs[i + 1]) opts.ttlSec = Number(rawArgs[++i]) || 300;
+    else if (a === '--once') opts.once = true;
+    else if (a === '--json') opts.json = true;
+  }
+  return opts;
+}
+
+async function runServeRemoteCommand(rawArgs) {
+  const opts = parseServeRemoteArgs(rawArgs);
+  const handle = await startRemoteLanServer({
+    distDir: opts.distDir,
+    bindHost: opts.bindHost,
+    advertiseHost: opts.advertiseHost,
+    port: opts.port,
+    ttlSec: opts.ttlSec,
+    once: opts.once,
+    onDownload(info) {
+      if (!opts.json) {
+        process.stdout.write(
+          `[serve-remote] Userscript downloaded (#${info.count}) from ${info.remoteAddress || 'client'}\n`
+        );
+      }
+    },
+    onClose(info) {
+      if (!opts.json) {
+        process.stdout.write(
+          `[serve-remote] Server stopped (${info.reason}, downloads=${info.downloadCount}).\n`
+        );
+      }
+    },
+  });
+
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify({
+        ok: true,
+        installUrl: handle.installUrl,
+        userscriptUrl: handle.userscriptUrl,
+        metaUrl: handle.metaUrl,
+        port: handle.port,
+        ttlSec: handle.ttlSec,
+        once: handle.once,
+        buildSha8: handle.buildSha8,
+        addonCount: handle.addonCount,
+      }) + '\n'
+    );
+  } else {
+    process.stdout.write(
+      [
+        '',
+        'Remote Web Userscript LAN Delivery (ephemeral, 128-bit random token)',
+        `  Direct Userscript URL : ${handle.userscriptUrl}`,
+        `  Mobile Landing Page   : ${handle.installUrl}`,
+        `  Auto-shutdown         : ${handle.ttlSec}s${handle.once ? ' (or after first download)' : ''} | Ctrl+C to stop`,
+        '',
+        handle.qrAscii,
+        '',
+      ].join('\n')
+    );
+  }
+
+  return new Promise((resolve) => {
+    const onSig = () => {
+      process.removeListener('SIGINT', onSig);
+      process.removeListener('SIGTERM', onSig);
+      handle.close('signal').then(resolve);
+    };
+    process.once('SIGINT', onSig);
+    process.once('SIGTERM', onSig);
+    const poll = setInterval(() => {
+      if (handle.isClosed()) {
+        clearInterval(poll);
+        process.removeListener('SIGINT', onSig);
+        process.removeListener('SIGTERM', onSig);
+        resolve({ ok: true, downloads: handle.getDownloadCount() });
+      }
+    }, 200);
+    if (typeof poll.unref === 'function') poll.unref();
+  });
+}
+
 async function main(argv = process.argv.slice(2)) {
   const args = Array.isArray(argv) ? argv.slice() : [];
 
   if (args.includes('--build-remote')) {
     return runBuildRemoteCommand(args);
+  }
+  if (args.includes('--serve-remote')) {
+    return runServeRemoteCommand(args);
   }
 
   let selectedProfileAlias = null;
@@ -170,7 +272,8 @@ async function main(argv = process.argv.slice(2)) {
   if (isHelp) {
     process.stdout.write(
       [
-        '  --build-remote [options]               Build/verify Remote Web Browser Extension & Userscript bundle',
+        '  --build-remote [options]               Build/verify universal Remote Web Userscript, host library & extension bundle',
+        '  --serve-remote [--once] [--ttl 300]    Start ephemeral LAN QR HTTP server to transfer Remote Web Userscript to mobile',
         '  --profile remote-web|desktop|<path>    Built-in profile alias or custom HostProfile module',
       ].join('\n') + '\n'
     );
