@@ -4496,6 +4496,9 @@ const _Uint8Array = Uint8Array;
 const _NumberToString = Function.prototype.call.bind(Number.prototype.toString);
 const _StringPadStart = Function.prototype.call.bind(String.prototype.padStart);
 const _StringSlice = Function.prototype.call.bind(String.prototype.slice);
+const _StringTrim = Function.prototype.call.bind(String.prototype.trim);
+const _ArrayJoin = Function.prototype.call.bind(Array.prototype.join);
+const _MathRound = Math.round;
 const _DateNow = Date.now;
 const _MathRandom = Math.random;
 const _JSONStringify = JSON.stringify;
@@ -4508,6 +4511,63 @@ const _CryptoGetRandomValues =
     : null;
 
 const FORBIDDEN_CLONE_KEYS = new _Set(['__proto__', 'constructor', 'prototype']);
+const UI_GRID_MERGE_STYLE_ATTR = 'data-addon-host-ui-grid-merge';
+const UNSAFE_GRID_MERGE_SELECTOR_RE = /[{};@\r\n\\]|\/\*|\*\/|<\/style/i;
+
+function isSafeGridMergeSelector(selector) {
+  if (typeof selector !== 'string') return false;
+  const trimmed = _StringTrim(selector);
+  if (!trimmed || trimmed.length > 256) return false;
+  return !UNSAFE_GRID_MERGE_SELECTOR_RE.test(trimmed);
+}
+
+function buildUiGridMergeCss(uiGridMerges) {
+  if (!_ArrayIsArray(uiGridMerges) || uiGridMerges.length === 0) return '';
+  const blocks = [];
+  for (let i = 0; i < uiGridMerges.length; i += 1) {
+    const spec = uiGridMerges[i];
+    if (!spec || typeof spec !== 'object' || _ArrayIsArray(spec)) continue;
+    const s = typeof spec.section === 'string' ? _StringTrim(spec.section) : '';
+    const t = typeof spec.secondary === 'string' ? _StringTrim(spec.secondary) : '';
+    if (!isSafeGridMergeSelector(s) || !isSafeGridMergeSelector(t)) continue;
+    const minW = _NumberIsFinite(spec.minWidthPx) && spec.minWidthPx >= 0 ? _MathRound(spec.minWidthPx) : 640;
+    const cols = _NumberIsFinite(spec.columns) && spec.columns >= 2 && spec.columns <= 12 ? _MathRound(spec.columns) : 2;
+    const gap = _NumberIsFinite(spec.gapPx) && spec.gapPx >= 0 ? _MathRound(spec.gapPx) : 8;
+    const hdrGap = _NumberIsFinite(spec.headerGapPx) && spec.headerGapPx >= 0 ? _MathRound(spec.headerGapPx) : 4;
+    const sel = `${s}:has(> div > div.grid):has(> ${t})`;
+    const rule =
+      `@media (min-width: ${minW}px) {` +
+      `${sel} { display: grid; grid-template-columns: repeat(${cols}, minmax(0, 1fr)); gap: ${gap}px; }` +
+      `${sel} > :first-child { grid-column: 1 / -1; margin-bottom: ${hdrGap}px; }` +
+      `${sel} > [role="alert"] { grid-column: 1 / -1; }` +
+      `${sel} > div:has(> div.grid), ${sel} > div:has(> div.grid) > div.grid, ${sel} > ${t} { display: contents; }` +
+      `${sel} > div:has(> div.grid) > :not(div.grid) { grid-column: 1 / -1; order: 10; }` +
+      `}`;
+    _ArrayPush(blocks, rule);
+  }
+  return _ArrayJoin(blocks, '\n');
+}
+
+function applyUiGridMerges(doc, uiGridMerges) {
+  const css = buildUiGridMergeCss(uiGridMerges);
+  if (!css || !doc || typeof doc.createElement !== 'function') return false;
+  const existing =
+    typeof doc.querySelector === 'function' ? doc.querySelector(`style[${UI_GRID_MERGE_STYLE_ATTR}="1"]`) : null;
+  if (existing) {
+    existing.textContent = css;
+    return true;
+  }
+  const target = doc.head || doc.documentElement || doc.body;
+  if (!target || typeof target.appendChild !== 'function') return false;
+  const styleEl = doc.createElement('style');
+  if (typeof styleEl.setAttribute === 'function') {
+    styleEl.setAttribute(UI_GRID_MERGE_STYLE_ATTR, '1');
+    styleEl.setAttribute('data-addon-host-ignore', 'true');
+  }
+  styleEl.textContent = css;
+  target.appendChild(styleEl);
+  return true;
+}
 
 function deepFreezeClone(value, seen = new _WeakMap()) {
   if (value === null || typeof value !== 'object') {
@@ -4743,6 +4803,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       });
       hostSettingsUi.start();
     }
+    const hasUiGridMerges = applyUiGridMerges(doc, cfg.uiGridMerges);
     booted = true;
     return {
       ok: true,
@@ -4751,6 +4812,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       hostProfileId,
       hasBridge: !!hostBridge,
       hasHostSettingsUi: !!hostSettingsUi,
+      hasUiGridMerges,
     };
   }
 
@@ -5309,6 +5371,10 @@ if (typeof globalThis !== 'undefined' && typeof globalThis.document !== 'undefin
 
 module.exports = {
   createRendererKernel,
+  UI_GRID_MERGE_STYLE_ATTR,
+  isSafeGridMergeSelector,
+  buildUiGridMergeCss,
+  applyUiGridMerges,
 };
 
   }

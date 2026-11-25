@@ -264,6 +264,12 @@ const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
       safeInsets: Object.freeze({ top: 36, right: 0, bottom: 0, left: 0 }),
     }),
   }),
+  uiGridMerges: Object.freeze([
+    Object.freeze({
+      section: '[data-testid="customizations-installed-plugins"]',
+      secondary: '[data-testid="cloud-app-cards"]',
+    }),
+  ]),
   allowedUrlProtocols: Object.freeze(['http:', 'https:']),
   allowedUrlHosts: Object.freeze(['127.0.0.1', 'localhost', '::1', '[::1]']),
   legacyPatchMarkers: Object.freeze([

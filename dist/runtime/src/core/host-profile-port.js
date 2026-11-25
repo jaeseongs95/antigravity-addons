@@ -81,6 +81,32 @@ function validateHostProfile(profile) {
       }
     }
   }
+  if (profile.uiGridMerges !== undefined) {
+    if (!Array.isArray(profile.uiGridMerges)) {
+      return { ok: false, reason: 'INVALID_HOST_PROFILE_UI_GRID_MERGES' };
+    }
+    for (let i = 0; i < profile.uiGridMerges.length; i += 1) {
+      const spec = profile.uiGridMerges[i];
+      if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+        return { ok: false, reason: `INVALID_HOST_PROFILE_UI_GRID_MERGE:${i}` };
+      }
+      if (typeof spec.section !== 'string' || !spec.section.trim() || typeof spec.secondary !== 'string' || !spec.secondary.trim()) {
+        return { ok: false, reason: `INVALID_HOST_PROFILE_UI_GRID_MERGE_SELECTORS:${i}` };
+      }
+      if (spec.minWidthPx !== undefined && (typeof spec.minWidthPx !== 'number' || !Number.isFinite(spec.minWidthPx) || spec.minWidthPx < 0)) {
+        return { ok: false, reason: `INVALID_HOST_PROFILE_UI_GRID_MERGE_MIN_WIDTH:${i}` };
+      }
+      if (spec.columns !== undefined && (!Number.isInteger(spec.columns) || spec.columns < 2 || spec.columns > 12)) {
+        return { ok: false, reason: `INVALID_HOST_PROFILE_UI_GRID_MERGE_COLUMNS:${i}` };
+      }
+      if (spec.gapPx !== undefined && (typeof spec.gapPx !== 'number' || !Number.isFinite(spec.gapPx) || spec.gapPx < 0)) {
+        return { ok: false, reason: `INVALID_HOST_PROFILE_UI_GRID_MERGE_GAP:${i}` };
+      }
+      if (spec.headerGapPx !== undefined && (typeof spec.headerGapPx !== 'number' || !Number.isFinite(spec.headerGapPx) || spec.headerGapPx < 0)) {
+        return { ok: false, reason: `INVALID_HOST_PROFILE_UI_GRID_MERGE_HEADER_GAP:${i}` };
+      }
+    }
+  }
   return { ok: true };
 }
 

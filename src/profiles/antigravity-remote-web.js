@@ -162,6 +162,13 @@ const REMOTE_WEB_UI_SURFACES = Object.freeze({
   }),
 });
 
+const REMOTE_WEB_UI_GRID_MERGES = Object.freeze([
+  Object.freeze({
+    section: '[data-testid="customizations-installed-plugins"]',
+    secondary: '[data-testid="cloud-app-cards"]',
+  }),
+]);
+
 const ANTIGRAVITY_REMOTE_WEB_PROFILE = Object.freeze({
   id: REMOTE_WEB_PROFILE_ID,
   displayName: 'Antigravity Remote Web',
@@ -174,6 +181,7 @@ const ANTIGRAVITY_REMOTE_WEB_PROFILE = Object.freeze({
   extraNoTranslateAttributes: Object.freeze(['data-agy-no-translate']),
   uiAnchors: REMOTE_WEB_UI_ANCHORS,
   uiSurfaces: REMOTE_WEB_UI_SURFACES,
+  uiGridMerges: REMOTE_WEB_UI_GRID_MERGES,
   resolvePaths: resolveAntigravityRemoteWebPaths,
   resolveConfigScopes: resolveAntigravityConfigScopes,
 });
@@ -204,6 +212,9 @@ function toBrowserRemoteWebProfile(profile = ANTIGRAVITY_REMOTE_WEB_PROFILE) {
     ),
     uiAnchors: profile.uiAnchors || {},
     uiSurfaces: profile.uiSurfaces || {},
+    uiGridMerges: Object.freeze(
+      Array.isArray(profile.uiGridMerges) ? profile.uiGridMerges.slice() : []
+    ),
   });
 }
 
@@ -215,6 +226,7 @@ module.exports = {
   DEFAULT_STORAGE_NAMESPACE,
   REMOTE_WEB_UI_ANCHORS,
   REMOTE_WEB_UI_SURFACES,
+  REMOTE_WEB_UI_GRID_MERGES,
   resolveAntigravityRemoteWebPaths,
   toBrowserRemoteWebProfile,
   ANTIGRAVITY_REMOTE_WEB_PROFILE,
