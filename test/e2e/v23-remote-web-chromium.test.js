@@ -153,8 +153,21 @@ test(
       assert.equal(built.ok, true);
       assert.equal(built.buildManifest.addonCount, 2);
       assert.deepEqual(built.buildManifest.skippedMainHookPlugins, ['rw-dual-settings']);
+      assert.equal(built.buildManifest.extension.manifestVersion, 3);
+      assert.equal(built.buildManifest.extension.world, 'ISOLATED');
+      assert.equal(built.buildManifest.bookmarklet.emitted, false);
+      assert.equal(fs.existsSync(path.join(distRemoteDir, 'bookmarklet.txt')), false);
 
-      const runtimeBundlePath = path.join(distRemoteDir, 'remote-runtime.cjs');
+      const extManifestPath = path.join(distRemoteDir, 'extension', 'manifest.json');
+      const extContentScriptPath = path.join(distRemoteDir, 'extension', 'content-script.js');
+      const userscriptPath = path.join(distRemoteDir, 'antigravity-remote.user.js');
+      const extManifest = JSON.parse(fs.readFileSync(extManifestPath, 'utf8'));
+      assert.equal(extManifest.manifest_version, 3);
+      assert.equal(extManifest.content_scripts[0].world, 'ISOLATED');
+      assert.equal(extManifest.content_scripts[0].all_frames, false);
+      assert.equal('permissions' in extManifest, false);
+      assert.equal('host_permissions' in extManifest, false);
+
       const runnerPath = path.join(tmpDir, 'chromium-runner.cjs');
       fs.writeFileSync(
         runnerPath,
@@ -167,7 +180,8 @@ app.commandLine.appendSwitch('no-sandbox');
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-dev-shm-usage');
 
-const runtimeCode = fs.readFileSync(${JSON.stringify(runtimeBundlePath)}, 'utf8');
+const extContentCode = fs.readFileSync(${JSON.stringify(extContentScriptPath)}, 'utf8');
+const userscriptCode = fs.readFileSync(${JSON.stringify(userscriptPath)}, 'utf8');
 
 async function waitFor(fn, timeoutMs = 4000) {
   const start = Date.now();
@@ -184,7 +198,7 @@ function startServer(html) {
     const srv = http.createServer((_req, res) => {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
-        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'",
+        'Content-Security-Policy': "require-trusted-types-for 'script'; script-src 'nonce-e2e123' 'unsafe-inline'; object-src 'none'; base-uri 'self'; worker-src 'self'",
       });
       res.end(html);
     });
@@ -216,41 +230,66 @@ app.whenReady().then(async () => {
 
   try {
     await win.loadURL(allowed.origin + '/workspace');
-    await win.webContents.executeJavaScript(runtimeCode);
+    // Inject MV3 extension content-script.js into Chromium Isolated World 998 under strict TrustedTypes + nonce CSP
+    await win.webContents.executeJavaScriptInIsolatedWorld(998, [{ code: extContentCode }]);
 
-    const firstBoot = await win.webContents.executeJavaScript(
+    const firstBoot = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+      {
+        code:
+          '(async () => {' +
+          'const res = await globalThis.__addonHostRemoteRuntime.bootRemoteWebHost({ allowedOrigins: [' +
+          JSON.stringify(allowed.origin) +
+          '], allowLoopbackHttp: true });' +
+          'if (!res.ok) return { ok: false, reason: res.reason };' +
+          'const statusHost = document.querySelector(\\'[data-addon-host-slot="rw-status-addon.bar"]\\');' +
+          'const statusLabel = statusHost && statusHost.shadowRoot && statusHost.shadowRoot.querySelector(".rw-label");' +
+          'const labelColor = statusLabel ? getComputedStyle(statusLabel).color : null;' +
+          'const bodyBg = getComputedStyle(document.body).backgroundColor;' +
+          'const drawerHost = document.getElementById("remote-addon-host-drawer-root");' +
+          'const pill = drawerHost && drawerHost.shadowRoot && drawerHost.shadowRoot.querySelector(".rah-pill");' +
+          'pill.click();' +
+          'const drawerPanel = drawerHost.shadowRoot.querySelector("#rah-drawer-panel");' +
+          'const openedAfterClick = !drawerPanel.hasAttribute("hidden");' +
+          'const tabs = drawerHost.shadowRoot.querySelectorAll(".rah-tab");' +
+          'tabs[1].focus();' +
+          'tabs[1].click();' +
+          'const tabLabel = drawerHost.shadowRoot.querySelector(".rah-tab-label");' +
+          'const tabText = tabLabel ? tabLabel.textContent : null;' +
+          'const saveRes = await res.controller.bridge.port.saveSettings("rw-dual-settings", JSON.stringify({ theme: "midnight", count: 42 }));' +
+          'return {' +
+          '  ok: true,' +
+          '  profileId: res.controller.profileId,' +
+          '  addonStates: res.controller.getAddonStates(),' +
+          '  statusText: statusLabel ? statusLabel.textContent : null,' +
+          '  labelColor,' +
+          '  bodyBg,' +
+          '  openedAfterClick,' +
+          '  tabText,' +
+          '  initTheme: document.documentElement.getAttribute("data-rw-init-theme"),' +
+          '  liveTheme: document.documentElement.getAttribute("data-rw-live-theme"),' +
+          '  saveOk: saveRes.ok,' +
+          '};' +
+          '})()',
+      },
+    ]);
+
+    // Verify MAIN world cannot see ISOLATED world runtime globals
+    const pageWorldSeesGlobals = await win.webContents.executeJavaScript(
+      'Boolean(globalThis.__addonHostKernel || globalThis.__addonHostRemoteRuntime)'
+    );
+
+    // Inject userscript in MAIN world afterwards and prove cross-world duplicate-boot guard prevents double mount
+    await win.webContents.executeJavaScript(userscriptCode);
+    const crossWorldAttempt = await win.webContents.executeJavaScript(
       '(async () => {' +
         'const res = await globalThis.__addonHostRemoteRuntime.bootRemoteWebHost({ allowedOrigins: [' +
         JSON.stringify(allowed.origin) +
         '], allowLoopbackHttp: true });' +
-        'if (!res.ok) return { ok: false, reason: res.reason };' +
-        'const statusHost = document.querySelector(\\'[data-addon-host-slot="rw-status-addon.bar"]\\');' +
-        'const statusLabel = statusHost && statusHost.shadowRoot && statusHost.shadowRoot.querySelector(".rw-label");' +
-        'const labelColor = statusLabel ? getComputedStyle(statusLabel).color : null;' +
-        'const bodyBg = getComputedStyle(document.body).backgroundColor;' +
-        'const drawerHost = document.getElementById("remote-addon-host-drawer-root");' +
-        'const pill = drawerHost && drawerHost.shadowRoot && drawerHost.shadowRoot.querySelector(".rah-pill");' +
-        'pill.click();' +
-        'const drawerPanel = drawerHost.shadowRoot.querySelector("#rah-drawer-panel");' +
-        'const openedAfterClick = !drawerPanel.hasAttribute("hidden");' +
-        'const tabs = drawerHost.shadowRoot.querySelectorAll(".rah-tab");' +
-        'tabs[1].focus();' +
-        'tabs[1].click();' +
-        'const tabLabel = drawerHost.shadowRoot.querySelector(".rah-tab-label");' +
-        'const tabText = tabLabel ? tabLabel.textContent : null;' +
-        'const saveRes = await res.controller.bridge.port.saveSettings("rw-dual-settings", JSON.stringify({ theme: "midnight", count: 42 }));' +
         'return {' +
-        '  ok: true,' +
-        '  profileId: res.controller.profileId,' +
-        '  addonStates: res.controller.getAddonStates(),' +
-        '  statusText: statusLabel ? statusLabel.textContent : null,' +
-        '  labelColor,' +
-        '  bodyBg,' +
-        '  openedAfterClick,' +
-        '  tabText,' +
-        '  initTheme: document.documentElement.getAttribute("data-rw-init-theme"),' +
-        '  liveTheme: document.documentElement.getAttribute("data-rw-live-theme"),' +
-        '  saveOk: saveRes.ok,' +
+        '  ok: res.ok,' +
+        '  alreadyBooted: Boolean(res.alreadyBooted),' +
+        '  crossWorld: Boolean(res.crossWorld),' +
+        '  drawerCount: document.querySelectorAll("#remote-addon-host-drawer-root").length,' +
         '};' +
       '})()'
     );
@@ -276,33 +315,41 @@ app.whenReady().then(async () => {
     }, 3000);
 
     await win.loadURL(allowed.origin + '/workspace');
-    await win.webContents.executeJavaScript(runtimeCode);
-    const afterReload = await win.webContents.executeJavaScript(
-      '(async () => {' +
-        'const res = await globalThis.__addonHostRemoteRuntime.bootRemoteWebHost({ allowedOrigins: [' +
-        JSON.stringify(allowed.origin) +
-        '], allowLoopbackHttp: true });' +
-        'return { ok: res.ok, initThemeAfterReload: document.documentElement.getAttribute("data-rw-init-theme") };' +
-      '})()'
-    );
+    await win.webContents.executeJavaScriptInIsolatedWorld(998, [{ code: extContentCode }]);
+    const afterReload = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+      {
+        code:
+          '(async () => {' +
+          'const res = await globalThis.__addonHostRemoteRuntime.bootRemoteWebHost({ allowedOrigins: [' +
+          JSON.stringify(allowed.origin) +
+          '], allowLoopbackHttp: true });' +
+          'return { ok: res.ok, initThemeAfterReload: document.documentElement.getAttribute("data-rw-init-theme") };' +
+          '})()',
+      },
+    ]);
 
     await win.loadURL(blocked.origin + '/evil');
-    await win.webContents.executeJavaScript(runtimeCode);
-    const onBlocked = await win.webContents.executeJavaScript(
-      '(async () => {' +
-        'const res = await globalThis.__addonHostRemoteRuntime.bootRemoteWebHost({ allowedOrigins: [' +
-        JSON.stringify(allowed.origin) +
-        '], allowLoopbackHttp: true });' +
-        'return {' +
-        '  ok: res.ok,' +
-        '  reason: res.reason,' +
-        '  hasDrawer: Boolean(document.getElementById("remote-addon-host-drawer-root")),' +
-        '  hasSlot: Boolean(document.querySelector("[data-addon-host-owner]")),' +
-        '};' +
-      '})()'
-    );
+    await win.webContents.executeJavaScriptInIsolatedWorld(998, [{ code: extContentCode }]);
+    const onBlocked = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+      {
+        code:
+          '(async () => {' +
+          'const res = await globalThis.__addonHostRemoteRuntime.bootRemoteWebHost({ allowedOrigins: [' +
+          JSON.stringify(allowed.origin) +
+          '], allowLoopbackHttp: true });' +
+          'return {' +
+          '  ok: res.ok,' +
+          '  reason: res.reason,' +
+          '  hasDrawer: Boolean(document.getElementById("remote-addon-host-drawer-root")),' +
+          '  hasSlot: Boolean(document.querySelector("[data-addon-host-owner]")),' +
+          '};' +
+          '})()',
+      },
+    ]);
 
-    process.stdout.write(JSON.stringify({ firstBoot, drawerClosedByEscape, afterReload, onBlocked }) + '\\n');
+    process.stdout.write(
+      JSON.stringify({ firstBoot, pageWorldSeesGlobals, crossWorldAttempt, drawerClosedByEscape, afterReload, onBlocked }) + '\\n'
+    );
     win.destroy();
     allowed.srv.close();
     blocked.srv.close();
@@ -345,6 +392,12 @@ app.whenReady().then(async () => {
       assert.equal(result.firstBoot.liveTheme, 'midnight');
       assert.equal(result.firstBoot.saveOk, true);
       assert.equal(result.firstBoot.addonStates.every((a) => a.status === 'active'), true);
+
+      assert.equal(result.pageWorldSeesGlobals, false, 'ISOLATED world extension must not expose runtime globals to page MAIN world');
+      assert.equal(result.crossWorldAttempt.ok, true);
+      assert.equal(result.crossWorldAttempt.alreadyBooted, true);
+      assert.equal(result.crossWorldAttempt.crossWorld, true);
+      assert.equal(result.crossWorldAttempt.drawerCount, 1);
 
       assert.equal(result.drawerClosedByEscape, true, 'Escape key must close Remote Host drawer');
 

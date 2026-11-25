@@ -6,7 +6,20 @@
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
 > *(Formerly `antigravity-native-addon-host` — existing `addon-host` CLI command, `ADDON_HOST_LOADER_V2` marker, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Single, vendor-independent native desktop & remote web addon host framework (`v2.5.0`) with built-in Settings `Addon Manager` (`애드온 관리`) UI, zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent native desktop & remote web addon host framework (`v2.6.0`) with unpacked MV3 Browser Extension (`world: "ISOLATED"`) + Userscript Remote Web delivery, built-in Settings `Addon Manager` (`애드온 관리`) UI, zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+
+## Key Updates in v2.6.0 (Unpacked MV3 Browser Extension Delivery, Kernel Slimming & CSP/TrustedTypes Hardening)
+
+- **Primary Remote Web Delivery — Local Unpacked MV3 Browser Extension (`remote-dist/extension/`)**:
+  - `addon-host --build-remote` now generates a self-contained Manifest V3 browser extension (`extension/manifest.json` + `extension/content-script.js`) alongside `antigravity-remote.user.js` and `remote-runtime.cjs`.
+  - Runs strictly in Chromium's `"world": "ISOLATED"` (matching Desktop Electron World `998`), natively bypassing `script-src 'nonce-...'` and TrustedTypes injection limits with **zero** `permissions`, `host_permissions`, `background`, or `web_accessible_resources`, and fail-closed HTTPS `matches` derived exclusively from `HostProfile.allowedOrigins` via vendor-neutral `src/adapters/remote-web/extension-manifest.js` (SOLID #0).
+  - Public GitHub remains strictly host-only (`--no-addons`, zero packed peer plugins or local settings snapshots).
+- **64 KB Fail-Closed Bookmarklet Cap & Slimmed Remote Kernel**:
+  - Excludes desktop-only `host-settings-ui.js` (~61.5 KB) from Remote Web bundles (`buildRendererKernelBundleSource({ includeHostSettingsUi: false })`).
+  - Replaces the old 2 MB bookmarklet cap with `BOOKMARKLET_MAX_RUNNABLE_CHARS = 65536`: oversized unrunnable `bookmarklet.txt` files are omitted on build (cleaning up stale legacy files) and never serialized across Electron IPC.
+- **Expanded Acorn AST TrustedTypes Gate & Operability Hardening**:
+  - Expands `verifyRemoteBundleAst` to block `setHTMLUnsafe`, `srcdoc`, `createContextualFragment`, `parseFromString`, string-argument `setTimeout`/`setInterval`, `createElement('script')`, `new Worker`/`SharedWorker`, and inline `setAttribute('on*', ...)`.
+  - Adds cross-world duplicate-boot DOM guard (`data-remote-addon-host-active`), early drawer mount before addon execution with failed-addon error indicators, logged auto-boot failures, Windows `EBUSY`-safe in-place rebuilds, and updated `Settings > Addon Manager` primary/secondary copy actions (`Copy extension path`, `Copy userscript path`, `Copy command`) with a compact 2-step `chrome://extensions` guide.
 
 ## Key Updates in v2.5.0 (Built-in Settings `Addon Manager` UI & Remote Web Visibility Controls)
 

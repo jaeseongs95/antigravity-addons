@@ -10,6 +10,7 @@ const ISOLATED_WORLD_ID = 998;
 const MAIN_INIT_SYMBOL = Symbol.for('antigravity.addonHost.v2.mainInitialized');
 const PRELOAD_SCRIPT_ID = 'antigravity-addon-host-v2-preload';
 const BOOTSTRAP_GLOBAL_NAME = '__addonHostBootstrap';
+const BOOKMARKLET_MAX_RUNNABLE_CHARS = 65536;
 
 const IPC_CHANNELS = Object.freeze({
   VERIFY_FRAME: 'addon-host:v2:verify-frame',
@@ -38,6 +39,7 @@ module.exports = {
   MAIN_INIT_SYMBOL,
   PRELOAD_SCRIPT_ID,
   BOOTSTRAP_GLOBAL_NAME,
+  BOOKMARKLET_MAX_RUNNABLE_CHARS,
   IPC_CHANNELS,
   LIFECYCLE_STATES,
 };

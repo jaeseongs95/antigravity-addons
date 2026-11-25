@@ -78,6 +78,7 @@ const FALLBACK_ANCHOR_KEYS = Object.freeze([
 
 const DRAWER_HOST_ID = 'remote-addon-host-drawer-root';
 const SLOT_DOCK_ID = 'remote-addon-host-slot-dock';
+const ACTIVE_HOST_ATTR = 'data-remote-addon-host-active';
 
 const DRAWER_CSS = `
 :host {
@@ -425,7 +426,8 @@ function createHostDrawerUi({ doc, win, profile, getState }) {
   function render() {
     const state = getState();
     const activeCount = state.addons.filter((a) => a.status === 'active').length;
-    const errorCount = state.errors.length;
+    const failedCount = state.addons.filter((a) => a.status === 'failed').length;
+    const errorCount = Math.max(state.errors.length, failedCount);
 
     setTextSafe(countBadge, `${activeCount}/${state.addons.length}`);
     if (errorCount > 0) {
@@ -445,7 +447,14 @@ function createHostDrawerUi({ doc, win, profile, getState }) {
 
     if (activeTab === 'addons') {
       if (state.addons.length === 0) {
-        bodyEl.appendChild(createElementSafe(doc, 'div', { class: 'rah-empty' }, 'No addons packed in this remote bundle.'));
+        bodyEl.appendChild(
+          createElementSafe(
+            doc,
+            'div',
+            { class: 'rah-empty' },
+            'No addons packed in this remote bundle. Run addon-host --build-remote to pack installed addons.'
+          )
+        );
         return;
       }
       for (let i = 0; i < state.addons.length; i += 1) {
@@ -578,6 +587,17 @@ async function bootRemoteWebHost({
     return { ok: true, alreadyBooted: true, controller: win[instanceKey] };
   }
 
+  const docEl = doc.documentElement || null;
+  const hasActiveAttr = Boolean(
+    docEl && typeof docEl.getAttribute === 'function' && docEl.getAttribute(ACTIVE_HOST_ATTR) === profile.id
+  );
+  const existingDrawer =
+    mountDrawer !== false && typeof doc.getElementById === 'function' ? doc.getElementById(DRAWER_HOST_ID) : null;
+  const hasExistingDrawer = Boolean(existingDrawer && existingDrawer.isConnected !== false);
+  if (hasActiveAttr || hasExistingDrawer) {
+    return { ok: true, alreadyBooted: true, crossWorld: true, controller: null };
+  }
+
   const ttGuard = createScopedTrustedTypesGuard(win, {
     policyName: profile.trustedTypesPolicyName || 'remote-web-addon-host',
     allowedOrigin: verifiedOrigin,
@@ -646,10 +666,26 @@ async function bootRemoteWebHost({
   if (!existingKernelState) {
     KERNEL_BOOT_STATE.set(activeKernel, kernelState);
   }
+  if (docEl && typeof docEl.setAttribute === 'function') {
+    docEl.setAttribute(ACTIVE_HOST_ATTR, profile.id);
+  }
 
   let fallbackDockEl = null;
   if (mountFallbackDock !== false) {
     fallbackDockEl = mountFallbackSlotDock(doc, safeExtraNoTranslateAttributes);
+  }
+
+  if (mountDrawer !== false) {
+    drawerUi = createHostDrawerUi({
+      doc,
+      win,
+      profile,
+      getState: () => ({
+        addons: addonStates,
+        settingsTabs: typeof activeKernel.listSettingsTabs === 'function' ? activeKernel.listSettingsTabs() : [],
+        errors: bridge.getErrors(),
+      }),
+    });
   }
 
   for (let i = 0; i < (packedAddons || []).length; i += 1) {
@@ -684,6 +720,7 @@ async function bootRemoteWebHost({
       record.status = 'failed';
       record.error = err && err.message ? err.message : String(err);
       bridge.port.reportError(meta.pluginId, record.error);
+      if (drawerUi) drawerUi.render();
       continue;
     }
 
@@ -691,6 +728,7 @@ async function bootRemoteWebHost({
       record.status = 'failed';
       record.error = (stageRes && stageRes.reason) || 'ERR_STAGE_HANDLE_FAILED';
       bridge.port.reportError(meta.pluginId, record.error);
+      if (drawerUi) drawerUi.render();
       continue;
     }
 
@@ -718,21 +756,13 @@ async function bootRemoteWebHost({
       }
       activeKernel.clearStagedHandle(runNonce, hostToken);
       activeKernel.disposePlugin(meta.pluginId, hostToken);
-      activeKernel.reportPluginError(meta.pluginId, record.error);
+      if (typeof activeKernel.reportPluginError === 'function') {
+        activeKernel.reportPluginError(meta.pluginId, record.error);
+      } else {
+        bridge.port.reportError(meta.pluginId, record.error);
+      }
     }
-  }
-
-  if (mountDrawer !== false) {
-    drawerUi = createHostDrawerUi({
-      doc,
-      win,
-      profile,
-      getState: () => ({
-        addons: addonStates,
-        settingsTabs: typeof activeKernel.listSettingsTabs === 'function' ? activeKernel.listSettingsTabs() : [],
-        errors: bridge.getErrors(),
-      }),
-    });
+    if (drawerUi) drawerUi.render();
   }
 
   let disposed = false;
@@ -764,6 +794,14 @@ async function bootRemoteWebHost({
       if (fallbackDockEl && fallbackDockEl.parentNode && typeof fallbackDockEl.parentNode.removeChild === 'function') {
         fallbackDockEl.parentNode.removeChild(fallbackDockEl);
       }
+      if (
+        docEl &&
+        typeof docEl.getAttribute === 'function' &&
+        typeof docEl.removeAttribute === 'function' &&
+        docEl.getAttribute(ACTIVE_HOST_ATTR) === profile.id
+      ) {
+        docEl.removeAttribute(ACTIVE_HOST_ATTR);
+      }
       if (kernelState.currentBridge === bridge) {
         kernelState.currentBridge = null;
       }
@@ -789,5 +827,6 @@ module.exports = {
   FALLBACK_ANCHOR_KEYS,
   DRAWER_HOST_ID,
   SLOT_DOCK_ID,
+  ACTIVE_HOST_ATTR,
   bootRemoteWebHost,
 };

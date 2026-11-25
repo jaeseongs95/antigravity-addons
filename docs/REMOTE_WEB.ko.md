@@ -66,10 +66,11 @@ node scripts/build-remote.js
 
 ### 빌드 산출물
 
-- `antigravity-remote.user.js`: Userscript (`@match https://antigravity.google.com/*`, `@grant none`, `@run-at document-idle`)
-- `bookmarklet.txt`: 인코딩된 북마클릿 로더
-- `remote-runtime.cjs`: 테스트 및 임베딩용 자립형 브라우저/Node 런타임 번들
-- `build-manifest.json`: 결정적 SHA-256 파일 목록 및 패킹된 애드온 다이제스트 요약
+- `extension/manifest.json` + `extension/content-script.js`: **1차 권장 (Chrome / Edge / Brave / Arc)** — 자립형 압축해제 MV3 브라우저 확장 (`"world": "ISOLATED"`, `permissions`·`host_permissions`·`background`·`web_accessible_resources` 0건, fail-closed HTTPS `matches`). `chrome://extensions`(Edge 동일) → 개발자 모드 켜기 → **압축해제된 확장 프로그램 로드**로 한 번만 등록하고, 이후 재빌드 시에는 확장 카드의 **새로고침(`↻`)**만 누르면 됩니다.
+- `antigravity-remote.user.js`: **2차 보조 (Firefox / Safari / Tampermonkey / Violentmonkey)** — Userscript (`@match https://antigravity.google.com/*`, `@grant none`, `@run-at document-idle`).
+- `bookmarklet.txt`: 인코딩 길이가 `65,536`자(`BOOKMARKLET_MAX_RUNNABLE_CHARS`) 이하일 때만 생성되며, Chromium 512 KB 북마크 잘림을 막기 위해 초과 번들에서는 fail-closed로 생략됩니다.
+- `remote-runtime.cjs`: 테스트 및 임베딩용 자립형 브라우저/Node 런타임 번들.
+- `build-manifest.json`: 결정적 SHA-256 파일 목록, MV3 확장 메타데이터, 북마클릿 실행 가능 메타데이터 및 패킹된 애드온 다이제스트 요약.
 
 ## 원격 웹 테스트 실행
 

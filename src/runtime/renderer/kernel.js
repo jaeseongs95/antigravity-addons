@@ -355,6 +355,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     regionObserver = createRegionObserver(doc, win);
     settingsTabs = createSettingsTabCoordinator();
     if (
+      typeof createHostSettingsUi === 'function' &&
       cfg.settingsUi &&
       typeof cfg.settingsUi === 'object' &&
       hostBridge &&

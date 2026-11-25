@@ -37,9 +37,18 @@ const {
   createRemoteHostBridge,
 } = require('../../src/adapters/remote-web/remote-host-bridge');
 const { collectRemoteWebAddons } = require('../../src/adapters/remote-web/addon-collector');
-const { bootRemoteWebHost } = require('../../src/adapters/remote-web/remote-bootstrap');
+const { ACTIVE_HOST_ATTR, bootRemoteWebHost } = require('../../src/adapters/remote-web/remote-bootstrap');
+const {
+  EXTENSION_CONTENT_SCRIPT_FILENAME,
+  normalizeMv3Version,
+  buildExtensionMatchPatterns,
+  buildMv3ExtensionManifest,
+} = require('../../src/adapters/remote-web/extension-manifest');
+const { buildRendererKernelBundleSource } = require('../../scripts/build-runtime');
 const {
   REMOTE_BROWSER_MODULES,
+  BOOKMARKLET_MAX_RUNNABLE_CHARS,
+  buildBookmarkletText,
   verifyRemoteBundleAst,
   buildDistRemote,
 } = require('../../scripts/build-remote');
@@ -146,7 +155,8 @@ function makeMockDom(origin = 'https://antigravity.google.com') {
     body,
     createElement: makeEl,
     getElementById(id) {
-      return byId.get(String(id)) || null;
+      const found = byId.get(String(id)) || null;
+      return found && found.isConnected ? found : null;
     },
     querySelector(sel) {
       return documentElement.querySelector(sel);
@@ -623,10 +633,14 @@ test('TC-RW-008: bootRemoteWebHost aborts fail-closed on disallowed origin and r
   okRes.controller.dispose();
 });
 
-test('TC-RW-009: build-remote.js produces deterministic host-only bundles and enforces Acorn AST security gate', () => {
-  // Negative AST security checks (direct + computed + global/Reflect variants — F3)
+test('TC-RW-009: build-remote.js produces deterministic host-only bundles, MV3 extension, omits oversized bookmarklet, and enforces expanded Acorn AST security gate', () => {
+  // Negative AST security checks (direct + computed + global/Reflect + v2.6.0 TrustedTypes/CSP sinks)
   assert.equal(verifyRemoteBundleAst('el.innerHTML = "<b>x</b>";').ok, false);
   assert.equal(verifyRemoteBundleAst('el["outerHTML"] = "x";').ok, false);
+  assert.equal(verifyRemoteBundleAst('el.setHTMLUnsafe("<b>x</b>");').ok, false);
+  assert.equal(verifyRemoteBundleAst('frame.srcdoc = "<p>x</p>";').ok, false);
+  assert.equal(verifyRemoteBundleAst('range.createContextualFragment("<b>x</b>");').ok, false);
+  assert.equal(verifyRemoteBundleAst('parser.parseFromString("<b>x</b>", "text/html");').ok, false);
   assert.equal(verifyRemoteBundleAst('document.write("x");').ok, false);
   assert.equal(verifyRemoteBundleAst('document["write"]("x");').ok, false);
   assert.equal(verifyRemoteBundleAst('document["writeln"]("x");').ok, false);
@@ -642,12 +656,26 @@ test('TC-RW-009: build-remote.js produces deterministic host-only bundles and en
   assert.equal(verifyRemoteBundleAst('trustedTypes.createPolicy("default", {});').ok, false);
   assert.equal(verifyRemoteBundleAst('trustedTypes["createPolicy"]("default", {});').ok, false);
   assert.equal(verifyRemoteBundleAst('trustedTypes.createPolicy(`default`, {});').ok, false);
+  assert.equal(verifyRemoteBundleAst('setTimeout("alert(1)", 0);').ok, false);
+  assert.equal(verifyRemoteBundleAst('window.setInterval(`tick()`, 50);').ok, false);
+  assert.equal(verifyRemoteBundleAst('document.createElement("script");').ok, false);
+  assert.equal(verifyRemoteBundleAst('document.createElementNS("http://www.w3.org/1999/xhtml", "script");').ok, false);
+  assert.equal(verifyRemoteBundleAst('new Worker("worker.js");').ok, false);
+  assert.equal(verifyRemoteBundleAst('new window.SharedWorker("shared.js");').ok, false);
+  assert.equal(verifyRemoteBundleAst('el.setAttribute("onclick", "alert(1)");').ok, false);
+  assert.equal(verifyRemoteBundleAst('el.setAttributeNS(null, "onload", "alert(1)");').ok, false);
 
-  const dirA = makeTmpDir('agy-v23-dist-a-');
-  const dirB = makeTmpDir('agy-v23-dist-b-');
+  // Positive AST checks for legitimate browser calls
+  assert.equal(
+    verifyRemoteBundleAst('setTimeout(function() {}, 10); document.createElement("div"); el.setAttribute("data-onclick", "1");').ok,
+    true
+  );
+
+  const dirA = makeTmpDir('agy-v26-dist-a-');
+  const dirB = makeTmpDir('agy-v26-dist-b-');
   try {
-    const resA = buildDistRemote({ targetDir: dirA, noAddons: true, hostVersion: '2.3.0' });
-    const resB = buildDistRemote({ targetDir: dirB, noAddons: true, hostVersion: '2.3.0' });
+    const resA = buildDistRemote({ targetDir: dirA, noAddons: true, hostVersion: '2.6.0' });
+    const resB = buildDistRemote({ targetDir: dirB, noAddons: true, hostVersion: '2.6.0' });
     assert.equal(resA.ok, true);
     assert.equal(resA.buildManifest.mode, 'host-only');
     assert.equal(resA.buildManifest.addonCount, 0);
@@ -657,30 +685,55 @@ test('TC-RW-009: build-remote.js produces deterministic host-only bundles and en
     assert.ok(userJs.includes('// @match        https://antigravity.google.com/*'));
     assert.ok(userJs.includes('// @grant        none'));
 
-    // F1 regression: bookmarklet.txt MUST decode to syntactically valid, AST-clean, executable JS
-    const bookmarklet = fs.readFileSync(path.join(dirA, 'bookmarklet.txt'), 'utf8').trim();
-    assert.ok(bookmarklet.startsWith('javascript:'));
-    assert.equal(bookmarklet.includes('\n'), false);
-    const decodedBookmarklet = decodeURIComponent(bookmarklet.slice('javascript:'.length));
-    const bmAst = verifyRemoteBundleAst(decodedBookmarklet);
-    assert.equal(bmAst.ok, true, `bookmarklet AST failed: ${JSON.stringify(bmAst.violations)}`);
-    assert.doesNotThrow(() => acorn.parse(decodedBookmarklet, { ecmaVersion: 'latest', sourceType: 'script' }));
+    // MV3 unpacked browser extension output is deterministic, AST-clean, and ISOLATED world
+    const extManifestRawA = fs.readFileSync(path.join(dirA, 'extension', 'manifest.json'), 'utf8');
+    const extManifestRawB = fs.readFileSync(path.join(dirB, 'extension', 'manifest.json'), 'utf8');
+    const extScriptA = fs.readFileSync(path.join(dirA, 'extension', EXTENSION_CONTENT_SCRIPT_FILENAME), 'utf8');
+    const extScriptB = fs.readFileSync(path.join(dirB, 'extension', EXTENSION_CONTENT_SCRIPT_FILENAME), 'utf8');
+    assert.equal(extManifestRawA, extManifestRawB);
+    assert.equal(extScriptA, extScriptB);
+    const extManifest = JSON.parse(extManifestRawA);
+    const expectedContentSha8 = resA.buildManifest.files[`extension/${EXTENSION_CONTENT_SCRIPT_FILENAME}`].slice(0, 8);
+    assert.equal(extManifest.manifest_version, 3);
+    assert.equal(extManifest.version, '2.6.0');
+    assert.equal(extManifest.version_name, `2.6.0 (${expectedContentSha8})`);
+    assert.equal(resA.buildManifest.extension.versionName, extManifest.version_name);
+    assert.equal(extManifest.content_scripts[0].world, 'ISOLATED');
+    assert.deepEqual(extManifest.content_scripts[0].js, [EXTENSION_CONTENT_SCRIPT_FILENAME]);
+    assert.equal('permissions' in extManifest, false);
+    assert.equal('host_permissions' in extManifest, false);
+    assert.equal('background' in extManifest, false);
+    assert.equal('web_accessible_resources' in extManifest, false);
+    const extAst = verifyRemoteBundleAst(extScriptA);
+    assert.equal(extAst.ok, true, `extension content-script AST failed: ${JSON.stringify(extAst.violations)}`);
+    assert.doesNotThrow(() => acorn.parse(extScriptA, { ecmaVersion: 'latest', sourceType: 'script' }));
 
-    const { doc, win } = makeMockDom('https://antigravity.google.com/workspace');
-    const sandbox = {
-      window: win,
-      document: doc,
-      console,
-      setTimeout,
-      clearTimeout,
-      MutationObserver: undefined,
-      URL,
-    };
+    // v2.6.0 fail-closed bookmarklet cap: oversized host-only bundle omits bookmarklet.txt
+    assert.equal(fs.existsSync(path.join(dirA, 'bookmarklet.txt')), false);
+    assert.equal(resA.buildManifest.bookmarklet.emitted, false);
+    assert.equal(resA.buildManifest.bookmarklet.runnable, false);
+    assert.equal(resA.buildManifest.bookmarklet.maxChars, BOOKMARKLET_MAX_RUNNABLE_CHARS);
+    assert.equal(resA.buildManifest.bookmarklet.reason, 'ERR_BOOKMARKLET_EXCEEDS_BROWSER_LIMIT');
+
+    // In-place rebuild prunes stale legacy bookmarklet.txt without deleting extension dir
+    fs.writeFileSync(path.join(dirA, 'bookmarklet.txt'), 'javascript:void(0);', 'utf8');
+    const rebuildRes = buildDistRemote({ targetDir: dirA, noAddons: true, hostVersion: '2.6.0' });
+    assert.equal(rebuildRes.ok, true);
+    assert.equal(fs.existsSync(path.join(dirA, 'bookmarklet.txt')), false);
+    assert.equal(fs.existsSync(path.join(dirA, 'extension', 'manifest.json')), true);
+
+    // Direct small bookmarklet generation remains syntactically valid, AST-clean, and executable
+    const smallBookmarklet = buildBookmarkletText('globalThis.__bmSmoke = 42;').trim();
+    assert.ok(smallBookmarklet.startsWith('javascript:'));
+    assert.equal(smallBookmarklet.includes('\n'), false);
+    assert.ok(smallBookmarklet.length <= BOOKMARKLET_MAX_RUNNABLE_CHARS);
+    const decodedBookmarklet = decodeURIComponent(smallBookmarklet.slice('javascript:'.length));
+    assert.equal(verifyRemoteBundleAst(decodedBookmarklet).ok, true);
+    assert.doesNotThrow(() => acorn.parse(decodedBookmarklet, { ecmaVersion: 'latest', sourceType: 'script' }));
+    const sandbox = {};
     sandbox.globalThis = sandbox;
-    sandbox.self = sandbox;
     vm.runInNewContext(decodedBookmarklet, sandbox, { filename: 'bookmarklet.js' });
-    assert.ok(sandbox.__addonHostRemoteRuntime);
-    assert.equal(typeof sandbox.__addonHostRemoteRuntime.bootRemoteWebHost, 'function');
+    assert.equal(sandbox.__bmSmoke, 42);
   } finally {
     fs.rmSync(dirA, { recursive: true, force: true });
     fs.rmSync(dirB, { recursive: true, force: true });
@@ -928,4 +981,154 @@ test('TC-RW-011: build-remote CLI resolves default trust-policy & config.json pa
     fs.rmSync(tmpHome, { recursive: true, force: true });
     fs.rmSync(tmpOutDir, { recursive: true, force: true });
   }
+});
+
+test('TC-RW-012: extension-manifest.js validates MV3 versions/origins fail-closed and generates vendor-neutral ISOLATED manifests', () => {
+  assert.equal(normalizeMv3Version('2.6.0'), '2.6.0');
+  assert.equal(normalizeMv3Version('v2.6.0-rc.1+build7'), '2.6.0');
+  assert.equal(normalizeMv3Version('1.2.3.4'), '1.2.3.4');
+  for (const badVer of ['', '0.0.0', '70000.0.0', '1.2.3.4.5', 'abc', '1.-2.0']) {
+    assert.throws(
+      () => normalizeMv3Version(badVer),
+      (err) => err instanceof SecurityPolicyError && err.code === 'ERR_INVALID_EXTENSION_VERSION'
+    );
+  }
+
+  assert.deepEqual(buildExtensionMatchPatterns(['https://app.acme.example', 'https://app.acme.example']), [
+    'https://app.acme.example/*',
+  ]);
+  for (const badOrigins of [
+    [],
+    ['http://app.acme.example'],
+    ['https://*.acme.example'],
+    ['https://app.acme.example:8443'],
+    ['https://user:pass@app.acme.example'],
+    ['https://app.acme.example/workspace'],
+    ['not-a-url'],
+  ]) {
+    assert.throws(() => buildExtensionMatchPatterns(badOrigins), SecurityPolicyError);
+  }
+
+  const syntheticProfile = {
+    id: 'acme-remote-web',
+    displayName: 'Acme Remote Web',
+    allowedOrigins: ['https://app.acme.example'],
+  };
+  const manifest = buildMv3ExtensionManifest({
+    profile: syntheticProfile,
+    version: '2.6.0',
+    contentSha8: 'abcd1234',
+  });
+  assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.name, 'Acme Remote Web Addon Host');
+  assert.equal(manifest.version, '2.6.0');
+  assert.equal(manifest.version_name, '2.6.0 (abcd1234)');
+  assert.equal(manifest.content_scripts.length, 1);
+  assert.deepEqual(manifest.content_scripts[0], {
+    matches: ['https://app.acme.example/*'],
+    js: [EXTENSION_CONTENT_SCRIPT_FILENAME],
+    run_at: 'document_idle',
+    world: 'ISOLATED',
+    all_frames: false,
+    match_about_blank: false,
+    match_origin_as_fallback: false,
+  });
+  assert.equal('permissions' in manifest, false);
+  assert.equal('host_permissions' in manifest, false);
+  assert.equal('background' in manifest, false);
+  assert.equal('web_accessible_resources' in manifest, false);
+  assert.equal(/antigravity/i.test(JSON.stringify(manifest)), false);
+});
+
+test('TC-RW-013: Remote Web kernel slimming removes host-settings-ui; bootRemoteWebHost enforces cross-world guard and reports failed addons once', async () => {
+  const desktopKernelSrc = buildRendererKernelBundleSource({ includeHostSettingsUi: true });
+  const remoteKernelSrc = buildRendererKernelBundleSource({ includeHostSettingsUi: false });
+  assert.ok(
+    desktopKernelSrc.length - remoteKernelSrc.length >= 55000,
+    `Expected >= 55KB slimming savings, got ${desktopKernelSrc.length - remoteKernelSrc.length}`
+  );
+  assert.equal(remoteKernelSrc.includes('ah-sync-card'), false);
+  assert.equal(remoteKernelSrc.includes('copy-extension-path'), false);
+  const remoteAst = verifyRemoteBundleAst(remoteKernelSrc);
+  assert.equal(remoteAst.ok, true, `Slimmed kernel AST failed: ${JSON.stringify(remoteAst.violations)}`);
+
+  // Cross-world duplicate-boot guard + failed addon early drawer mount & single error entry
+  const { doc, win: isolatedWin } = makeMockDom('https://antigravity.google.com/workspace');
+  const mainWorldWin = {
+    location: { href: 'https://antigravity.google.com/workspace', origin: 'https://antigravity.google.com' },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+
+  const k1 = createRendererKernel(doc, isolatedWin);
+  const boot1 = await bootRemoteWebHost({
+    doc,
+    win: isolatedWin,
+    profile: ANTIGRAVITY_REMOTE_WEB_PROFILE,
+    kernel: k1,
+    packedAddons: [
+      {
+        pluginMeta: {
+          pluginId: 'boom-addon',
+          displayName: 'Boom Addon',
+          version: '1.0.0',
+          trustLevel: 'restricted',
+          uiSlots: [],
+        },
+        run() {
+          throw new Error('BOOM_IN_ADDON');
+        },
+      },
+    ],
+  });
+  assert.equal(boot1.ok, true);
+  assert.equal(doc.documentElement.getAttribute(ACTIVE_HOST_ATTR), ANTIGRAVITY_REMOTE_WEB_PROFILE.id);
+  assert.equal(boot1.controller.getAddonStates()[0].status, 'failed');
+  assert.equal(boot1.controller.getErrors().length, 1, 'Failed addon error must not be double-reported');
+  assert.ok(boot1.controller.getErrors()[0].detail.includes('BOOM_IN_ADDON'));
+
+  // Pill dot must reflect error state
+  function findByClass(node, cls) {
+    if (!node) return null;
+    const c = typeof node.getAttribute === 'function' ? node.getAttribute('class') || '' : '';
+    if (c.split(/\s+/).includes(cls)) return node;
+    const kids = node.children || [];
+    for (let i = 0; i < kids.length; i += 1) {
+      const hit = findByClass(kids[i], cls);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  const dotEl = findByClass(boot1.controller.drawerUi.shadowRoot, 'rah-dot');
+  assert.ok(dotEl, 'Drawer pill dot must be rendered');
+  assert.ok(String(dotEl.getAttribute('class') || '').includes('has-error'));
+
+  // Second world sharing the same document must detect crossWorld duplicate boot
+  const k2 = createRendererKernel(doc, mainWorldWin);
+  const crossBoot = await bootRemoteWebHost({
+    doc,
+    win: mainWorldWin,
+    profile: ANTIGRAVITY_REMOTE_WEB_PROFILE,
+    kernel: k2,
+    packedAddons: [],
+  });
+  assert.equal(crossBoot.ok, true);
+  assert.equal(crossBoot.alreadyBooted, true);
+  assert.equal(crossBoot.crossWorld, true);
+  assert.equal(crossBoot.controller, null);
+
+  // Disposing first boot clears ACTIVE_HOST_ATTR and allows clean re-boot
+  boot1.controller.dispose();
+  assert.equal(doc.documentElement.getAttribute(ACTIVE_HOST_ATTR), null);
+
+  const bootAfterDispose = await bootRemoteWebHost({
+    doc,
+    win: mainWorldWin,
+    profile: ANTIGRAVITY_REMOTE_WEB_PROFILE,
+    kernel: k2,
+    packedAddons: [],
+  });
+  assert.equal(bootAfterDispose.ok, true);
+  assert.equal(bootAfterDispose.alreadyBooted, false);
+  bootAfterDispose.controller.dispose();
 });

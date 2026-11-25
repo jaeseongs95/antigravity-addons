@@ -66,10 +66,11 @@ Optional flags:
 
 ### Build Outputs
 
-- `antigravity-remote.user.js`: Userscript (`@match https://antigravity.google.com/*`, `@grant none`, `@run-at document-idle`)
-- `bookmarklet.txt`: Encoded bookmarklet launcher
-- `remote-runtime.cjs`: Self-contained browser/Node runtime bundle for testing and embedding
-- `build-manifest.json`: Deterministic SHA-256 file inventory and packed addon digest summary
+- `extension/manifest.json` + `extension/content-script.js`: **Primary (Chrome / Edge / Brave / Arc)** — Self-contained unpacked MV3 browser extension (`"world": "ISOLATED"`, zero `permissions`/`host_permissions`/`background`/`web_accessible_resources`, fail-closed HTTPS `matches`). Load once via `chrome://extensions` → Developer mode → **Load unpacked**, then click **Reload (`↻`)** after future rebuilds.
+- `antigravity-remote.user.js`: **Secondary (Cross-browser / Tampermonkey / Violentmonkey)** — Userscript (`@match https://antigravity.google.com/*`, `@grant none`, `@run-at document-idle`).
+- `bookmarklet.txt`: Emitted **only** when encoded size is `<= 65,536` chars (`BOOKMARKLET_MAX_RUNNABLE_CHARS`); omitted fail-closed for larger bundles to prevent silent Chromium 512 KB bookmark truncation.
+- `remote-runtime.cjs`: Self-contained browser/Node runtime bundle for testing and embedding.
+- `build-manifest.json`: Deterministic SHA-256 file inventory, MV3 extension metadata, bookmarklet eligibility metadata, and packed addon digest summary.
 
 ## Running Remote Web Tests
 

@@ -1,4 +1,4 @@
-# Test Cases (`antigravity-addons` v2.5.0 / v2.0.0)
+# Test Cases (`antigravity-addons` v2.6.0 / v2.0.0)
 
 | Case ID | Module / Boundary | Scenario & Expected Result | Test File |
 | --- | --- | --- | --- |
@@ -46,3 +46,6 @@
 | `TC-GM-E2E` | Real Electron 45 E2E (`uiGridMerges`) | Verifies split 2-column plugin grids (`Swarm` + `GitHub`) merge onto the same row at `>= 640px`, preserve 1-column stack at `< 640px`, keep show-more button below full-width, and mutate zero React DOM parents | `test/e2e/electron-real-runtime.test.js` |
 | `TC-V25-008` | `host-admin-service.js` / `electron-host-lifecycle-port.js` | 3-tier `buildCommand` resolution (`PATH` Windows `PATHEXT`/POSIX `+x` -> `host-cli.json` `node "<cliEntryPath>"` including spaces/Unicode -> fail-closed fallback), symlink/injection rejection, `installHost()` `host-cli.json` persistence with zero leak into `addon-host-loader.js` & zero writes under `plugins/`, and live execution of resolved CLI command | `test/unit/v25-host-settings-ui.test.js` |
 | `TC-V25-009` | `host-admin-service.js` | Detects stale `remote-dist/build-manifest.json` when any remote-enabled (`trusted` or `restricted`) plugin's live `rendererSha256` or `version` changes, sets `needsRebuild: true` & `stalePluginIds`, and clears once rebuilt | `test/unit/v25-host-settings-ui.test.js` |
+| `TC-RW-012` | `extension-manifest.js` | Validates vendor-neutral MV3 `manifest.json` generation (`world: "ISOLATED"`, zero permissions/background/WAR, acyclic `version_name`, `normalizeMv3Version` & `buildExtensionMatchPatterns` fail-closed rejections) | `test/unit/v23-remote-web-adapter.test.js` |
+| `TC-RW-013` | `build-runtime.js`, `remote-bootstrap.js` | Verifies Remote Web kernel slimming (`includeHostSettingsUi: false`), cross-world duplicate-boot DOM guard (`data-remote-addon-host-active` + `dispose()` cleanup), early drawer mount, and failed addon error badge without duplicate error rows | `test/unit/v23-remote-web-adapter.test.js` |
+| `TC-V25-010` | `host-admin-service.js`, `host-settings-ui.js` | Verifies MV3 `hasExtension`/`extensionDir`/`userscriptPath`, 64 KB bookmarklet pre-read IPC cap, `!hasExtension` rebuild trigger, and dynamic Settings UI action hierarchy + 2-step `chrome://extensions` guide | `test/unit/v25-host-settings-ui.test.js` |
