@@ -235,7 +235,7 @@ async function runServeRemoteCommand(rawArgs) {
 async function main(argv = process.argv.slice(2)) {
   const args = Array.isArray(argv) ? argv.slice() : [];
 
-  if (args.includes('--build-remote')) {
+  if (args.includes('--build-remote') || args.includes('--build-addon-userscript')) {
     return runBuildRemoteCommand(args);
   }
   if (args.includes('--serve-remote')) {
@@ -273,7 +273,8 @@ async function main(argv = process.argv.slice(2)) {
     process.stdout.write(
       [
         '  --build-remote [options]               Build/verify universal Remote Web Userscript, host library & extension bundle',
-        '  --serve-remote [--once] [--ttl 300]    Start ephemeral LAN QR HTTP server to transfer Remote Web Userscript to mobile',
+        '  --build-addon-userscript --manifest <f> Build standalone public HTTPS @require <pluginId>.user.js + .meta.js for an addon',
+        '  --serve-remote [--once] [--ttl 300]    Optional same-Wi-Fi LAN QR helper for local one-time .user.js copy',
         '  --profile remote-web|desktop|<path>    Built-in profile alias or custom HostProfile module',
       ].join('\n') + '\n'
     );

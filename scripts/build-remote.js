@@ -34,6 +34,7 @@ const {
   ANTIGRAVITY_REMOTE_WEB_PROFILE,
   toBrowserRemoteWebProfile,
 } = require('../src/profiles/antigravity-remote-web');
+const { validateAddonManifest } = require('../src/core/manifest-validator');
 const { collectRemoteWebAddons } = require('../src/adapters/remote-web/addon-collector');
 const {
   EXTENSION_CONTENT_SCRIPT_FILENAME,
@@ -300,6 +301,265 @@ function normalizeUpdateBaseUrl(rawUrl) {
     throw new Error(`ERR_UPDATE_BASE_URL_UNSAFE:${rawUrl}`);
   }
   return parsed.href.replace(/\/+$/, '');
+}
+
+function normalizeHostLibUrl(rawUrl, profile = ANTIGRAVITY_REMOTE_WEB_PROFILE) {
+  const effective =
+    typeof rawUrl === 'string' && rawUrl.trim()
+      ? rawUrl.trim()
+      : `${normalizeUpdateBaseUrl(profile.defaultUpdateBaseUrl)}/antigravity-remote-host.lib.js`;
+  let parsed;
+  try {
+    parsed = new URL(effective);
+  } catch (_err) {
+    throw new Error(`ERR_INVALID_HOST_LIB_URL:${rawUrl}`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`ERR_HOST_LIB_URL_MUST_BE_HTTPS:${rawUrl}`);
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(`ERR_HOST_LIB_URL_UNSAFE:${rawUrl}`);
+  }
+  return parsed.href;
+}
+
+const CONNECT_HOST_RE =
+  /^(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}|(?:\d{1,3}\.){3}\d{1,3})$/i;
+
+function normalizeConnectHosts(rawHosts) {
+  if (!Array.isArray(rawHosts) || rawHosts.length === 0) return [];
+  const out = [];
+  const seen = new Set();
+  for (let i = 0; i < rawHosts.length; i += 1) {
+    const h = String(rawHosts[i] || '').trim().toLowerCase();
+    if (!h) continue;
+    if (!CONNECT_HOST_RE.test(h)) {
+      throw new Error(`ERR_INVALID_CONNECT_HOST:${rawHosts[i]}`);
+    }
+    if (!seen.has(h)) {
+      seen.add(h);
+      out.push(h);
+    }
+  }
+  return out;
+}
+
+function buildModularAddonUserscriptMetaHeader({
+  profile = ANTIGRAVITY_REMOTE_WEB_PROFILE,
+  manifest,
+  hostLibUrl,
+  updateBaseUrl = null,
+  connectHosts = [],
+  grantXhr = false,
+  namespace = 'https://github.com/jaeseongs95/antigravity-addons',
+} = {}) {
+  const browserProfile = toBrowserRemoteWebProfile(profile);
+  const matchLines = (browserProfile.allowedOrigins || []).map((origin) => `// @match        ${origin}/*`);
+  const safeHostLibUrl = normalizeHostLibUrl(hostLibUrl, profile);
+  const safeBaseUrl = normalizeUpdateBaseUrl(updateBaseUrl);
+  const safeConnects = normalizeConnectHosts(connectHosts);
+  const grants = grantXhr ? [...USERSCRIPT_GRANTS, 'GM_xmlhttpRequest'] : USERSCRIPT_GRANTS.slice();
+  const pluginId = manifest.pluginId;
+  const displayName = String(manifest.displayName || pluginId).replace(/[\r\n]+/g, ' ').trim();
+  const version = String(manifest.version || '1.0.0').replace(/[\r\n]+/g, ' ').trim();
+  const userscriptFileName = `${pluginId}.user.js`;
+  const metaFileName = `${pluginId}.meta.js`;
+
+  const lines = [
+    '// ==UserScript==',
+    `// @name         ${displayName} (${browserProfile.displayName})`,
+    `// @namespace    ${namespace}`,
+    `// @version      ${version}`,
+    `// @description  Modular AddonManifest.v2 Remote Web Userscript for ${displayName}`,
+    ...matchLines,
+    '// @run-at       document-idle',
+    '// @inject-into  content',
+    `// @require      ${safeHostLibUrl}`,
+    ...grants.map((grant) => `// @grant        ${grant}`),
+    ...safeConnects.map((host) => `// @connect      ${host}`),
+  ];
+  if (safeBaseUrl) {
+    lines.push(`// @updateURL    ${safeBaseUrl}/${metaFileName}`);
+    lines.push(`// @downloadURL  ${safeBaseUrl}/${userscriptFileName}`);
+  }
+  lines.push('// ==/UserScript==', '');
+  return lines.join('\n');
+}
+
+function buildAddonUserscript({
+  manifestPath,
+  pluginDir = null,
+  targetDir,
+  profile = ANTIGRAVITY_REMOTE_WEB_PROFILE,
+  hostLibUrl = null,
+  updateBaseUrl = null,
+  connectHosts = [],
+  grantXhr = false,
+  namespace = 'https://github.com/jaeseongs95/antigravity-addons',
+} = {}) {
+  if (typeof manifestPath !== 'string' || !manifestPath.trim()) {
+    throw new Error('ERR_MANIFEST_PATH_REQUIRED');
+  }
+  if (typeof targetDir !== 'string' || !targetDir.trim()) {
+    throw new Error('ERR_TARGET_DIR_REQUIRED');
+  }
+  const absManifest = path.resolve(manifestPath);
+  const rawManifest = JSON.parse(fs.readFileSync(absManifest, 'utf8'));
+  const validation = validateAddonManifest(rawManifest, {
+    hostProfile: profile.id,
+    compatibleHostProfiles: profile.compatibleHostProfiles,
+    hostCapabilities: profile.capabilities,
+    strictTrustPolicy: true,
+    checkFilesExist: false,
+  });
+  if (!validation.ok) {
+    throw new Error(
+      `ERR_INVALID_ADDON_MANIFEST:${validation.reason || 'INVALID'}:${JSON.stringify(validation.errors || [])}`
+    );
+  }
+  const manifest = validation.manifest;
+  const caps = Array.isArray(manifest.capabilities) ? manifest.capabilities : [];
+  if (!caps.includes('renderer')) {
+    throw new Error(`ERR_UNSUPPORTED_HOST_CAPABILITY:${manifest.pluginId}:renderer_required`);
+  }
+  const relRenderer = manifest.entry && typeof manifest.entry.rendererScript === 'string' ? manifest.entry.rendererScript : '';
+  if (!relRenderer) {
+    throw new Error(`ERR_RENDERER_SCRIPT_REQUIRED:${manifest.pluginId}`);
+  }
+  const resolvedPluginDir = pluginDir ? path.resolve(pluginDir) : path.dirname(absManifest);
+  const absRenderer = path.resolve(resolvedPluginDir, relRenderer);
+  const relCheck = path.relative(resolvedPluginDir, absRenderer);
+  if (relCheck.startsWith('..') || path.isAbsolute(relCheck)) {
+    throw new Error(`ERR_RENDERER_SCRIPT_OUTSIDE_PLUGIN_DIR:${relRenderer}`);
+  }
+  const realPluginDir = fs.realpathSync(resolvedPluginDir);
+  const realRenderer = fs.realpathSync(absRenderer);
+  const realRelCheck = path.relative(realPluginDir, realRenderer);
+  if (realRelCheck.startsWith('..') || path.isAbsolute(realRelCheck)) {
+    throw new Error(`ERR_RENDERER_SCRIPT_OUTSIDE_PLUGIN_DIR:${relRenderer}`);
+  }
+  const rendererBuf = fs.readFileSync(realRenderer);
+  const rendererSha256 = sha256Hex(rendererBuf);
+  const rendererSource = toLf(rendererBuf.toString('utf8'));
+
+  const safeHostLibUrl = normalizeHostLibUrl(hostLibUrl, profile);
+  const safeBaseUrl = normalizeUpdateBaseUrl(updateBaseUrl);
+  const safeConnects = normalizeConnectHosts(connectHosts);
+
+  const skippedCapabilities = Array.isArray(validation.skippedCapabilities)
+    ? validation.skippedCapabilities.slice()
+    : caps.filter((c) => c !== 'renderer');
+  const effectiveTrustLevel = validation.trustLevel || manifest.trustLevel || 'restricted';
+  const pluginMeta = {
+    schemaVersion: 2,
+    sourceSchemaVersion: manifest.sourceSchemaVersion || manifest.schemaVersion || 2,
+    pluginId: manifest.pluginId,
+    displayName: manifest.displayName || manifest.pluginId,
+    version: manifest.version || '1.0.0',
+    trustLevel: effectiveTrustLevel,
+    capabilities: ['renderer'],
+    skippedCapabilities,
+    hasDocumentTransformSlot: Boolean(validation.hasDocumentTransformSlot),
+    hasSettingsBridge: Boolean(validation.hasSettingsBridge && effectiveTrustLevel === 'trusted'),
+    hasConfigBridge: false,
+    configScopes: [],
+    uiSlots: Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [],
+    isolation: manifest.isolation || {},
+  };
+  const settingsSpec =
+    pluginMeta.hasSettingsBridge && manifest.settingsBridge && manifest.settingsBridge.fileName
+      ? {
+          fileName: manifest.settingsBridge.fileName,
+          maxBytes: manifest.settingsBridge.maxBytes,
+        }
+      : null;
+
+  const metaSource = buildModularAddonUserscriptMetaHeader({
+    profile,
+    manifest,
+    hostLibUrl: safeHostLibUrl,
+    updateBaseUrl: safeBaseUrl,
+    connectHosts: safeConnects,
+    grantXhr: Boolean(grantXhr),
+    namespace,
+  });
+
+  const addonLiteral = serializePackedAddonLiteral({
+    pluginMeta,
+    settingsSpec,
+    initialSettingsSnapshot: null,
+    rendererSha256,
+    rendererSource,
+  });
+
+  const bodySource = `'use strict';
+(function() {
+  var rt = typeof globalThis !== 'undefined' ? globalThis.__addonHostRemoteRuntime : null;
+  if (!rt || typeof rt.registerAddon !== 'function' || typeof rt.bootRemoteWebHost !== 'function') {
+    if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+      console.warn('[addon-host-remote] @require host library missing for ${manifest.pluginId}');
+    }
+    return;
+  }
+  rt.registerAddon(${addonLiteral});
+  Promise.resolve(rt.bootRemoteWebHost())
+    .then(function(res) {
+      if (res && res.ok === false && typeof console !== 'undefined' && typeof console.warn === 'function') {
+        console.warn('[addon-host-remote] boot skipped (${manifest.pluginId}):', res.reason || 'UNKNOWN', res.error || '');
+      }
+    })
+    .catch(function(err) {
+      if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+        console.warn('[addon-host-remote] boot failed (${manifest.pluginId}):', err && err.message ? err.message : String(err));
+      }
+    });
+})();
+`;
+
+  const userscriptSource = `${metaSource}${bodySource}`;
+  const astCheck = verifyRemoteBundleAst(userscriptSource);
+  if (!astCheck.ok) {
+    throw new Error(`MODULAR_ADDON_USERSCRIPT_AST_VIOLATIONS:${JSON.stringify(astCheck.violations)}`);
+  }
+
+  const userscriptFile = `${manifest.pluginId}.user.js`;
+  const metaFile = `${manifest.pluginId}.meta.js`;
+  const outputFiles = {
+    [userscriptFile]: userscriptSource,
+    [metaFile]: metaSource,
+  };
+  syncRemoteDistInPlace(targetDir, outputFiles);
+
+  const fileNames = Object.keys(outputFiles).sort();
+  const fileHashes = {};
+  const rootHasher = crypto.createHash('sha256');
+  for (const name of fileNames) {
+    const h = sha256Hex(fs.readFileSync(path.join(targetDir, name)));
+    fileHashes[name] = h;
+    rootHasher.update(name + '\0' + h + '\n', 'utf8');
+  }
+  const buildSha256 = rootHasher.digest('hex');
+  const buildSha8 = buildSha256.slice(0, 8);
+
+  const buildManifest = {
+    schemaVersion: 1,
+    mode: 'modular-addon-userscript',
+    profileId: profile.id,
+    pluginId: manifest.pluginId,
+    version: manifest.version,
+    rendererSha256,
+    hostLibUrl: safeHostLibUrl,
+    updateBaseUrl: safeBaseUrl,
+    connectHosts: safeConnects,
+    grantXhr: Boolean(grantXhr),
+    buildSha8,
+    buildSha256,
+    userscriptFile,
+    metaFile,
+    files: fileHashes,
+  };
+  writeFileLf(path.join(targetDir, 'build-manifest.json'), JSON.stringify(buildManifest, null, 2) + '\n');
+  return { ok: true, buildManifest, userscriptPath: path.join(targetDir, userscriptFile), metaPath: path.join(targetDir, metaFile) };
 }
 
 const USERSCRIPT_GRANTS = Object.freeze(['GM_getValue', 'GM_setValue', 'GM_deleteValue']);
@@ -825,6 +1085,13 @@ function buildDistRemote({
 
 function parseCliArgs(argv) {
   const opts = {
+    buildAddonUserscript: false,
+    manifestPath: null,
+    pluginDir: null,
+    hostLibUrl: null,
+    connectHosts: [],
+    grantXhr: false,
+    namespace: 'https://github.com/jaeseongs95/antigravity-addons',
     check: false,
     noAddons: false,
     includeSettingsSnapshots: false,
@@ -840,7 +1107,14 @@ function parseCliArgs(argv) {
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === '--check') opts.check = true;
+    if (a === '--build-addon-userscript') opts.buildAddonUserscript = true;
+    else if (a === '--manifest' && argv[i + 1]) opts.manifestPath = path.resolve(argv[++i]);
+    else if (a === '--plugin-dir' && argv[i + 1]) opts.pluginDir = path.resolve(argv[++i]);
+    else if (a === '--host-lib-url' && argv[i + 1]) opts.hostLibUrl = argv[++i];
+    else if (a === '--connect' && argv[i + 1]) opts.connectHosts.push(argv[++i]);
+    else if (a === '--grant-xhr') opts.grantXhr = true;
+    else if (a === '--namespace' && argv[i + 1]) opts.namespace = argv[++i];
+    else if (a === '--check') opts.check = true;
     else if (a === '--no-addons') opts.noAddons = true;
     else if (a === '--include-settings-snapshots') opts.includeSettingsSnapshots = true;
     else if (a === '--include-offline-config-bridge') opts.includeOfflineConfigBridge = true;
@@ -858,6 +1132,61 @@ function parseCliArgs(argv) {
 
 function main() {
   const opts = parseCliArgs(process.argv.slice(2));
+
+  if (opts.buildAddonUserscript) {
+    if (opts.check) {
+      const tmpA = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-addon-us-a-'));
+      const tmpB = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-addon-us-b-'));
+      try {
+        const resA = buildAddonUserscript({ ...opts, targetDir: tmpA });
+        const resB = buildAddonUserscript({ ...opts, targetDir: tmpB });
+        if (resA.buildManifest.buildSha256 !== resB.buildManifest.buildSha256) {
+          process.stderr.write(
+            `ADDON_USERSCRIPT_NONDETERMINISTIC: ${resA.buildManifest.buildSha256} !== ${resB.buildManifest.buildSha256}\n`
+          );
+          process.exitCode = 1;
+          return;
+        }
+        process.stdout.write(
+          JSON.stringify({
+            ok: true,
+            mode: 'check',
+            bundleMode: resA.buildManifest.mode,
+            pluginId: resA.buildManifest.pluginId,
+            buildSha8: resA.buildManifest.buildSha8,
+            buildSha256: resA.buildManifest.buildSha256,
+            astViolations: 0,
+          }) + '\n'
+        );
+      } finally {
+        try {
+          fs.rmSync(tmpA, { recursive: true, force: true });
+        } catch (_eA) {}
+        try {
+          fs.rmSync(tmpB, { recursive: true, force: true });
+        } catch (_eB) {}
+      }
+      return;
+    }
+    const built = buildAddonUserscript({ ...opts, targetDir: opts.outDir });
+    process.stdout.write(
+      JSON.stringify({
+        ok: true,
+        mode: 'build',
+        bundleMode: built.buildManifest.mode,
+        pluginId: built.buildManifest.pluginId,
+        version: built.buildManifest.version,
+        outDir: opts.outDir,
+        userscriptPath: built.userscriptPath,
+        metaPath: built.metaPath,
+        hostLibUrl: built.buildManifest.hostLibUrl,
+        updateBaseUrl: built.buildManifest.updateBaseUrl,
+        buildSha8: built.buildManifest.buildSha8,
+        astViolations: 0,
+      }) + '\n'
+    );
+    return;
+  }
 
   if (opts.check) {
     const tmpA = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-build-remote-a-'));
@@ -949,14 +1278,18 @@ module.exports = {
   BOOKMARKLET_MAX_RUNNABLE_CHARS,
   USERSCRIPT_GRANTS,
   normalizeUpdateBaseUrl,
+  normalizeHostLibUrl,
+  normalizeConnectHosts,
   buildRemoteRuntimeBundleSource,
   buildHostLibrarySource,
   buildUserscriptMetaHeader,
+  buildModularAddonUserscriptMetaHeader,
   buildUserscriptSource,
   buildExtensionContentScriptSource,
   buildBookmarkletText,
   verifyRemoteBundleAst,
   syncRemoteDistInPlace,
   buildDistRemote,
+  buildAddonUserscript,
   parseCliArgs,
 };

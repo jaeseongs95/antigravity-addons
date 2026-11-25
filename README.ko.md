@@ -6,7 +6,16 @@
 > **언어**: [English (README.md)](./README.md) | 한국어  
 > *(구 `antigravity-native-addon-host` — 기존 `addon-host` CLI 명령, `ADDON_HOST_LOADER_V2` 패치 마커 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**크로스 디바이스 범용 Userscript(`@inject-into content` + `GM_*` 저장소 + 모듈형 `@require` 호스트 라이브러리) · 무의존성 LAN QR 모바일 전송(`--serve-remote`) · 보조 MV3 확장 기반 원격 웹 배포, 내장 설정 화면 `애드온 관리(Addon Manager)` UI, 무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.7.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+**1클릭 공개 HTTPS 모듈형 `@require` Userscript 배포·다중 샌드박스 공존(`--build-addon-userscript`), 휴대용 Userscript·보조 MV3 번들링(`--build-remote`), 내장 설정 화면 `애드온 관리(Addon Manager)` UI, 무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.8.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+
+## v2.8.0 주요 업데이트 (공개 HTTPS 모듈형 애드온 Userscript · 다중 샌드박스 공존)
+
+- **다중 Userscript 샌드박스 자동 공존 (사설 IP·로컬 PC 불필요, 진짜 1클릭 공개 HTTPS 배포)**:
+  - `src/adapters/remote-web/remote-bootstrap.js`에 플러그인별 DOM 점유 추적(`data-remote-addon-host-plugins`)과 피어 드로어 투영을 추가했습니다. Tampermonkey/Violentmonkey/Safari Userscripts에서 서로 다른 샌드박스로 실행되는 여러 `@require` 애드온이 **단일 Shadow-DOM 드로어**(`drawerCount === 1`, 합산 `active/total` 배지, 샌드박스별 클릭 가능한 Quick Action·Settings Tab, `hostToken`·`GM_*` 저장소 완전 격리, 독립 해제) 안에서 자동 공존하며, 기존 동일 번들 교차 월드 중복 부트 가드(`TC-RW-E2E`)도 100% 유지됩니다.
+- **표준 모듈형 애드온 Userscript 빌더 (`addon-host --build-addon-userscript`)**:
+  - `scripts/build-remote.js`(`buildAddonUserscript`)와 `bin/addon-host.js`를 확장해 어떤 `AddonManifest.v2` 플러그인 저장소든 Acorn AST 보안 검증을 통과한 `<pluginId>.user.js` + `<pluginId>.meta.js`(공개 HTTPS `@require antigravity-remote-host.lib.js`, 선택적 HTTPS `@updateURL`/`@downloadURL`, 엄격한 `@connect` 호스트 허용 목록 및 `--grant-xhr`)를 결정적으로 생성할 수 있습니다.
+- **현실 기준 설정 UI 및 문서 정비**:
+  - 외부 네트워크(LTE/5G·타 기기·PC 꺼짐)에서는 공개 HTTPS 애드온 `.user.js` 1클릭 설치 또는 단일 `.user.js` 파일 1회 가져오기가 1차 경로임을 명확히 하고, `--serve-remote`는 같은 Wi-Fi + 방화벽 개방 환경용 로컬 복사 보조 도구로 정확히 구분했습니다.
 
 ## v2.7.0 주요 업데이트 (범용 원격 웹 전달 · 인터랙티브 모바일 드로어 · 모듈형 `@require` 호스트)
 

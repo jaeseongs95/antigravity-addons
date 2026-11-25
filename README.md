@@ -6,7 +6,16 @@
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
 > *(Formerly `antigravity-native-addon-host` — existing `addon-host` CLI command, `ADDON_HOST_LOADER_V2` marker, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Single, vendor-independent native desktop & universal remote web addon host framework (`v2.7.0`) with cross-device Userscript (`@inject-into content` + `GM_*` storage + modular `@require` host library) + 0-dep LAN QR mobile transfer (`--serve-remote`) + secondary unpacked MV3 extension, built-in Settings `Addon Manager` (`애드온 관리`) UI, zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent native desktop & universal remote web addon host framework (`v2.8.0`) with 1-click public HTTPS modular `@require` Userscript delivery + multi-sandbox coexistence (`--build-addon-userscript`), portable Userscript/MV3 bundling (`--build-remote`), built-in Settings `Addon Manager` (`애드온 관리`) UI, zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+
+## Key Updates in v2.8.0 (Public HTTPS Modular Addon Userscripts & Multi-Sandbox Coexistence)
+
+- **Multi-Userscript Sandbox Coexistence (Zero Private IP, True 1-Click Public HTTPS)**:
+  - Upgrades `src/adapters/remote-web/remote-bootstrap.js` with per-plugin DOM ownership (`data-remote-addon-host-plugins`) and peer drawer projection: multiple independent `@require` Userscripts running in separate Tampermonkey/Violentmonkey/Safari sandboxes automatically coexist inside a **single unified Shadow-DOM drawer** (`drawerCount === 1`, aggregate `active/total` pill badge, clickable Quick Actions & Settings Tabs per sandbox, strict per-sandbox `hostToken` and `GM_*` isolation, independent disposal) while preserving the cross-world duplicate-bundle guard (`TC-RW-E2E`).
+- **Standard Modular Addon Userscript Builder (`addon-host --build-addon-userscript`)**:
+  - Adds `buildAddonUserscript` (`scripts/build-remote.js`) and CLI routing (`bin/addon-host.js`) so any `AddonManifest.v2` plugin repository can deterministically emit Acorn-AST-verified `<pluginId>.user.js` + `<pluginId>.meta.js` linked via HTTPS `@require` to `antigravity-remote-host.lib.js` with optional HTTPS `@updateURL`/`@downloadURL`, strict `@connect` host allowlists, and optional `GM_xmlhttpRequest`.
+- **Honest Settings UI & Docs**:
+  - Clarifies that public HTTPS per-addon `.user.js` releases (and one-time cloud/messenger import of locally packed `.user.js`) work anywhere (LTE/5G/external devices with home PC off), while `--serve-remote` is an optional same-Wi-Fi local transfer helper only.
 
 ## Key Updates in v2.7.0 (Universal Cross-Device Remote Web Delivery, Interactive Mobile Drawer & Modular `@require` Host)
 

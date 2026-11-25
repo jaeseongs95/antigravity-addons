@@ -2,18 +2,26 @@
 
 [English Documentation](./REMOTE_WEB.md)
 
-`antigravity-addons` v2.7.0은 공용 렌더러 커널(`src/runtime/renderer/kernel.js`)과 `HostBridgePort` 계약 위에 통합된 **범용 원격 웹 호스트**(`antigravity-remote-web`)를 제공합니다.
+`antigravity-addons` v2.8.0은 공용 렌더러 커널(`src/runtime/renderer/kernel.js`)과 `HostBridgePort` 계약 위에 통합된 **범용 원격 웹 호스트**(`antigravity-remote-web`)를 제공합니다.
 
-핵심 목표는 **데스크톱·태블릿·모바일의 다양한 브라우저 환경에서 범용적으로 사용할 수 있는 원격 웹 전달**입니다. `antigravity-desktop`용으로 개발된 `AddonManifest.v2` 준수 렌더러 플러그인은 별도의 원격 전용 API로 다시 작성하지 않아도 Antigravity Remote Web(`https://antigravity.google.com/*`)에서 동작합니다.
+핵심 목표는 **외부 네트워크(LTE/5G, 타 기기, 사설 IP 불필요)를 포함한 모든 브라우저 환경에서 공개 HTTPS 1클릭 Userscript 설치 및 다중 애드온 공존**입니다. `antigravity-desktop`용으로 개발된 `AddonManifest.v2` 준수 렌더러 플러그인은 `addon-host --build-addon-userscript` 한 번으로 공개 HTTPS `@require` Userscript로 배포할 수 있습니다.
 
-## 플랫폼 지원 매트릭스 (범용 Userscript 1차)
+## 배포 방식 비교 (공개 HTTPS 1차)
 
-| 환경 | 1차 권장 방식 | 비고 및 실제 제약 |
+| 방식 | 동작 네트워크 | 설치 흐름 | 용도 |
+| --- | --- | --- | --- |
+| **1차: 공개 HTTPS 개별 애드온 `.user.js` (`@require`)** | **어디서나** (LTE/5G, 회사/외부 PC, 모바일, PC 꺼짐 OK) | 각 애드온 GitHub Release의 `.user.js` HTTPS 링크 1클릭 → 설치 및 자동 업데이트 | **표준 범용 배포** (다중 애드온 별도 샌드박스 자동 공존) |
+| **2차: 로컬 단일 번들 `.user.js` 파일 이동** | 설치 후 **어디서나** (PC 불필요) | `addon-host --build-remote`로 만든 `antigravity-remote.user.js` 파일 1개를 클라우드·메신저로 옮겨 Import | 비공개·로컬 개발 애드온 사용 시 |
+| **보조: 같은 Wi-Fi LAN QR (`--serve-remote`)** | **같은 Wi-Fi + 방화벽 개방 시에만** (사설 IP) | 같은 공유기 내 기기로 `.user.js`를 1회 복사하는 로컬 보조 도구 | 로컬 파일 수동 전송이 번거로울 때 |
+| **보조: 데스크톱 MV3 확장 (`remote-dist/extension/`)** | 로컬 PC Chromium 전용 | `chrome://extensions` 압축해제 로드 (`world: "ISOLATED"`) | Userscript 관리자 미설치 데스크톱 Chrome/Edge |
+
+## 플랫폼 지원 매트릭스
+
+| 환경 | 권장 Userscript 관리자 | 비고 및 실제 제약 |
 | --- | --- | --- |
-| **iOS / iPadOS Safari** | **Userscripts** (무료 오픈소스 App Store 확장) + `antigravity-remote.user.js` | Safari 확장으로 동작. *홈 화면에 추가한 독립 실행 PWA 웹앱에서는 Safari 확장이 실행되지 않습니다.* |
-| **Android Firefox** | **Violentmonkey** 확장 + `antigravity-remote.user.js` | 모바일 Firefox 애드온 스토어에서 직접 설치 가능. *순정 Android Chrome은 확장·Userscript를 지원하지 않습니다.* |
-| **macOS / Windows / Linux 브라우저** (Chrome, Edge, Firefox, Safari, Brave, Arc) | **Violentmonkey / Tampermonkey / Userscripts** + `antigravity-remote.user.js` | `@inject-into content`로 격리 월드 실행, `GM_getValue`/`GM_setValue` 영속 저장, 선택적 `@updateURL`/`@downloadURL` 자동 갱신 지원 |
-| **로컬 데스크톱 Chrome / Edge (2차 보조)** | `remote-dist/extension/` 압축해제형 MV3 확장 | Userscript 매니저 없이 로컬 PC에서 바로 쓰기 위한 보조 수단 (`world: "ISOLATED"`) |
+| **iOS / iPadOS Safari** | **Userscripts** (무료 오픈소스 App Store 확장) | Safari 확장으로 동작. *홈 화면에 추가한 독립 실행 PWA 웹앱에서는 Safari 확장이 실행되지 않습니다.* |
+| **Android Firefox** | **Violentmonkey** 확장 | 모바일 Firefox 애드온 스토어에서 직접 설치 가능. *순정 Android Chrome은 확장·Userscript를 지원하지 않습니다.* |
+| **macOS / Windows / Linux 브라우저** (Chrome, Edge, Firefox, Safari, Brave, Arc) | **Violentmonkey / Tampermonkey / Userscripts** | `@inject-into content` 격리 실행, `GM_getValue`/`GM_setValue` 영속 저장, `@updateURL`/`@downloadURL` HTTPS 자동 갱신 및 다중 애드온 단일 드로어 공존 지원 |
 
 > **참고 (검증 경계)**: 북마클릿(`javascript:`)은 `antigravity.google.com`의 3중 교차 CSP(`script-src 'nonce-...'` + `require-trusted-types-for 'script'`) 및 브라우저 길이 상한 때문에 차단되므로 1차 수단이 아닙니다. 또한 로그인 후 동적 DOM 셀렉터와 브라우저 내 외부 번역 API CORS 정책은 실제 로그인 세션에 따라 달라질 수 있습니다.
 
@@ -48,9 +56,24 @@
    - `mainHook` 전용 애드온은 fail-closed(`ERR_UNSUPPORTED_HOST_CAPABILITY`)로 차단됩니다.
 5. **SHA-256 신뢰 피닝**: `trustLevel: "trusted"` 또는 특권 기능(`settingsBridge`·`configBridge`·`document-transform`)을 선언한 애드온은 `trust-policy.json`의 SHA-256 승인이 일치해야 포함됩니다.
 
-## 모듈형 `@require` 플러그인 조합 (`v2.7.0`)
+## 모듈형 공개 HTTPS `@require` 애드온 배포 및 다중 샌드박스 공존 (`v2.8.0`)
 
-`antigravity-remote-host.lib.js`는 애드온 0건의 자립형 원격 호스트 런타임 라이브러리입니다. 서드파티 또는 개별 플러그인 제작자는 각자의 `.user.js`에서 `@require`로 호스트를 불러온 뒤 `registerAddon()`으로 등록할 수 있습니다.
+`antigravity-remote-host.lib.js`는 애드온 0건의 자립형 공개 HTTPS 호스트 라이브러리이며, **`v2.8.0`부터 서로 다른 Userscript 샌드박스(Tampermonkey/Violentmonkey/Safari Userscripts)에 설치된 여러 애드온이 하나의 Shadow-DOM 드로어(`#remote-addon-host-drawer-root`)와 슬롯 도크를 공유하며 자동 공존**합니다(각 샌드박스의 `hostToken`과 `GM_*` 저장소는 서로 격리 유지).
+
+플러그인 저장소는 아래 CLI 명령 한 번으로 Acorn AST 보안 검증을 통과한 공개 HTTPS 배포용 `<pluginId>.user.js` + `<pluginId>.meta.js`를 결정적으로 생성해 GitHub Releases에 첨부할 수 있습니다:
+
+```bash
+node ./bin/addon-host.js --build-addon-userscript \
+  --manifest path/to/addon-manifest.json \
+  --plugin-dir path/to/plugin-root \
+  --out-dir dist/userscript \
+  --update-base-url https://github.com/<owner>/<repo>/releases/latest/download/
+```
+
+추가 옵션:
+- `--host-lib-url <https-url>`: `@require` 호스트 라이브러리 URL (기본값: `https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js`, HTTPS 전용)
+- `--connect <hostname>` (반복 가능) + `--grant-xhr`: `GM_xmlhttpRequest`가 필요한 애드온에 허용 호스트 선언 (와일드카드 `*` 금지)
+- `--check`: 임시 디렉터리 2회 빌드로 결정적 SHA-256 및 AST 위반 0건 검증
 
 ```js
 // ==UserScript==

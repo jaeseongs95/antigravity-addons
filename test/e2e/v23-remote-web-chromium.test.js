@@ -25,7 +25,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
 const { ANTIGRAVITY_REMOTE_WEB_PROFILE } = require('../../src/profiles/antigravity-remote-web');
-const { buildDistRemote } = require('../../scripts/build-remote');
+const { buildDistRemote, buildAddonUserscript } = require('../../scripts/build-remote');
 
 let ELECTRON_BIN = null;
 try {
@@ -641,6 +641,256 @@ app.whenReady().then(async () => {
       assert.equal(result.outcome.lateMounted, 'yes');
       assert.equal(result.outcome.lateStatus, 'active');
       assert.equal(result.outcome.addonCount, 2);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  'TC-U8 (Real Chromium — v2.8.0): two independent @require modular addon Userscripts in separate Isolated Worlds (997 & 998) coexist cleanly in one unified mobile drawer under live 3-policy CSP',
+  { skip: ELECTRON_BIN ? false : 'electron devDependency not installed' },
+  () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-v28-u8-e2e-'));
+    try {
+      const distRemoteDir = path.join(tmpDir, 'dist-remote');
+      const hostBuilt = buildDistRemote({
+        targetDir: distRemoteDir,
+        profile: ANTIGRAVITY_REMOTE_WEB_PROFILE,
+        noAddons: true,
+        hostVersion: '2.8.0',
+      });
+      assert.equal(hostBuilt.ok, true);
+      const hostLibPath = path.join(distRemoteDir, 'antigravity-remote-host.lib.js');
+
+      function writeSamplePlugin(pluginId, displayName, attrPrefix) {
+        const dir = path.join(tmpDir, pluginId);
+        fs.mkdirSync(dir, { recursive: true });
+        const manifestPath = path.join(dir, 'addon.json');
+        fs.writeFileSync(
+          manifestPath,
+          JSON.stringify({
+            schemaVersion: 2,
+            pluginId,
+            displayName,
+            version: '1.0.0',
+            trustLevel: 'restricted',
+            compatibility: {
+              hostProfile: 'antigravity-desktop',
+              hostProfiles: ['antigravity-desktop', 'antigravity-remote-web'],
+              minHostVersion: '2.3.0',
+            },
+            capabilities: ['renderer'],
+            entry: { rendererScript: 'renderer.js' },
+            uiSlots: [{ slot: 'modal', slotId: `${pluginId}.modal`, anchor: 'modal', shadow: true }],
+            isolation: { storageNamespace: pluginId, noTranslate: true, i18nSelfManaged: true },
+          })
+        );
+        fs.writeFileSync(
+          path.join(dir, 'renderer.js'),
+          `let actCount = 0;
+addonHost.registerAction('act', {
+  label: '${displayName} Action',
+  run() {
+    actCount += 1;
+    document.documentElement.setAttribute('data-${attrPrefix}-act', String(actCount));
+  },
+});
+addonHost.registerSettingsTab('prefs', {
+  label: '${displayName} Settings',
+  onSelect() {
+    const m = addonHost.openModal('${pluginId}.modal', { title: '${displayName}' });
+    if (m && m.bodyEl) {
+      const p = document.createElement('p');
+      p.textContent = '${attrPrefix}_MODAL';
+      m.bodyEl.appendChild(p);
+      document.documentElement.setAttribute('data-${attrPrefix}-modal', String(Boolean(m.element && m.element.open)));
+      m.close();
+    }
+  },
+});
+document.documentElement.setAttribute('data-${attrPrefix}-mounted', 'yes');
+`
+        );
+        return buildAddonUserscript({
+          manifestPath,
+          pluginDir: dir,
+          targetDir: path.join(tmpDir, `out-${pluginId}`),
+          updateBaseUrl: `https://github.com/example/${pluginId}/releases/latest/download/`,
+        });
+      }
+
+      const alphaBuilt = writeSamplePlugin('alpha-mod', 'Alpha Modular', 'alpha');
+      const betaBuilt = writeSamplePlugin('beta-mod', 'Beta Modular', 'beta');
+      assert.equal(alphaBuilt.ok, true);
+      assert.equal(betaBuilt.ok, true);
+
+      const runnerPath = path.join(tmpDir, 'chromium-u8-runner.cjs');
+      fs.writeFileSync(
+        runnerPath,
+        `'use strict';
+const http = require('node:http');
+const fs = require('node:fs');
+const { app, BrowserWindow } = require('electron');
+
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-dev-shm-usage');
+
+const hostLibCode = fs.readFileSync(${JSON.stringify(hostLibPath)}, 'utf8');
+const alphaCode = fs.readFileSync(${JSON.stringify(alphaBuilt.userscriptPath)}, 'utf8');
+const betaCode = fs.readFileSync(${JSON.stringify(betaBuilt.userscriptPath)}, 'utf8');
+
+function startStrictLiveCspServer() {
+  return new Promise((resolve) => {
+    const srv = http.createServer((_req, res) => {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Security-Policy': [
+          "require-trusted-types-for 'script'; report-uri /_/csp",
+          "script-src 'nonce-liveU8' 'unsafe-inline'; object-src 'none'; base-uri 'self'",
+          "script-src 'nonce-liveU8' 'strict-dynamic' https:; object-src 'none'",
+        ],
+      });
+      res.end(
+        '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">' +
+        '<script nonce="liveU8">window["ppConfig"] = { productName: "GoogleAntigravity", sealIsEnforced: true };</script>' +
+        '</head><body><main id="app-root">Remote Workspace</main></body></html>'
+      );
+    });
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      resolve({ srv, origin: 'http://127.0.0.1:' + addr.port });
+    });
+  });
+}
+
+app.whenReady().then(async () => {
+  const target = await startStrictLiveCspServer();
+  const win = new BrowserWindow({
+    show: false,
+    width: 390,
+    height: 844,
+    useContentSize: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  const consoleErrors = [];
+  win.webContents.on('console-message', (_ev, level, message) => {
+    if (level >= 2) consoleErrors.push(String(message));
+  });
+
+  try {
+    await win.loadURL(target.origin + '/workspace');
+
+    const patchBootOrigin = (code) =>
+      code.replace(
+        'rt.bootRemoteWebHost()',
+        'rt.bootRemoteWebHost({ allowedOrigins: [' + JSON.stringify(target.origin) + '], allowLoopbackHttp: true })'
+      );
+
+    // Sandbox A (Isolated World 997): @require host lib + alpha-mod.user.js
+    await win.webContents.executeJavaScriptInIsolatedWorld(997, [{ code: hostLibCode + '\\n' + patchBootOrigin(alphaCode) }]);
+    await new Promise((r) => setTimeout(r, 80));
+
+    // Sandbox B (Isolated World 998): @require host lib + beta-mod.user.js
+    await win.webContents.executeJavaScriptInIsolatedWorld(998, [{ code: hostLibCode + '\\n' + patchBootOrigin(betaCode) }]);
+    await new Promise((r) => setTimeout(r, 80));
+
+    const pageWorldSeesGlobals = await win.webContents.executeJavaScript(
+      'Boolean(globalThis.__addonHostKernel || globalThis.__addonHostRemoteRuntime)'
+    );
+
+    const outcome = await win.webContents.executeJavaScriptInIsolatedWorld(997, [
+      {
+        code: \`(() => {
+          const drawerHost = document.getElementById('remote-addon-host-drawer-root');
+          const sr = drawerHost && drawerHost.shadowRoot;
+          if (!sr) return { ok: false, reason: 'NO_DRAWER' };
+          const pill = sr.querySelector('.rah-pill');
+          const badgeBefore = sr.querySelector('[data-rah-count-badge]').textContent;
+          pill.click();
+          const aBtn = sr.querySelector('[data-host-action-plugin="alpha-mod"][data-host-action-id="act"]');
+          const bBtn = sr.querySelector('[data-host-action-plugin="beta-mod"][data-host-action-id="act"]');
+          if (aBtn) aBtn.click();
+          if (bBtn) bBtn.click();
+
+          const tabs = sr.querySelectorAll('.rah-tab');
+          tabs[1].click();
+          const aTab = sr.querySelector('[data-settings-tab-plugin="alpha-mod"][data-settings-tab-id="prefs"]');
+          if (aTab) aTab.click();
+          const closedAfterA = sr.querySelector('#rah-drawer-panel').hasAttribute('hidden');
+
+          pill.click();
+          tabs[1].click();
+          const bTab = sr.querySelector('[data-settings-tab-plugin="beta-mod"][data-settings-tab-id="prefs"]');
+          if (bTab) bTab.click();
+          const closedAfterB = sr.querySelector('#rah-drawer-panel').hasAttribute('hidden');
+
+          return {
+            ok: true,
+            drawerCount: document.querySelectorAll('#remote-addon-host-drawer-root').length,
+            dockCount: document.querySelectorAll('#remote-addon-host-slot-dock').length,
+            mountedAttr: document.documentElement.getAttribute('data-remote-addon-host-plugins'),
+            badgeBefore,
+            alphaMounted: document.documentElement.getAttribute('data-alpha-mounted'),
+            betaMounted: document.documentElement.getAttribute('data-beta-mounted'),
+            alphaAct: document.documentElement.getAttribute('data-alpha-act'),
+            betaAct: document.documentElement.getAttribute('data-beta-act'),
+            alphaModal: document.documentElement.getAttribute('data-alpha-modal'),
+            betaModal: document.documentElement.getAttribute('data-beta-modal'),
+            closedAfterA,
+            closedAfterB,
+          };
+        })()\`,
+      },
+    ]);
+
+    process.stdout.write(JSON.stringify({ outcome, pageWorldSeesGlobals, consoleErrors }) + '\\n');
+    win.destroy();
+    target.srv.close();
+    app.exit(0);
+  } catch (err) {
+    process.stderr.write((err && err.stack ? err.stack : String(err)) + '\\n');
+    target.srv.close();
+    app.exit(1);
+  }
+});
+`,
+        'utf8'
+      );
+
+      const env = { ...process.env };
+      delete env.ELECTRON_RUN_AS_NODE;
+      const args = [runnerPath];
+      if (process.platform === 'linux') {
+        args.unshift('--no-sandbox', '--disable-gpu');
+      }
+      const rawOut = execFileSync(ELECTRON_BIN, args, {
+        env,
+        encoding: 'utf8',
+        timeout: 45000,
+      });
+      const result = JSON.parse(rawOut.trim().split(/\r?\n/).pop());
+      assert.deepEqual(result.consoleErrors, [], `Expected 0 CSP/console errors, got: ${JSON.stringify(result.consoleErrors)}`);
+      assert.equal(result.pageWorldSeesGlobals, false);
+      assert.equal(result.outcome.ok, true);
+      assert.equal(result.outcome.drawerCount, 1);
+      assert.equal(result.outcome.dockCount, 1);
+      assert.equal(result.outcome.mountedAttr, 'alpha-mod,beta-mod');
+      assert.equal(result.outcome.badgeBefore, '2/2');
+      assert.equal(result.outcome.alphaMounted, 'yes');
+      assert.equal(result.outcome.betaMounted, 'yes');
+      assert.equal(result.outcome.alphaAct, '1');
+      assert.equal(result.outcome.betaAct, '1');
+      assert.equal(result.outcome.alphaModal, 'true');
+      assert.equal(result.outcome.betaModal, 'true');
+      assert.equal(result.outcome.closedAfterA, true);
+      assert.equal(result.outcome.closedAfterB, true);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
