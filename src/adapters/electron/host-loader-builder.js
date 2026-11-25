@@ -372,6 +372,7 @@ function buildHostLoaderScriptSource(
         : {}),
       ...(profile.settingsUi ? { settingsUi: profile.settingsUi } : {}),
       ...(profile.portalBridge ? { portalBridge: profile.portalBridge } : {}),
+      ...(profile.updateSurvival ? { updateSurvival: profile.updateSurvival } : {}),
     },
   };
 

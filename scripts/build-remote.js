@@ -35,6 +35,7 @@ const {
   toBrowserRemoteWebProfile,
 } = require('../src/profiles/antigravity-remote-web');
 const { validateAddonManifest } = require('../src/core/manifest-validator');
+const { loadTrustPolicyFile } = require('../src/runtime/main/trust-verifier');
 const { collectRemoteWebAddons } = require('../src/adapters/remote-web/addon-collector');
 const {
   EXTENSION_CONTENT_SCRIPT_FILENAME,
@@ -303,7 +304,14 @@ function normalizeUpdateBaseUrl(rawUrl) {
   return parsed.href.replace(/\/+$/, '');
 }
 
-function normalizeHostLibUrl(rawUrl, profile = ANTIGRAVITY_REMOTE_WEB_PROFILE) {
+const SRI_SHA256_HASH_RE = /^#sha256=([a-f0-9]{64})$/i;
+const HEX_SHA256_RE = /^[a-f0-9]{64}$/i;
+
+function normalizeHostLibUrl(
+  rawUrl,
+  profile = ANTIGRAVITY_REMOTE_WEB_PROFILE,
+  { hostLibSha256 = null, hostLibFile = null } = {}
+) {
   const effective =
     typeof rawUrl === 'string' && rawUrl.trim()
       ? rawUrl.trim()
@@ -317,14 +325,62 @@ function normalizeHostLibUrl(rawUrl, profile = ANTIGRAVITY_REMOTE_WEB_PROFILE) {
   if (parsed.protocol !== 'https:') {
     throw new Error(`ERR_HOST_LIB_URL_MUST_BE_HTTPS:${rawUrl}`);
   }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+  if (parsed.username || parsed.password || parsed.search) {
     throw new Error(`ERR_HOST_LIB_URL_UNSAFE:${rawUrl}`);
   }
-  return parsed.href;
+  let urlSha = null;
+  if (parsed.hash) {
+    const m = parsed.hash.match(SRI_SHA256_HASH_RE);
+    if (!m) {
+      throw new Error(`ERR_HOST_LIB_URL_UNSAFE:${rawUrl}`);
+    }
+    urlSha = m[1].toLowerCase();
+  }
+
+  let computedSha = null;
+  if (typeof hostLibSha256 === 'string' && hostLibSha256.trim()) {
+    const cleaned = hostLibSha256.trim().toLowerCase();
+    if (!HEX_SHA256_RE.test(cleaned)) {
+      throw new Error(`ERR_INVALID_HOST_LIB_SHA256:${hostLibSha256}`);
+    }
+    computedSha = cleaned;
+  }
+  if (typeof hostLibFile === 'string' && hostLibFile.trim()) {
+    const absLib = path.resolve(hostLibFile.trim());
+    if (!fs.existsSync(absLib) || !fs.statSync(absLib).isFile()) {
+      throw new Error(`ERR_HOST_LIB_FILE_NOT_FOUND:${absLib}`);
+    }
+    const fileSha = sha256Hex(fs.readFileSync(absLib));
+    if (computedSha && computedSha !== fileSha) {
+      throw new Error(`ERR_HOST_LIB_SHA256_MISMATCH:${computedSha}:${fileSha}`);
+    }
+    computedSha = fileSha;
+  }
+
+  if (urlSha && computedSha && urlSha !== computedSha) {
+    throw new Error(`ERR_HOST_LIB_SHA256_MISMATCH:${urlSha}:${computedSha}`);
+  }
+  const finalSha = computedSha || urlSha;
+  const baseHref = parsed.href.replace(/#.*$/, '');
+  return finalSha ? `${baseHref}#sha256=${finalSha}` : baseHref;
 }
 
-const CONNECT_HOST_RE =
-  /^(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}|(?:\d{1,3}\.){3}\d{1,3})$/i;
+// Public DNS FQDN only (strictly bans localhost, raw IPv4/IPv6 literals, and wildcards).
+const CONNECT_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+const FORBIDDEN_CONNECT_HOSTS = new Set([
+  'localhost',
+  'antigravity.google.com',
+  'accounts.google.com',
+  'oauth2.googleapis.com',
+  'myaccount.google.com',
+]);
+const FORBIDDEN_CONNECT_SUFFIXES = Object.freeze([
+  '.local',
+  '.internal',
+  '.localhost',
+  '.lan',
+  '.home.arpa',
+]);
 
 function normalizeConnectHosts(rawHosts) {
   if (!Array.isArray(rawHosts) || rawHosts.length === 0) return [];
@@ -335,6 +391,12 @@ function normalizeConnectHosts(rawHosts) {
     if (!h) continue;
     if (!CONNECT_HOST_RE.test(h)) {
       throw new Error(`ERR_INVALID_CONNECT_HOST:${rawHosts[i]}`);
+    }
+    if (
+      FORBIDDEN_CONNECT_HOSTS.has(h) ||
+      FORBIDDEN_CONNECT_SUFFIXES.some((suffix) => h.endsWith(suffix))
+    ) {
+      throw new Error(`ERR_FORBIDDEN_CONNECT_HOST:${rawHosts[i]}`);
     }
     if (!seen.has(h)) {
       seen.add(h);
@@ -392,9 +454,13 @@ function buildAddonUserscript({
   targetDir,
   profile = ANTIGRAVITY_REMOTE_WEB_PROFILE,
   hostLibUrl = null,
+  hostLibSha256 = null,
+  hostLibFile = null,
   updateBaseUrl = null,
   connectHosts = [],
   grantXhr = false,
+  trustPolicyPath = null,
+  allowUnpinnedTrusted = false,
   namespace = 'https://github.com/jaeseongs95/antigravity-addons',
 } = {}) {
   if (typeof manifestPath !== 'string' || !manifestPath.trim()) {
@@ -442,7 +508,7 @@ function buildAddonUserscript({
   const rendererSha256 = sha256Hex(rendererBuf);
   const rendererSource = toLf(rendererBuf.toString('utf8'));
 
-  const safeHostLibUrl = normalizeHostLibUrl(hostLibUrl, profile);
+  const safeHostLibUrl = normalizeHostLibUrl(hostLibUrl, profile, { hostLibSha256, hostLibFile });
   const safeBaseUrl = normalizeUpdateBaseUrl(updateBaseUrl);
   const safeConnects = normalizeConnectHosts(connectHosts);
 
@@ -450,6 +516,27 @@ function buildAddonUserscript({
     ? validation.skippedCapabilities.slice()
     : caps.filter((c) => c !== 'renderer');
   const effectiveTrustLevel = validation.trustLevel || manifest.trustLevel || 'restricted';
+
+  // Phase-0 Security Fix: gate hasSettingsBridge on explicit trust-policy SHA-256 verification.
+  let trustPinned = false;
+  if (effectiveTrustLevel === 'trusted') {
+    if (typeof trustPolicyPath === 'string' && trustPolicyPath.trim()) {
+      const loaded = loadTrustPolicyFile(trustPolicyPath.trim());
+      if (!loaded || !loaded.ok || !loaded.policy) {
+        throw new Error(`ERR_ADDON_TRUST_NOT_APPROVED:${manifest.pluginId}:${(loaded && loaded.reason) || 'POLICY_INVALID'}`);
+      }
+      const approvedMap = loaded.policy.approved || {};
+      const pin = approvedMap[manifest.pluginId];
+      const expectedSha = pin && typeof pin.rendererSha256 === 'string' ? pin.rendererSha256.toLowerCase() : null;
+      if (!expectedSha || expectedSha !== rendererSha256.toLowerCase()) {
+        throw new Error(`ERR_ADDON_TRUST_NOT_APPROVED:${manifest.pluginId}:SHA_MISMATCH_OR_UNPINNED`);
+      }
+      trustPinned = true;
+    } else if (allowUnpinnedTrusted === true) {
+      trustPinned = true;
+    }
+  }
+
   const pluginMeta = {
     schemaVersion: 2,
     sourceSchemaVersion: manifest.sourceSchemaVersion || manifest.schemaVersion || 2,
@@ -460,7 +547,7 @@ function buildAddonUserscript({
     capabilities: ['renderer'],
     skippedCapabilities,
     hasDocumentTransformSlot: Boolean(validation.hasDocumentTransformSlot),
-    hasSettingsBridge: Boolean(validation.hasSettingsBridge && effectiveTrustLevel === 'trusted'),
+    hasSettingsBridge: Boolean(validation.hasSettingsBridge && effectiveTrustLevel === 'trusted' && trustPinned),
     hasConfigBridge: false,
     configScopes: [],
     uiSlots: Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [],
@@ -548,6 +635,8 @@ function buildAddonUserscript({
     pluginId: manifest.pluginId,
     version: manifest.version,
     rendererSha256,
+    trustPinned,
+    hasSettingsBridge: pluginMeta.hasSettingsBridge,
     hostLibUrl: safeHostLibUrl,
     updateBaseUrl: safeBaseUrl,
     connectHosts: safeConnects,
@@ -1089,8 +1178,11 @@ function parseCliArgs(argv) {
     manifestPath: null,
     pluginDir: null,
     hostLibUrl: null,
+    hostLibSha256: null,
+    hostLibFile: null,
     connectHosts: [],
     grantXhr: false,
+    allowUnpinnedTrusted: false,
     namespace: 'https://github.com/jaeseongs95/antigravity-addons',
     check: false,
     noAddons: false,
@@ -1111,6 +1203,9 @@ function parseCliArgs(argv) {
     else if (a === '--manifest' && argv[i + 1]) opts.manifestPath = path.resolve(argv[++i]);
     else if (a === '--plugin-dir' && argv[i + 1]) opts.pluginDir = path.resolve(argv[++i]);
     else if (a === '--host-lib-url' && argv[i + 1]) opts.hostLibUrl = argv[++i];
+    else if (a === '--host-lib-sha256' && argv[i + 1]) opts.hostLibSha256 = argv[++i];
+    else if (a === '--host-lib-file' && argv[i + 1]) opts.hostLibFile = path.resolve(argv[++i]);
+    else if (a === '--allow-unpinned-trusted') opts.allowUnpinnedTrusted = true;
     else if (a === '--connect' && argv[i + 1]) opts.connectHosts.push(argv[++i]);
     else if (a === '--grant-xhr') opts.grantXhr = true;
     else if (a === '--namespace' && argv[i + 1]) opts.namespace = argv[++i];

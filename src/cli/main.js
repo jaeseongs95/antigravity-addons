@@ -195,6 +195,8 @@ function createCliApp({
       '  --unregister <pluginId>                Unregister a plugin manifest',
       '  --install [--replace-legacy] [--refresh-orig] Install single shared host bootstrap hook',
       '  --upgrade [--replace-legacy] [--refresh-orig] Upgrade host bootstrap from prior version',
+      '  --reconcile [--handoff] [--relaunch]   Idempotently restore host after native app auto-update',
+      '  --launch                               Reconcile while closed, then launch target host app',
       '  --rollback [--force]                   Restore original host bundle byte-identically',
       '  trust approve <pluginId>               Pin plugin SHA-256 digests in host trust policy',
       '  trust revoke <pluginId>                Revoke plugin trust approval',
@@ -314,6 +316,50 @@ function createCliApp({
         replaceLegacy: args.includes('--replace-legacy'),
         refreshOrig: args.includes('--refresh-orig'),
         hostVersion,
+      });
+      process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+      if (!out || !out.ok) process.exitCode = 1;
+      return out;
+    }
+
+    if (args.includes('--reconcile')) {
+      if (typeof lifecycle.reconcileHost !== 'function') {
+        const out = { ok: false, reason: 'ERR_RECONCILE_UNSUPPORTED' };
+        process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+        process.exitCode = 1;
+        return out;
+      }
+      const readFlagVal = (flag) => {
+        const idx = args.indexOf(flag);
+        return idx !== -1 && args[idx + 1] && !args[idx + 1].startsWith('--') ? args[idx + 1] : null;
+      };
+      const parentPidRaw = readFlagVal('--parent-pid');
+      const waitTimeoutRaw = readFlagVal('--wait-timeout');
+      const out = await lifecycle.reconcileHost(ctx, {
+        hostVersion,
+        handoff: args.includes('--handoff'),
+        relaunch: args.includes('--relaunch'),
+        forceMacAutoRepatch: args.includes('--force-macos'),
+        parentPid: parentPidRaw ? Number.parseInt(parentPidRaw, 10) : null,
+        prevAsarSha: readFlagVal('--prev-asar-sha'),
+        ackFilePath: readFlagVal('--ack-file'),
+        waitTimeoutMs: waitTimeoutRaw ? Number.parseInt(waitTimeoutRaw, 10) : undefined,
+      });
+      process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+      if (!out || !out.ok) process.exitCode = 1;
+      return out;
+    }
+
+    if (args.includes('--launch')) {
+      if (typeof lifecycle.launchHost !== 'function') {
+        const out = { ok: false, reason: 'ERR_LAUNCH_UNSUPPORTED' };
+        process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+        process.exitCode = 1;
+        return out;
+      }
+      const out = await lifecycle.launchHost(ctx, {
+        hostVersion,
+        forceMacAutoRepatch: args.includes('--force-macos'),
       });
       process.stdout.write(JSON.stringify(out, null, 2) + '\n');
       if (!out || !out.ok) process.exitCode = 1;

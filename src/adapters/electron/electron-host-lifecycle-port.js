@@ -25,6 +25,12 @@ const {
 } = require('../fs-lock-atomic');
 const { createAsarPatchTransport } = require('./asar-patch-transport');
 const { buildHostLoaderScriptSource } = require('./host-loader-builder');
+const {
+  resolveExternalNodeExecutable,
+  reconcileElectronHost,
+  runDetachedHandoffReconcile,
+  launchHostWithReconcile,
+} = require('./update-reconciler');
 
 const DIST_RUNTIME_DIR = path.resolve(__dirname, '..', '..', '..', 'dist', 'runtime');
 const DEFAULT_CLI_ENTRY_PATH = path.resolve(__dirname, '..', '..', '..', 'bin', 'addon-host.js');
@@ -36,7 +42,7 @@ const REQUIRED_RUNTIME_FILES = Object.freeze([
   'renderer/kernel-bundle.cjs',
 ]);
 
-function writeHostCliMetaIfAvailable(hostDataDir, cliEntryPath) {
+function writeHostCliMetaIfAvailable(hostDataDir, cliEntryPath, paths = null, asarResult = null) {
   if (!hostDataDir || typeof hostDataDir !== 'string' || !cliEntryPath || typeof cliEntryPath !== 'string') {
     return null;
   }
@@ -52,11 +58,26 @@ function writeHostCliMetaIfAvailable(hostDataDir, cliEntryPath) {
         return null;
       }
     }
+    const appExecutablePath = paths && typeof paths.APP_EXECUTABLE_PATH === 'string' ? paths.APP_EXECUTABLE_PATH : null;
+    const asarPath = paths && typeof paths.ASAR_PATH === 'string' ? paths.ASAR_PATH : null;
+    const nodeResolved = resolveExternalNodeExecutable({
+      hostDataDir,
+      appExecutablePath,
+      asarPath,
+    });
+    const lastPatchedAsarSha256 =
+      asarResult && typeof asarResult.sha256 === 'string' && asarResult.sha256 ? asarResult.sha256 : null;
     const payload =
       JSON.stringify(
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           cliEntryPath: resolvedCli,
+          nodeExecPath: nodeResolved.ok ? nodeResolved.nodePath : null,
+          nodeExecSource: nodeResolved.ok ? nodeResolved.source : null,
+          appExecutablePath,
+          asarPath,
+          reconcileStatePath: paths && paths.RECONCILE_STATE_PATH ? paths.RECONCILE_STATE_PATH : null,
+          lastPatchedAsarSha256,
           updatedAt: new Date().toISOString(),
         },
         null,
@@ -197,6 +218,7 @@ function resolveElectronPaths(profile, env = process.env, pathOverrides = null) 
     if (!resolved.HOST_DATA_DIR) resolved.HOST_DATA_DIR = hostDataDir;
     if (!resolved.BACKUPS_DIR) resolved.BACKUPS_DIR = path.join(hostDataDir, 'backups');
     if (!resolved.TRUST_POLICY_PATH) resolved.TRUST_POLICY_PATH = path.join(hostDataDir, 'trust-policy.json');
+    if (!resolved.RECONCILE_STATE_PATH) resolved.RECONCILE_STATE_PATH = path.join(hostDataDir, 'reconcile-state.json');
     if (!resolved.RUNTIME_DIR) resolved.RUNTIME_DIR = path.join(hostDataDir, 'runtime');
   }
 
@@ -391,7 +413,7 @@ function createElectronHostLifecyclePort({
         };
       }
 
-      writeHostCliMetaIfAvailable(paths.HOST_DATA_DIR, cliEntryPath);
+      writeHostCliMetaIfAvailable(paths.HOST_DATA_DIR, cliEntryPath, paths, asar);
 
       const status =
         asar.status === 'SKIPPED_NO_ASAR'
@@ -485,6 +507,17 @@ function createElectronHostLifecyclePort({
         out.status === 'ALREADY_UNPATCHED' ||
         out.status === 'SKIPPED_NO_ASAR';
       return { ok, ...out };
+    },
+
+    reconcileHost(ctx, opts = {}) {
+      if (opts && opts.handoff) {
+        return runDetachedHandoffReconcile(ctx, this, opts);
+      }
+      return reconcileElectronHost(ctx, this, opts);
+    },
+
+    launchHost(ctx, opts = {}) {
+      return launchHostWithReconcile(ctx, this, opts);
     },
   });
 }
