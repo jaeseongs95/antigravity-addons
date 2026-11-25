@@ -86,7 +86,7 @@ function buildGeneratedValidators(targetGenDir) {
  * Bundles modular `src/runtime/renderer/*.js` into a single browser-executable World 998
  * IIFE bundle (`kernel-bundle.cjs`) with zero external dependencies and zero runtime Node require.
  */
-function buildRendererKernelBundleSource() {
+function buildRendererKernelBundleSource({ includeHostSettingsUi = true } = {}) {
   const rendererDir = path.join(REPO_ROOT, 'src', 'runtime', 'renderer');
   const modules = [
     './ignore-guard.js',
@@ -102,6 +102,9 @@ function buildRendererKernelBundleSource() {
   ];
 
   const entries = modules.map((relId) => {
+    if (relId === './host-settings-ui.js' && includeHostSettingsUi === false) {
+      return `  ${JSON.stringify(relId)}: function(module, exports) {\n    exports.createHostSettingsUi = null;\n  }`;
+    }
     const abs = path.join(rendererDir, relId.slice(2));
     const src = toLf(fs.readFileSync(abs, 'utf8'));
     return `  ${JSON.stringify(relId)}: function(module, exports, require) {\n${src}\n  }`;

@@ -6,7 +6,20 @@
 > **언어**: [English (README.md)](./README.md) | 한국어  
 > *(구 `antigravity-native-addon-host` — 기존 `addon-host` CLI 명령, `ADDON_HOST_LOADER_V2` 패치 마커 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**내장 설정 화면 `애드온 관리(Addon Manager)` UI, 무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Remote Web 호스트 통합, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.5.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+**로컬 MV3 브라우저 확장(`world: "ISOLATED"`) 및 Userscript 기반 원격 웹 배포, 내장 설정 화면 `애드온 관리(Addon Manager)` UI, 무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.6.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+
+## v2.6.0 주요 업데이트 (로컬 MV3 브라우저 확장 배포 · 커널 슬리밍 · CSP/TrustedTypes 보안 강화)
+
+- **원격 웹 1차 배포 수단 — 로컬 압축해제형 MV3 브라우저 확장 (`remote-dist/extension/`)**:
+  - `addon-host --build-remote`가 기존 `antigravity-remote.user.js`·`remote-runtime.cjs`와 함께 자립형 Manifest V3 브라우저 확장(`extension/manifest.json` + `extension/content-script.js`)을 자동 생성합니다.
+  - 데스크톱 Electron World `998`과 동일한 `"world": "ISOLATED"` 환경에서 실행되어 `script-src 'nonce-...'`와 TrustedTypes 주입 제약을 별도 Userscript 관리자 없이 통과하며, `permissions`·`host_permissions`·`background`·`web_accessible_resources` 0건 및 벤더 중립 `src/adapters/remote-web/extension-manifest.js`(SOLID #0) 기반의 fail-closed HTTPS `matches`만 허용합니다.
+  - 공개 GitHub 저장소는 철저히 호스트 전용(`--no-addons`)을 유지하며, 타 플러그인 코드나 로컬 설정 스냅샷을 공개 게시하지 않습니다.
+- **64 KB Fail-Closed 북마클릿 상한 및 원격 웹 커널 슬리밍**:
+  - 원격 웹 번들에서 데스크톱 전용 `host-settings-ui.js`(약 61.5 KB)를 제외합니다(`buildRendererKernelBundleSource({ includeHostSettingsUi: false })`).
+  - 브라우저 `<input>` 잘림을 유발하던 기존 2 MB 상한을 `BOOKMARKLET_MAX_RUNNABLE_CHARS = 65536`으로 교체해, 실행 불가 크기의 `bookmarklet.txt`는 디스크 생성을 생략(기존 구버전 파일 정리)하고 Electron IPC로 전송하지 않습니다.
+- **Acorn AST TrustedTypes 검사 확장 및 운영성 보강**:
+  - `verifyRemoteBundleAst`가 `setHTMLUnsafe`, `srcdoc`, `createContextualFragment`, `parseFromString`, 문자열 `setTimeout`/`setInterval`, `createElement('script')`, `new Worker`/`SharedWorker`, 인라인 `setAttribute('on*', ...)`까지 차단합니다.
+  - 확장(`ISOLATED`)과 Userscript(`MAIN`) 동시 활성화 시 중복 마운트를 막는 교차 월드 DOM 가드(`data-remote-addon-host-active`), 애드온 실행 전 드로어 선마운트 및 실패 배지 표시, 부트 실패 콘솔 경고, Windows `EBUSY` 안전 제자리 갱신, 그리고 `설정 > 애드온 관리`의 `확장 경로 복사`·`Userscript 경로 복사`·`chrome://extensions` 2단계 안내를 추가했습니다.
 
 ## v2.5.0 주요 업데이트 (설정 화면 내장 `애드온 관리` UI · 원격 웹 표시 제어)
 

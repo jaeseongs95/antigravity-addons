@@ -96,7 +96,7 @@ function createRemoteWebHostLifecyclePort() {
       return {
         ok: false,
         reason: 'ERR_REMOTE_WEB_USES_BUILD_REMOTE',
-        hint: 'Run "addon-host --build-remote" (or "npm run build:remote") to build the Remote Web Userscript & Bookmarklet bundle.',
+        hint: 'Run "addon-host --build-remote" (or "npm run build:remote") to build the Remote Web Browser Extension & Userscript bundle.',
       };
     },
 
@@ -112,7 +112,7 @@ function createRemoteWebHostLifecyclePort() {
       return {
         ok: false,
         reason: 'ERR_REMOTE_WEB_USES_BUILD_REMOTE',
-        hint: 'Remote Web does not patch app.asar; remove the Userscript from your browser extension to uninstall.',
+        hint: 'Remote Web does not patch app.asar; remove the unpacked extension or Userscript from your browser to uninstall.',
       };
     },
   });
@@ -170,7 +170,7 @@ async function main(argv = process.argv.slice(2)) {
   if (isHelp) {
     process.stdout.write(
       [
-        '  --build-remote [options]               Build/verify Remote Web Userscript & Bookmarklet bundle',
+        '  --build-remote [options]               Build/verify Remote Web Browser Extension & Userscript bundle',
         '  --profile remote-web|desktop|<path>    Built-in profile alias or custom HostProfile module',
       ].join('\n') + '\n'
     );

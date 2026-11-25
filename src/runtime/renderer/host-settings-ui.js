@@ -77,11 +77,14 @@ const COPY = Object.freeze({
     syncTitleUpToDate: 'Remote Web bundle is synchronized',
     syncTitleNeedsRebuild: 'Remote Web bundle needs rebuild',
     syncTitleNotBuilt: 'Remote Web bundle has not been built yet',
-    syncDescUpToDate: 'Your current Remote Web visibility settings match the latest generated bundle.',
-    syncDescNeedsRebuild: 'Visibility preferences are saved. Run the command below to update your Remote Web Userscript & Bookmarklet.',
-    syncDescNotBuilt: 'Run the command below to build the Remote Web Userscript & Bookmarklet with your selected addons.',
+    syncDescUpToDate: 'Your Remote Web settings match the latest bundle. Load the extension folder once in your browser, or click Reload after rebuilding.',
+    syncDescNeedsRebuild: 'Visibility preferences are saved. Run the command below to rebuild the Remote Web browser extension & userscript, then reload the extension.',
+    syncDescNotBuilt: 'Run the command below to generate the Remote Web browser extension & userscript with your selected addons.',
     copyCommand: 'Copy command',
+    copyExtensionPath: 'Copy extension path',
+    copyUserscriptPath: 'Copy userscript path',
     copyBookmarklet: 'Copy bookmarklet',
+    extensionGuide: 'Browser setup: Open chrome://extensions (Edge supported) -> Enable Developer mode -> Load unpacked -> select the copied folder path. After future rebuilds, click Reload on the extension card.',
     copied: 'Copied',
     copyFailed: 'Copy failed',
     loadError: 'Failed to load addon host status.',
@@ -130,11 +133,14 @@ const COPY = Object.freeze({
     syncTitleUpToDate: '원격 웹 번들이 최신 상태입니다',
     syncTitleNeedsRebuild: '원격 웹 번들 재빌드가 필요합니다',
     syncTitleNotBuilt: '원격 웹 번들이 아직 생성되지 않았습니다',
-    syncDescUpToDate: '현재 선택한 원격 웹 표시 설정이 최신 번들과 일치합니다.',
-    syncDescNeedsRebuild: '변경된 원격 웹 표시 설정은 즉시 저장되었습니다. 아래 명령을 실행하면 Userscript와 북마클릿에 반영됩니다.',
-    syncDescNotBuilt: '아래 명령을 실행하면 선택한 애드온이 포함된 원격 웹 Userscript와 북마클릿을 생성합니다.',
+    syncDescUpToDate: '현재 선택한 원격 웹 표시 설정이 최신 번들과 일치합니다. 브라우저에서 확장 폴더를 한 번 로드하거나, 재빌드 후 확장 새로고침(↻)을 누르세요.',
+    syncDescNeedsRebuild: '변경된 원격 웹 표시 설정은 즉시 저장되었습니다. 아래 명령으로 브라우저 확장과 Userscript를 재빌드한 뒤 확장을 새로고침하세요.',
+    syncDescNotBuilt: '아래 명령을 실행하면 선택한 애드온이 포함된 원격 웹 브라우저 확장과 Userscript를 생성합니다.',
     copyCommand: '명령 복사',
+    copyExtensionPath: '확장 경로 복사',
+    copyUserscriptPath: 'Userscript 경로 복사',
     copyBookmarklet: '북마클릿 복사',
+    extensionGuide: '브라우저 적용: chrome://extensions 열기(Edge 동일) → 개발자 모드 켜기 → 압축해제된 확장 프로그램 로드 → 복사한 확장 폴더 선택. 재빌드 후에는 확장 카드의 새로고침(↻)만 누르면 됩니다.',
     copied: '복사됨',
     copyFailed: '복사 실패',
     loadError: '애드온 호스트 상태를 불러오지 못했습니다.',
@@ -650,6 +656,24 @@ const PANEL_CSS = `
   border: 1px solid var(--card-border);
   color: #e2e8f0;
   user-select: all;
+}
+
+.ah-delivery-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ah-install-guide {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: rgba(15, 23, 42, 0.42);
+  border: 1px solid var(--card-border);
 }
 
 .ah-empty {
@@ -1525,23 +1549,70 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const buildCmd = bundle.buildCommand || 'addon-host --build-remote';
     cmdRow.appendChild(createEl('code', 'ah-cmd-code', buildCmd));
 
-    const copyCmdBtn = createEl('button', 'ah-btn ah-btn-primary', t.copyCommand);
+    const copyCmdBtn = createEl('button', needsAttention ? 'ah-btn ah-btn-primary' : 'ah-btn', t.copyCommand);
     copyCmdBtn.setAttribute('type', 'button');
+    copyCmdBtn.setAttribute('data-ah-action', 'copy-command');
     copyCmdBtn.addEventListener('click', () => {
       copyText(buildCmd, copyCmdBtn, t);
     });
     cmdRow.appendChild(copyCmdBtn);
+    syncCard.appendChild(cmdRow);
 
-    if (bundle.hasBookmarklet && typeof bundle.bookmarkletText === 'string' && bundle.bookmarkletText.length > 0) {
-      const copyBmBtn = createEl('button', 'ah-btn', t.copyBookmarklet);
-      copyBmBtn.setAttribute('type', 'button');
-      copyBmBtn.addEventListener('click', () => {
-        copyText(bundle.bookmarkletText, copyBmBtn, t);
-      });
-      cmdRow.appendChild(copyBmBtn);
+    const canCopyExtension = Boolean(
+      bundle.built && bundle.hasExtension && typeof bundle.extensionDir === 'string' && bundle.extensionDir.length > 0
+    );
+    const canCopyUserscript = Boolean(
+      bundle.built && bundle.hasUserscript && typeof bundle.userscriptPath === 'string' && bundle.userscriptPath.length > 0
+    );
+    const canCopyBookmarklet = Boolean(
+      typeof bundle.bookmarkletText === 'string' &&
+        bundle.bookmarkletText.length > 0 &&
+        (bundle.bookmarkletRunnable === true ||
+          (bundle.bookmarkletRunnable === undefined &&
+            bundle.hasBookmarklet === true &&
+            bundle.bookmarkletText.length <= 65536))
+    );
+
+    if (canCopyExtension || canCopyUserscript || canCopyBookmarklet) {
+      const deliveryRow = createEl('div', 'ah-delivery-row');
+      if (canCopyExtension) {
+        const copyExtBtn = createEl(
+          'button',
+          !needsAttention ? 'ah-btn ah-btn-primary' : 'ah-btn',
+          t.copyExtensionPath
+        );
+        copyExtBtn.setAttribute('type', 'button');
+        copyExtBtn.setAttribute('data-ah-action', 'copy-extension-path');
+        copyExtBtn.addEventListener('click', () => {
+          copyText(bundle.extensionDir, copyExtBtn, t);
+        });
+        deliveryRow.appendChild(copyExtBtn);
+      }
+      if (canCopyUserscript) {
+        const copyUserBtn = createEl('button', 'ah-btn', t.copyUserscriptPath);
+        copyUserBtn.setAttribute('type', 'button');
+        copyUserBtn.setAttribute('data-ah-action', 'copy-userscript-path');
+        copyUserBtn.addEventListener('click', () => {
+          copyText(bundle.userscriptPath, copyUserBtn, t);
+        });
+        deliveryRow.appendChild(copyUserBtn);
+      }
+      if (canCopyBookmarklet) {
+        const copyBmBtn = createEl('button', 'ah-btn', t.copyBookmarklet);
+        copyBmBtn.setAttribute('type', 'button');
+        copyBmBtn.setAttribute('data-ah-action', 'copy-bookmarklet');
+        copyBmBtn.addEventListener('click', () => {
+          copyText(bundle.bookmarkletText, copyBmBtn, t);
+        });
+        deliveryRow.appendChild(copyBmBtn);
+      }
+      syncCard.appendChild(deliveryRow);
     }
 
-    syncCard.appendChild(cmdRow);
+    if (canCopyExtension) {
+      syncCard.appendChild(createEl('p', 'ah-install-guide', t.extensionGuide));
+    }
+
     root.appendChild(syncCard);
   }
 

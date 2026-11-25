@@ -16,13 +16,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { parseSafeJson } = require('../shared/safe-json');
+const { BOOKMARKLET_MAX_RUNNABLE_CHARS } = require('../shared/constants');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
 const { readVerifiedRendererScript, sha256Hex } = require('./trust-verifier');
 
 const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 const MAX_REMOTE_PREFS_BYTES = 65536;
 const MAX_HOST_CLI_META_BYTES = 16384;
-const MAX_BOOKMARKLET_BYTES = 2 * 1024 * 1024;
+const MAX_EXTENSION_MANIFEST_BYTES = 65536;
 const DEFAULT_REMOTE_PREFS_FILENAME = 'remote-preferences.json';
 const DEFAULT_HOST_CLI_META_FILENAME = 'host-cli.json';
 const DEFAULT_CLI_COMMAND_NAME = 'addon-host';
@@ -330,6 +331,37 @@ function writeRemotePreferencesFileAtomic(prefsPath, nextData) {
   }
 }
 
+function resolveSafeChildPath(rootDir, relPosix) {
+  if (!rootDir || typeof relPosix !== 'string' || !relPosix.trim()) return null;
+  if (relPosix.includes('\\') || relPosix.includes('\0') || path.isAbsolute(relPosix)) return null;
+  const segments = relPosix.split('/');
+  if (segments.some((seg) => !seg || seg === '.' || seg === '..')) return null;
+  const resolvedRoot = path.resolve(rootDir);
+  const resolvedTarget = path.resolve(resolvedRoot, ...segments);
+  if (resolvedTarget === resolvedRoot || !resolvedTarget.startsWith(resolvedRoot + path.sep)) {
+    return null;
+  }
+  return resolvedTarget;
+}
+
+function isRegularNonSymlinkFile(filePath) {
+  try {
+    const st = fs.lstatSync(filePath);
+    return st.isFile() && !st.isSymbolicLink();
+  } catch (_err) {
+    return false;
+  }
+}
+
+function isRegularNonSymlinkDir(dirPath) {
+  try {
+    const st = fs.lstatSync(dirPath);
+    return st.isDirectory() && !st.isSymbolicLink();
+  } catch (_err) {
+    return false;
+  }
+}
+
 function readRemoteBundleStatus(remoteDistDir) {
   const empty = {
     built: false,
@@ -339,8 +371,14 @@ function readRemoteBundleStatus(remoteDistDir) {
     addonCount: 0,
     packedPluginIds: [],
     packedAddonsById: {},
+    hasExtension: false,
+    extensionDir: null,
     hasUserscript: false,
+    userscriptPath: null,
     hasBookmarklet: false,
+    bookmarkletRunnable: false,
+    bookmarkletChars: null,
+    bookmarkletMaxChars: BOOKMARKLET_MAX_RUNNABLE_CHARS,
     bookmarkletText: null,
   };
   if (!remoteDistDir || !fs.existsSync(remoteDistDir)) {
@@ -371,18 +409,86 @@ function readRemoteBundleStatus(remoteDistDir) {
       : [];
     const manifestFiles = parsed.files && typeof parsed.files === 'object' ? Object.keys(parsed.files) : [];
     const userscriptFileName = manifestFiles.find((name) => typeof name === 'string' && name.endsWith('.user.js')) || null;
-    const userscriptPath = userscriptFileName ? path.join(remoteDistDir, userscriptFileName) : null;
+    const candidateUserscriptPath = userscriptFileName
+      ? resolveSafeChildPath(remoteDistDir, userscriptFileName)
+      : null;
+    const hasUserscript = Boolean(candidateUserscriptPath && isRegularNonSymlinkFile(candidateUserscriptPath));
+    const userscriptPath = hasUserscript ? candidateUserscriptPath : null;
+
+    const extDirRel =
+      parsed.extension && typeof parsed.extension === 'object' && typeof parsed.extension.dir === 'string'
+        ? parsed.extension.dir
+        : 'extension';
+    const extManifestRel =
+      parsed.extension && typeof parsed.extension === 'object' && typeof parsed.extension.manifestFile === 'string'
+        ? parsed.extension.manifestFile
+        : `${extDirRel}/manifest.json`;
+    const extScriptRel =
+      parsed.extension && typeof parsed.extension === 'object' && typeof parsed.extension.contentScriptFile === 'string'
+        ? parsed.extension.contentScriptFile
+        : `${extDirRel}/content-script.js`;
+
+    const candidateExtDir = resolveSafeChildPath(remoteDistDir, extDirRel);
+    const candidateExtManifest = resolveSafeChildPath(remoteDistDir, extManifestRel);
+    const candidateExtScript = resolveSafeChildPath(remoteDistDir, extScriptRel);
+    let hasExtension = false;
+    let extensionDir = null;
+    if (
+      candidateExtDir &&
+      candidateExtManifest &&
+      candidateExtScript &&
+      isRegularNonSymlinkDir(candidateExtDir) &&
+      isRegularNonSymlinkFile(candidateExtManifest) &&
+      isRegularNonSymlinkFile(candidateExtScript)
+    ) {
+      try {
+        const extManifestStat = fs.lstatSync(candidateExtManifest);
+        if (extManifestStat.size > 0 && extManifestStat.size <= MAX_EXTENSION_MANIFEST_BYTES) {
+          const extManifest = parseSafeJson(fs.readFileSync(candidateExtManifest, 'utf8'));
+          if (extManifest && typeof extManifest === 'object' && extManifest.manifest_version === 3) {
+            hasExtension = true;
+            extensionDir = candidateExtDir;
+          }
+        }
+      } catch (_extErr) {
+        hasExtension = false;
+        extensionDir = null;
+      }
+    }
+
     const bookmarkletPath = path.join(remoteDistDir, 'bookmarklet.txt');
-    const hasUserscript = Boolean(userscriptPath && fs.existsSync(userscriptPath));
     let hasBookmarklet = false;
+    let bookmarkletRunnable = false;
+    let bookmarkletChars = null;
     let bookmarkletText = null;
     if (fs.existsSync(bookmarkletPath)) {
       const stat = fs.lstatSync(bookmarkletPath);
-      if (stat.isFile() && !stat.isSymbolicLink() && stat.size > 0 && stat.size <= MAX_BOOKMARKLET_BYTES) {
-        hasBookmarklet = true;
-        bookmarkletText = fs.readFileSync(bookmarkletPath, 'utf8').trim();
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.size > 0) {
+        if (stat.size > BOOKMARKLET_MAX_RUNNABLE_CHARS) {
+          bookmarkletChars = stat.size;
+        } else {
+          const trimmed = fs.readFileSync(bookmarkletPath, 'utf8').trim();
+          bookmarkletChars = trimmed.length;
+          if (
+            trimmed.startsWith('javascript:') &&
+            trimmed.length > 0 &&
+            trimmed.length <= BOOKMARKLET_MAX_RUNNABLE_CHARS
+          ) {
+            hasBookmarklet = true;
+            bookmarkletRunnable = true;
+            bookmarkletText = trimmed;
+          }
+        }
       }
+    } else if (
+      parsed.bookmarklet &&
+      typeof parsed.bookmarklet === 'object' &&
+      Number.isFinite(parsed.bookmarklet.charLength) &&
+      parsed.bookmarklet.charLength > 0
+    ) {
+      bookmarkletChars = parsed.bookmarklet.charLength;
     }
+
     return {
       built: true,
       distDir: remoteDistDir,
@@ -391,8 +497,14 @@ function readRemoteBundleStatus(remoteDistDir) {
       addonCount: packedPluginIds.length,
       packedPluginIds,
       packedAddonsById,
+      hasExtension,
+      extensionDir,
       hasUserscript,
+      userscriptPath,
       hasBookmarklet,
+      bookmarkletRunnable,
+      bookmarkletChars,
+      bookmarkletMaxChars: BOOKMARKLET_MAX_RUNNABLE_CHARS,
       bookmarkletText,
     };
   } catch (_err) {
@@ -409,7 +521,7 @@ function sameStringArray(a, b) {
 }
 
 function createHostAdminService({
-  hostVersion = '2.5.4',
+  hostVersion = '2.6.0',
   buildSha8 = 'dev',
   profile = {},
   addonsDir = null,
@@ -626,6 +738,7 @@ function createHostAdminService({
     }
     const remoteBundleNeedsRebuild =
       !remoteBundle.built ||
+      !remoteBundle.hasExtension ||
       !sameStringArray(remoteBundle.packedPluginIds, remoteEnabledIds) ||
       stalePluginIds.length > 0;
     const resolvedBuildCmd = resolveBuildRemoteCommand({

@@ -112,7 +112,7 @@ function createHostRuntimeController(cfg, deps = {}) {
       hostProfileId: profile.id || null,
       compatibleHostProfiles: profile.compatibleHostProfiles || null,
       supportedCapabilities: profile.supportedCapabilities || null,
-      hostVersion: cfg.hostVersion || '2.5.4',
+      hostVersion: cfg.hostVersion || '2.6.0',
       strictTrustPolicy,
       fsPort,
       isEnabled: (pluginId) => isPluginEnabledInConfig(cfg.configJsonPath, pluginId),
@@ -169,7 +169,7 @@ function createHostRuntimeController(cfg, deps = {}) {
   });
 
   const hostAdminService = createHostAdminService({
-    hostVersion: cfg.hostVersion || '2.5.4',
+    hostVersion: cfg.hostVersion || '2.6.0',
     buildSha8: cfg.buildSha8 || 'dev',
     profile,
     addonsDir: cfg.addonsDir,

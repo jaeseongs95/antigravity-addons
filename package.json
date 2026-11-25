@@ -1,6 +1,6 @@
 {
   "name": "antigravity-addons",
-  "version": "2.5.4",
+  "version": "2.6.0",
   "description": "Vendor-independent native desktop & remote web addon host framework and shared plugin isolation contract (AddonManifest v1/v2) with zero-dependency staged runtime, Shadow DOM isolation, SHA-256 trust pinning, and named-scope Config Bridge.",
   "license": "MIT",
   "main": "src/index.js",

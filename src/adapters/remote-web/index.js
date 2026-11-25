@@ -10,6 +10,7 @@ const domGuard = require('./dom-guard');
 const remoteHostBridge = require('./remote-host-bridge');
 const addonCollector = require('./addon-collector');
 const remoteBootstrap = require('./remote-bootstrap');
+const extensionManifest = require('./extension-manifest');
 
 module.exports = {
   ...originGuard,
@@ -18,4 +19,5 @@ module.exports = {
   ...remoteHostBridge,
   ...addonCollector,
   ...remoteBootstrap,
+  ...extensionManifest,
 };

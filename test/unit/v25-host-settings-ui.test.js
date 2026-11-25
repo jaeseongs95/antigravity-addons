@@ -17,6 +17,7 @@ const {
   readRemotePreferencesFile,
   isAddonEnabledInRemotePreferences,
   writeRemotePreferencesFileAtomic,
+  readRemoteBundleStatus,
   createHostAdminService,
 } = require('../../src/runtime/main/host-admin-service');
 const { createElectronHostLifecyclePort } = require('../../src/adapters/electron/electron-host-lifecycle-port');
@@ -401,7 +402,26 @@ function setupFixtureEnv() {
     'utf8'
   );
 
-  fs.mkdirSync(remoteDistDir, { recursive: true });
+  fs.mkdirSync(path.join(remoteDistDir, 'extension'), { recursive: true });
+  fs.writeFileSync(
+    path.join(remoteDistDir, 'extension', 'manifest.json'),
+    JSON.stringify({
+      manifest_version: 3,
+      name: 'Remote Addon Host',
+      version: '2.6.0',
+      content_scripts: [
+        {
+          matches: ['https://example.invalid/*'],
+          js: ['content-script.js'],
+          run_at: 'document_idle',
+          all_frames: false,
+          world: 'ISOLATED',
+        },
+      ],
+    }),
+    'utf8'
+  );
+  fs.writeFileSync(path.join(remoteDistDir, 'extension', 'content-script.js'), "'use strict';\n", 'utf8');
   fs.writeFileSync(
     path.join(remoteDistDir, 'build-manifest.json'),
     JSON.stringify({
@@ -409,7 +429,19 @@ function setupFixtureEnv() {
       buildSha8: '1a25fb86',
       mode: 'packed',
       addons: [{ pluginId: 'ko-translator' }, { pluginId: 'statusbar-ui' }],
-      files: { 'remote.user.js': 'abc', 'bookmarklet.txt': 'def' },
+      extension: {
+        dir: 'extension',
+        manifestVersion: 3,
+        manifestFile: 'extension/manifest.json',
+        contentScriptFile: 'extension/content-script.js',
+        world: 'ISOLATED',
+      },
+      files: {
+        'extension/content-script.js': 'ghi',
+        'extension/manifest.json': 'jkl',
+        'remote.user.js': 'abc',
+        'bookmarklet.txt': 'def',
+      },
     }),
     'utf8'
   );
@@ -1249,6 +1281,146 @@ test('TC-V25-009: createHostAdminService marks remoteBundle needsRebuild=true wh
     const stVerStale = makeService().getState();
     assert.equal(stVerStale.remoteBundle.needsRebuild, true);
     assert.deepEqual(stVerStale.remoteBundle.stalePluginIds, ['ko-translator']);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('TC-V25-010: v2.6.0 MV3 extension status, 64KB bookmarklet IPC cap, !hasExtension rebuild trigger, and dynamic Settings UI action hierarchy', async () => {
+  const fx = setupFixtureEnv();
+  try {
+    // 1. Healthy v2.6.0 dist reports extensionDir, userscriptPath, and small runnable bookmarklet
+    const okStatus = readRemoteBundleStatus(fx.remoteDistDir);
+    assert.equal(okStatus.hasExtension, true);
+    assert.equal(okStatus.extensionDir, path.join(fx.remoteDistDir, 'extension'));
+    assert.equal(okStatus.hasUserscript, true);
+    assert.equal(okStatus.userscriptPath, path.join(fx.remoteDistDir, 'remote.user.js'));
+    assert.equal(okStatus.bookmarkletRunnable, true);
+    assert.equal(okStatus.bookmarkletMaxChars, 65536);
+    assert.equal(okStatus.bookmarkletText, 'javascript:void(0)');
+
+    // 2. Oversized legacy bookmarklet.txt (> 65536 bytes) is NEVER returned over IPC
+    const oversizedText = 'javascript:' + 'a'.repeat(70000);
+    fs.writeFileSync(path.join(fx.remoteDistDir, 'bookmarklet.txt'), oversizedText, 'utf8');
+    const bigStatus = readRemoteBundleStatus(fx.remoteDistDir);
+    assert.equal(bigStatus.hasBookmarklet, false);
+    assert.equal(bigStatus.bookmarkletRunnable, false);
+    assert.equal(bigStatus.bookmarkletText, null);
+    assert.equal(bigStatus.bookmarkletChars, Buffer.byteLength(oversizedText, 'utf8'));
+
+    // 3. Removing extension/ (legacy v2.5.4 remote-dist) sets hasExtension=false & forces needsRebuild=true
+    fs.rmSync(path.join(fx.remoteDistDir, 'extension'), { recursive: true, force: true });
+    const fsPort = createNodeFileSystemPort();
+    const policy = JSON.parse(fs.readFileSync(fx.trustPolicyPath, 'utf8'));
+    const svc = createHostAdminService({
+      hostVersion: '2.6.0',
+      buildSha8: 'abcd1234',
+      profile: ANTIGRAVITY_HOST_PROFILE,
+      addonsDir: fx.addonsDir,
+      pluginsRootDir: fx.pluginsRootDir,
+      remotePrefsPath: fx.remotePrefsPath,
+      remoteDistDir: fx.remoteDistDir,
+      strictTrustPolicy: true,
+      fsPort,
+      isEnabledInDesktopConfig: () => true,
+      loadRawManifests: loadRawManifestsFromDir,
+      planDesktopAddons: () => ({ active: [], disabled: [], rejected: [] }),
+      readCurrentPolicy: () => policy,
+      getLifecycleStates: () => ({}),
+    });
+    const legacyState = svc.getState();
+    assert.equal(legacyState.remoteBundle.built, true);
+    assert.equal(legacyState.remoteBundle.hasExtension, false);
+    assert.equal(legacyState.remoteBundle.extensionDir, null);
+    assert.equal(legacyState.remoteBundle.needsRebuild, true);
+
+    // 4. Settings UI dynamic action hierarchy & hidden unrunnable bookmarklet button
+    const { doc } = createFakeDom();
+    const modal = doc.createElement('div');
+    modal.className = 'settings-modal-container';
+    const sidebarCol = doc.createElement('aside');
+    const sidebarTitle = doc.createElement('div');
+    sidebarTitle.textContent = '설정';
+    const sidebar = doc.createElement('nav');
+    const navGeneral = doc.createElement('button');
+    navGeneral.textContent = '일반';
+    const navBrowser = doc.createElement('button');
+    navBrowser.textContent = '브라우저';
+    sidebar.appendChild(navGeneral);
+    sidebar.appendChild(navBrowser);
+    sidebarCol.appendChild(sidebarTitle);
+    sidebarCol.appendChild(sidebar);
+    const contentPane = doc.createElement('main');
+    const nativeBody = doc.createElement('div');
+    nativeBody.textContent = '일반 설정';
+    contentPane.appendChild(nativeBody);
+    modal.appendChild(sidebarCol);
+    modal.appendChild(contentPane);
+    doc.body.appendChild(modal);
+
+    let bundleFixture = {
+      built: true,
+      buildSha8: '1a25fb86',
+      needsRebuild: false,
+      hasExtension: true,
+      extensionDir: 'C:\\Users\\demo\\.gemini\\antigravity\\remote-dist\\extension',
+      hasUserscript: true,
+      userscriptPath: 'C:\\Users\\demo\\.gemini\\antigravity\\remote-dist\\antigravity-remote.user.js',
+      hasBookmarklet: false,
+      bookmarkletRunnable: false,
+      bookmarkletText: null,
+      buildCommand: 'node "C:\\repo\\bin\\addon-host.js" --build-remote',
+    };
+
+    const ui = createHostSettingsUi(doc, {}, {
+      settingsUi: ANTIGRAVITY_HOST_PROFILE.settingsUi,
+      extraNoTranslateAttributes: ANTIGRAVITY_HOST_PROFILE.extraNoTranslateAttributes,
+      hostBridge: {
+        getHostAdminState: async () => ({
+          ok: true,
+          host: { version: '2.6.0', buildSha8: '1234abcd', profileId: 'antigravity-desktop' },
+          summary: { totalCount: 0, desktopActiveCount: 0, remoteEligibleCount: 0, remoteEnabledCount: 0 },
+          addons: [],
+          remoteBundle: bundleFixture,
+        }),
+        setRemoteAddonPreference: async () => ({ ok: true }),
+      },
+    });
+    assert.equal(ui.ensureMount(), true);
+    ui.getElements().navElement.dispatchClick();
+    await new Promise((r) => setImmediate(r));
+
+    const sr = ui.getElements().shadowRoot;
+    const cmdBtnUp = sr.querySelector('[data-ah-action="copy-command"]');
+    const extBtnUp = sr.querySelector('[data-ah-action="copy-extension-path"]');
+    const userBtnUp = sr.querySelector('[data-ah-action="copy-userscript-path"]');
+    const bmBtnHidden = sr.querySelector('[data-ah-action="copy-bookmarklet"]');
+    const guideEl = sr.querySelector('.ah-install-guide');
+
+    assert.ok(cmdBtnUp);
+    assert.ok(extBtnUp);
+    assert.ok(userBtnUp);
+    assert.equal(bmBtnHidden, null, 'Unrunnable bookmarklet button must be hidden');
+    assert.ok(guideEl && guideEl.textContent.includes('chrome://extensions'));
+    assert.equal(extBtnUp.className.includes('ah-btn-primary'), true, 'Copy extension path is primary when up to date');
+    assert.equal(cmdBtnUp.className.includes('ah-btn-primary'), false, 'Copy command is secondary when up to date');
+
+    // When needsRebuild is true, Copy command becomes primary and Copy extension path becomes secondary
+    bundleFixture = {
+      ...bundleFixture,
+      needsRebuild: true,
+      hasBookmarklet: true,
+      bookmarkletRunnable: true,
+      bookmarkletText: 'javascript:void(0)',
+    };
+    await ui.refresh();
+    const cmdBtnStale = sr.querySelector('[data-ah-action="copy-command"]');
+    const extBtnStale = sr.querySelector('[data-ah-action="copy-extension-path"]');
+    const bmBtnShown = sr.querySelector('[data-ah-action="copy-bookmarklet"]');
+    assert.equal(cmdBtnStale.className.includes('ah-btn-primary'), true);
+    assert.equal(extBtnStale.className.includes('ah-btn-primary'), false);
+    assert.ok(bmBtnShown, 'Runnable small bookmarklet button should render when bookmarkletRunnable=true');
+    ui.dispose();
   } finally {
     fx.cleanup();
   }
