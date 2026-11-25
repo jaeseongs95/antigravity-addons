@@ -17,12 +17,204 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { parseSafeJson } = require('../shared/safe-json');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
-const { readVerifiedRendererScript } = require('./trust-verifier');
+const { readVerifiedRendererScript, sha256Hex } = require('./trust-verifier');
 
 const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 const MAX_REMOTE_PREFS_BYTES = 65536;
+const MAX_HOST_CLI_META_BYTES = 16384;
 const MAX_BOOKMARKLET_BYTES = 2 * 1024 * 1024;
 const DEFAULT_REMOTE_PREFS_FILENAME = 'remote-preferences.json';
+const DEFAULT_HOST_CLI_META_FILENAME = 'host-cli.json';
+const DEFAULT_CLI_COMMAND_NAME = 'addon-host';
+const UNSAFE_SHELL_PATH_RE = /[\r\n\0"'`$;&|<>]/;
+
+function isSafeShellQuotedPath(filePath) {
+  if (typeof filePath !== 'string') return false;
+  const trimmed = filePath.trim();
+  if (!trimmed || UNSAFE_SHELL_PATH_RE.test(trimmed)) return false;
+  return path.isAbsolute(trimmed);
+}
+
+function isCommandOnPath(
+  commandName = DEFAULT_CLI_COMMAND_NAME,
+  { pathEnv = undefined, pathExtEnv = undefined, platform = process.platform } = {}
+) {
+  if (typeof commandName !== 'string' || !commandName.trim() || UNSAFE_SHELL_PATH_RE.test(commandName)) {
+    return false;
+  }
+  const activePlatform = platform || process.platform;
+  const isWin = activePlatform === 'win32';
+  const rawPath =
+    typeof pathEnv === 'string'
+      ? pathEnv
+      : isWin
+        ? process.env.PATH || process.env.Path || ''
+        : process.env.PATH || '';
+  if (!rawPath) return false;
+
+  const sep = isWin ? ';' : ':';
+  const dirs = rawPath
+    .split(sep)
+    .map((entry) => entry.trim().replace(/^"(.*)"$/, '$1'))
+    .filter(Boolean);
+  if (dirs.length === 0) return false;
+
+  let exts = [''];
+  if (isWin) {
+    const rawExt =
+      typeof pathExtEnv === 'string' ? pathExtEnv : process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD;.PS1';
+    const parsedExts = [];
+    const seenExts = new Set();
+    for (const part of rawExt.split(';')) {
+      const trimmed = part.trim();
+      if (!trimmed.startsWith('.')) continue;
+      for (const variant of [trimmed, trimmed.toLowerCase()]) {
+        if (!seenExts.has(variant)) {
+          seenExts.add(variant);
+          parsedExts.push(variant);
+        }
+      }
+    }
+    const hasExt = path.extname(commandName) !== '';
+    exts = hasExt ? ['', ...parsedExts] : parsedExts.length > 0 ? parsedExts : ['.EXE', '.exe', '.CMD', '.cmd', '.BAT', '.bat'];
+  }
+
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, ext ? `${commandName}${ext}` : commandName);
+      try {
+        const st = fs.statSync(candidate);
+        if (!st.isFile()) continue;
+        if (!isWin) {
+          fs.accessSync(candidate, fs.constants.X_OK);
+        }
+        return true;
+      } catch (_err) {
+        // continue searching PATH
+      }
+    }
+  }
+  return false;
+}
+
+function readHostCliMetaFile(metaPath) {
+  const empty = {
+    ok: true,
+    exists: false,
+    path: metaPath || null,
+    cliEntryPath: null,
+    updatedAt: null,
+    error: null,
+  };
+  if (!metaPath || typeof metaPath !== 'string') {
+    return empty;
+  }
+  if (!fs.existsSync(metaPath)) {
+    return empty;
+  }
+  try {
+    const lstat = fs.lstatSync(metaPath);
+    if (lstat.isSymbolicLink() || !lstat.isFile()) {
+      return { ...empty, ok: false, exists: true, error: 'ERR_HOST_CLI_META_NON_REGULAR_OR_SYMLINK' };
+    }
+    if (lstat.size > MAX_HOST_CLI_META_BYTES) {
+      return { ...empty, ok: false, exists: true, error: 'ERR_HOST_CLI_META_TOO_LARGE' };
+    }
+    const parsed = parseSafeJson(fs.readFileSync(metaPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ...empty, ok: false, exists: true, error: 'ERR_HOST_CLI_META_INVALID_ROOT' };
+    }
+    const rawCli = typeof parsed.cliEntryPath === 'string' ? parsed.cliEntryPath.trim() : '';
+    const updatedAt = typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null;
+    if (!isSafeShellQuotedPath(rawCli)) {
+      return { ...empty, ok: false, exists: true, updatedAt, error: 'ERR_HOST_CLI_ENTRY_INVALID' };
+    }
+    const resolvedCli = path.resolve(rawCli);
+    try {
+      if (!fs.statSync(resolvedCli).isFile()) {
+        return { ...empty, ok: true, exists: true, updatedAt, error: 'ERR_HOST_CLI_ENTRY_MISSING' };
+      }
+    } catch (_statErr) {
+      return { ...empty, ok: true, exists: true, updatedAt, error: 'ERR_HOST_CLI_ENTRY_MISSING' };
+    }
+    return {
+      ok: true,
+      exists: true,
+      path: metaPath,
+      cliEntryPath: resolvedCli,
+      updatedAt,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      ...empty,
+      ok: false,
+      exists: true,
+      error: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
+function resolveBuildRemoteCommand({
+  remoteDistDir = null,
+  cliCommandName = DEFAULT_CLI_COMMAND_NAME,
+  cliEntryPath = null,
+  hostCliMetaPath = null,
+  pathEnv = undefined,
+  pathExtEnv = undefined,
+  platform = process.platform,
+} = {}) {
+  const safeCmd =
+    typeof cliCommandName === 'string' && cliCommandName.trim() && !UNSAFE_SHELL_PATH_RE.test(cliCommandName.trim())
+      ? cliCommandName.trim()
+      : DEFAULT_CLI_COMMAND_NAME;
+  const distTrimmed = typeof remoteDistDir === 'string' ? remoteDistDir.trim() : '';
+  const safeDistDir = distTrimmed && !UNSAFE_SHELL_PATH_RE.test(distTrimmed) ? distTrimmed : null;
+  const argsSuffix = safeDistDir ? `--build-remote --out-dir "${safeDistDir}"` : '--build-remote';
+
+  if (isCommandOnPath(safeCmd, { pathEnv, pathExtEnv, platform })) {
+    return {
+      command: `${safeCmd} ${argsSuffix}`,
+      source: 'path',
+      runnable: true,
+      cliEntryPath: null,
+    };
+  }
+
+  let candidateCli = null;
+  if (isSafeShellQuotedPath(cliEntryPath)) {
+    const resolvedExplicit = path.resolve(cliEntryPath.trim());
+    try {
+      if (fs.statSync(resolvedExplicit).isFile()) {
+        candidateCli = resolvedExplicit;
+      }
+    } catch (_err) {
+      candidateCli = null;
+    }
+  }
+  if (!candidateCli && hostCliMetaPath) {
+    const meta = readHostCliMetaFile(hostCliMetaPath);
+    if (meta.ok && meta.cliEntryPath) {
+      candidateCli = meta.cliEntryPath;
+    }
+  }
+
+  if (candidateCli) {
+    return {
+      command: `node "${candidateCli}" ${argsSuffix}`,
+      source: 'cli-entry',
+      runnable: true,
+      cliEntryPath: candidateCli,
+    };
+  }
+
+  return {
+    command: `${safeCmd} ${argsSuffix}`,
+    source: 'fallback',
+    runnable: false,
+    cliEntryPath: null,
+  };
+}
 
 function readRemotePreferencesFile(prefsPath) {
   const empty = {
@@ -146,6 +338,7 @@ function readRemoteBundleStatus(remoteDistDir) {
     mode: null,
     addonCount: 0,
     packedPluginIds: [],
+    packedAddonsById: {},
     hasUserscript: false,
     hasBookmarklet: false,
     bookmarkletText: null,
@@ -162,9 +355,17 @@ function readRemoteBundleStatus(remoteDistDir) {
     if (!parsed || typeof parsed !== 'object' || typeof parsed.buildSha8 !== 'string' || !parsed.buildSha8) {
       return empty;
     }
+    const packedAddonsById = {};
     const packedPluginIds = Array.isArray(parsed.addons)
       ? parsed.addons
-          .map((a) => (a && typeof a.pluginId === 'string' ? a.pluginId : null))
+          .map((a) => {
+            if (!a || typeof a !== 'object' || typeof a.pluginId !== 'string' || !a.pluginId) return null;
+            packedAddonsById[a.pluginId] = {
+              version: typeof a.version === 'string' && a.version ? a.version : null,
+              rendererSha256: typeof a.rendererSha256 === 'string' && a.rendererSha256 ? a.rendererSha256 : null,
+            };
+            return a.pluginId;
+          })
           .filter(Boolean)
           .sort()
       : [];
@@ -189,6 +390,7 @@ function readRemoteBundleStatus(remoteDistDir) {
       mode: typeof parsed.mode === 'string' ? parsed.mode : null,
       addonCount: packedPluginIds.length,
       packedPluginIds,
+      packedAddonsById,
       hasUserscript,
       hasBookmarklet,
       bookmarkletText,
@@ -207,13 +409,19 @@ function sameStringArray(a, b) {
 }
 
 function createHostAdminService({
-  hostVersion = '2.5.3',
+  hostVersion = '2.5.4',
   buildSha8 = 'dev',
   profile = {},
   addonsDir = null,
   pluginsRootDir = null,
   remotePrefsPath = null,
   remoteDistDir = null,
+  hostCliMetaPath = null,
+  cliEntryPath = null,
+  cliCommandName = DEFAULT_CLI_COMMAND_NAME,
+  pathEnv = undefined,
+  pathExtEnv = undefined,
+  platform = process.platform,
   strictTrustPolicy = true,
   fsPort = null,
   isEnabledInDesktopConfig = () => true,
@@ -229,6 +437,9 @@ function createHostAdminService({
   const effectiveRemoteDistDir =
     remoteDistDir ||
     (addonsDir ? path.join(path.dirname(path.resolve(addonsDir)), 'remote-dist') : null);
+  const effectiveHostCliMetaPath =
+    hostCliMetaPath ||
+    (addonsDir ? path.join(path.dirname(path.resolve(addonsDir)), DEFAULT_HOST_CLI_META_FILENAME) : null);
   const effectiveRemoteProfileId =
     typeof profile.remoteProfileId === 'string' && profile.remoteProfileId.trim()
       ? profile.remoteProfileId.trim()
@@ -270,6 +481,7 @@ function createHostAdminService({
 
     const seenIds = new Set();
     const addons = [];
+    const liveRemoteSnapshotById = new Map();
 
     for (const entry of rawEntries) {
       const manifest = entry && entry.manifest && typeof entry.manifest === 'object' ? entry.manifest : null;
@@ -302,6 +514,7 @@ function createHostAdminService({
 
       let trustApproved = null;
       let trustRejectReason = null;
+      let liveRendererSha256 = null;
       const candidateAddon = desktopActive || remoteActiveById.get(pluginId) || null;
       const rendererScript = candidateAddon && candidateAddon.resolvedEntries ? candidateAddon.resolvedEntries.rendererScript : null;
       if (trustLevel === 'trusted') {
@@ -310,10 +523,17 @@ function createHostAdminService({
             strictTrustPolicy,
           });
           trustApproved = verified.ok;
+          liveRendererSha256 = typeof verified.sha256 === 'string' ? verified.sha256 : null;
           if (!verified.ok) trustRejectReason = verified.reason;
         } else {
           trustApproved = Boolean(policy && policy.approved && policy.approved[pluginId]);
           if (!trustApproved) trustRejectReason = 'ERR_TRUST_POLICY_NOT_APPROVED';
+        }
+      } else if (rendererScript && fs.existsSync(rendererScript)) {
+        try {
+          liveRendererSha256 = sha256Hex(fs.readFileSync(rendererScript));
+        } catch (_hashErr) {
+          liveRendererSha256 = null;
         }
       }
 
@@ -354,6 +574,12 @@ function createHostAdminService({
 
       const prefEnabled = isAddonEnabledInRemotePreferences(remotePrefs, pluginId);
       const remoteEnabled = remoteEligible && prefEnabled;
+      if (remoteEnabled) {
+        liveRemoteSnapshotById.set(pluginId, {
+          version,
+          rendererSha256: liveRendererSha256,
+        });
+      }
 
       addons.push({
         pluginId,
@@ -382,8 +608,35 @@ function createHostAdminService({
       .map((a) => a.pluginId)
       .sort();
     const remoteBundle = readRemoteBundleStatus(effectiveRemoteDistDir);
+    const stalePluginIds = [];
+    if (remoteBundle.built) {
+      const packedMap = remoteBundle.packedAddonsById || {};
+      for (const id of remoteEnabledIds) {
+        const packed = packedMap[id];
+        const live = liveRemoteSnapshotById.get(id);
+        if (!packed || !live) continue;
+        const shaChanged = Boolean(
+          packed.rendererSha256 && live.rendererSha256 && packed.rendererSha256 !== live.rendererSha256
+        );
+        const versionChanged = Boolean(packed.version && live.version && packed.version !== live.version);
+        if (shaChanged || versionChanged) {
+          stalePluginIds.push(id);
+        }
+      }
+    }
     const remoteBundleNeedsRebuild =
-      !remoteBundle.built || !sameStringArray(remoteBundle.packedPluginIds, remoteEnabledIds);
+      !remoteBundle.built ||
+      !sameStringArray(remoteBundle.packedPluginIds, remoteEnabledIds) ||
+      stalePluginIds.length > 0;
+    const resolvedBuildCmd = resolveBuildRemoteCommand({
+      remoteDistDir: effectiveRemoteDistDir,
+      cliCommandName,
+      cliEntryPath,
+      hostCliMetaPath: effectiveHostCliMetaPath,
+      pathEnv,
+      pathExtEnv,
+      platform,
+    });
 
     return {
       ok: true,
@@ -405,9 +658,10 @@ function createHostAdminService({
         ...remoteBundle,
         needsRebuild: remoteBundleNeedsRebuild,
         expectedPluginIds: remoteEnabledIds,
-        buildCommand: effectiveRemoteDistDir
-          ? `addon-host --build-remote --out-dir "${effectiveRemoteDistDir}"`
-          : 'addon-host --build-remote',
+        stalePluginIds,
+        buildCommand: resolvedBuildCmd.command,
+        buildCommandSource: resolvedBuildCmd.source,
+        buildCommandRunnable: resolvedBuildCmd.runnable,
       },
       remotePreferences: {
         ok: remotePrefs.ok,
@@ -460,6 +714,10 @@ function createHostAdminService({
 
 module.exports = {
   DEFAULT_REMOTE_PREFS_FILENAME,
+  DEFAULT_HOST_CLI_META_FILENAME,
+  isCommandOnPath,
+  readHostCliMetaFile,
+  resolveBuildRemoteCommand,
   readRemotePreferencesFile,
   isAddonEnabledInRemotePreferences,
   writeRemotePreferencesFileAtomic,
