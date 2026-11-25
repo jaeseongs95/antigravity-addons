@@ -63,12 +63,20 @@ function isCommandOnPath(
   if (isWin) {
     const rawExt =
       typeof pathExtEnv === 'string' ? pathExtEnv : process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD;.PS1';
-    const parsedExts = rawExt
-      .split(';')
-      .map((e) => e.trim())
-      .filter((e) => e.startsWith('.'));
+    const parsedExts = [];
+    const seenExts = new Set();
+    for (const part of rawExt.split(';')) {
+      const trimmed = part.trim();
+      if (!trimmed.startsWith('.')) continue;
+      for (const variant of [trimmed, trimmed.toLowerCase()]) {
+        if (!seenExts.has(variant)) {
+          seenExts.add(variant);
+          parsedExts.push(variant);
+        }
+      }
+    }
     const hasExt = path.extname(commandName) !== '';
-    exts = hasExt ? ['', ...parsedExts] : parsedExts.length > 0 ? parsedExts : ['.EXE', '.CMD', '.BAT'];
+    exts = hasExt ? ['', ...parsedExts] : parsedExts.length > 0 ? parsedExts : ['.EXE', '.exe', '.CMD', '.cmd', '.BAT', '.bat'];
   }
 
   for (const dir of dirs) {
