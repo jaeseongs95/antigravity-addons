@@ -146,35 +146,42 @@ function serializeDeduplicatedConfigJs(obj) {
     expr = expr.split(literal).join(varName);
   }
 
-  // 2. Deduplicate a shared base directory prefix repeated across 3+ path values (e.g. long Windows/CI temp paths)
-  const dirPrefixCounts = new Map();
-  const strRe = /"(?:\\.|[^"\\]){20,}"/g;
-  const matchedStrings = [];
-  while ((m = strRe.exec(expr)) !== null) {
-    matchedStrings.push(m[0]);
-    try {
-      const val = JSON.parse(m[0]);
-      if (typeof val === 'string' && (val.includes('\\') || val.startsWith('/'))) {
-        const sep = val.includes('\\') ? '\\' : '/';
-        const lastSep = val.lastIndexOf(sep);
-        if (lastSep >= 16) {
-          const dirPrefix = val.slice(0, lastSep);
-          dirPrefixCounts.set(dirPrefix, (dirPrefixCounts.get(dirPrefix) || 0) + 1);
+  // 2. Deduplicate up to 2 shared base directory prefixes repeated across path values (e.g. long Windows/Linux CI paths)
+  for (let pass = 0; pass < 2; pass += 1) {
+    const varName = pass === 0 ? '_B' : '_B1';
+    const minCount = pass === 0 ? 3 : 2;
+    const minSavings = pass === 0 ? 40 : 20;
+    const dirPrefixCounts = new Map();
+    const strRe = /"(?:\\.|[^"\\]){20,}"/g;
+    const matchedStrings = [];
+    while ((m = strRe.exec(expr)) !== null) {
+      matchedStrings.push(m[0]);
+      try {
+        const val = JSON.parse(m[0]);
+        if (typeof val === 'string' && (val.includes('\\') || val.startsWith('/'))) {
+          const sep = val.includes('\\') ? '\\' : '/';
+          let cut = val.lastIndexOf(sep);
+          let depth = 0;
+          while (cut >= 16 && depth < 3) {
+            const dirPrefix = val.slice(0, cut);
+            dirPrefixCounts.set(dirPrefix, (dirPrefixCounts.get(dirPrefix) || 0) + 1);
+            cut = val.lastIndexOf(sep, cut - 1);
+            depth += 1;
+          }
         }
-      }
-    } catch (_e) {}
-  }
-  let bestPrefix = null;
-  let bestSavings = 0;
-  for (const [prefix, count] of dirPrefixCounts.entries()) {
-    if (count < 3) continue;
-    const savings = count * prefix.length - (prefix.length + 20);
-    if (savings > bestSavings) {
-      bestSavings = savings;
-      bestPrefix = prefix;
+      } catch (_e) {}
     }
-  }
-  if (bestPrefix && bestSavings >= 40) {
+    let bestPrefix = null;
+    let bestSavings = 0;
+    for (const [prefix, count] of dirPrefixCounts.entries()) {
+      if (count < minCount) continue;
+      const savings = count * prefix.length - (prefix.length + 20);
+      if (savings > bestSavings) {
+        bestSavings = savings;
+        bestPrefix = prefix;
+      }
+    }
+    if (!bestPrefix || bestSavings < minSavings) break;
     const uniqueMatches = Array.from(new Set(matchedStrings));
     const replacements = [];
     for (const lit of uniqueMatches) {
@@ -182,22 +189,21 @@ function serializeDeduplicatedConfigJs(obj) {
         const val = JSON.parse(lit);
         if (typeof val === 'string' && val.startsWith(bestPrefix)) {
           const rest = val.slice(bestPrefix.length);
-          const rep = rest.length === 0 ? '_B' : `_B+${serializeSafeInlineJson(rest)}`;
+          const rep = rest.length === 0 ? varName : `${varName}+${serializeSafeInlineJson(rest)}`;
           replacements.push([lit, rep]);
         }
       } catch (_e) {}
     }
-    if (replacements.length >= 3) {
-      baseDefs.push(`const _B = ${serializeSafeInlineJson(bestPrefix)};`);
-      for (const [lit, rep] of replacements) {
-        expr = expr.split(lit).join(rep);
-      }
+    if (replacements.length < minCount) break;
+    baseDefs.push(`const ${varName} = ${serializeSafeInlineJson(bestPrefix)};`);
+    for (const [lit, rep] of replacements) {
+      expr = expr.split(lit).join(rep);
     }
   }
 
   // 3. Deduplicate repeated non-key string value literals shared across defs & expr (e.g. uiAnchors & uiSurfaces selectors)
   const valCounts = new Map();
-  const valRe = /"(?:\\.|[^"\\]){14,}"(?!\s*:)/g;
+  const valRe = /"(?:\\.|[^"\\]){12,}"(?!\s*:)/g;
   const scanTarget = arrBindings.join(',') + '\n' + expr;
   while ((m = valRe.exec(scanTarget)) !== null) {
     valCounts.set(m[0], (valCounts.get(m[0]) || 0) + 1);
@@ -218,6 +224,64 @@ function serializeDeduplicatedConfigJs(obj) {
     expr = expr.split(literal).join(varName);
   }
 
+  // 4. Hoist one high-frequency common string prefix across remaining non-key string values (e.g. repeated attribute selector prefixes)
+  const prefCounts = new Map();
+  const allTargets = [...strBindings, ...arrBindings, expr];
+  const prefScanRe = /"(?:\\.|[^"\\]){16,}"(?!\s*:)/g;
+  const prefLiterals = new Set();
+  for (const chunk of allTargets) {
+    let pm;
+    while ((pm = prefScanRe.exec(chunk)) !== null) {
+      prefLiterals.add(pm[0]);
+      try {
+        const val = JSON.parse(pm[0]);
+        if (typeof val !== 'string' || val.length < 16) continue;
+        for (const delim of ['="', '/']) {
+          const pos = val.indexOf(delim);
+          if (pos >= 6 && pos + delim.length < val.length - 2) {
+            const pfx = val.slice(0, pos + delim.length);
+            prefCounts.set(pfx, (prefCounts.get(pfx) || 0) + 1);
+          }
+        }
+      } catch (_e) {}
+    }
+  }
+  let bestValPfx = null;
+  let bestValPfxSavings = 0;
+  for (const [pfx, count] of prefCounts.entries()) {
+    if (count < 4) continue;
+    const encLen = serializeSafeInlineJson(pfx).length - 2;
+    const savings = count * (encLen - 3) - (encLen + 12);
+    if (savings > bestValPfxSavings) {
+      bestValPfxSavings = savings;
+      bestValPfx = pfx;
+    }
+  }
+  if (bestValPfx && bestValPfxSavings >= 40) {
+    const pfxReps = [];
+    for (const lit of prefLiterals) {
+      try {
+        const val = JSON.parse(lit);
+        if (typeof val === 'string' && val.startsWith(bestValPfx) && val.length > bestValPfx.length) {
+          const rest = val.slice(bestValPfx.length);
+          pfxReps.push([lit, `_P+${serializeSafeInlineJson(rest)}`]);
+        }
+      } catch (_e) {}
+    }
+    if (pfxReps.length >= 4) {
+      for (const [lit, rep] of pfxReps) {
+        for (let i = 0; i < strBindings.length; i += 1) {
+          strBindings[i] = strBindings[i].split(lit).join(rep);
+        }
+        for (let i = 0; i < arrBindings.length; i += 1) {
+          arrBindings[i] = arrBindings[i].split(lit).join(rep);
+        }
+        expr = expr.split(lit).join(rep);
+      }
+      strBindings.unshift(`_P=${serializeSafeInlineJson(bestValPfx)}`);
+    }
+  }
+
   const defs = [];
   if (strBindings.length > 0) defs.push(`const ${strBindings.join(',')};`);
   if (arrBindings.length > 0) defs.push(`const ${arrBindings.join(',')};`);
@@ -230,7 +294,7 @@ function buildHostLoaderScriptSource(
   paths,
   profile,
   {
-    hostVersion = '2.5.2',
+    hostVersion = '2.5.3',
     strictTrustPolicy = true,
     mainHookTimeoutMs = 5000,
     rendererExecTimeoutMs = 10000,
@@ -303,6 +367,9 @@ function buildHostLoaderScriptSource(
       ...(profile.uiSurfaces && Object.keys(profile.uiSurfaces).length > 0
         ? { uiSurfaces: compactUiSurfacesForShim(profile.uiSurfaces, profile.uiAnchors) }
         : {}),
+      ...(Array.isArray(profile.uiGridMerges) && profile.uiGridMerges.length > 0
+        ? { uiGridMerges: profile.uiGridMerges }
+        : {}),
       ...(profile.settingsUi ? { settingsUi: profile.settingsUi } : {}),
       ...(profile.portalBridge ? { portalBridge: profile.portalBridge } : {}),
     },
@@ -311,23 +378,17 @@ function buildHostLoaderScriptSource(
   const { defs: cfgDefs, expr: cfgExpr } = serializeDeduplicatedConfigJs(hostCfg);
   const cfgPrefix = cfgDefs.length > 0 ? cfgDefs.join('\n') + '\n' : '';
   const runtimeLookupExpr = relRuntimeDir
-    ? `path.resolve(__dirname, ${serializeSafeInlineJson(relRuntimeDir)})`
+    ? `path.resolve(__dirname,${serializeSafeInlineJson(relRuntimeDir)})`
     : serializeSafeInlineJson(path.resolve(runtimeEntryDir || path.resolve(__dirname, '..', '..', '..', 'dist', 'runtime')));
 
   return `'use strict';
-// Auto-generated thin v${hostCfg.hostVersion} entry shim (${profile.patchMarker}, ${buildSha8}).
-const path = require('node:path');
-${cfgPrefix}const HOST_CFG = ${cfgExpr};
-const RUNTIME_DIR = ${runtimeLookupExpr};
-const rt = require(path.join(RUNTIME_DIR, 'main', 'init-main.js'));
-const cfg = () => ({ ...HOST_CFG, preloadBridgePath: path.join(RUNTIME_DIR, 'preload', 'preload-bridge.cjs'), kernelBundlePath: path.join(RUNTIME_DIR, 'renderer', 'kernel-bundle.cjs') });
-module.exports = {
-  HOST_CFG,
-  RUNTIME_DIR,
-  initMain: (app, deps) => rt.initMain(app, cfg(), deps),
-  createHostRuntimeController: (deps) => rt.createHostRuntimeController(cfg(), deps),
-  getBuildInfo: () => ({ hostVersion: HOST_CFG.hostVersion, buildSha8: HOST_CFG.buildSha8, patchMarker: HOST_CFG.profile.patchMarker }),
-};
+// Auto-generated thin v${hostCfg.hostVersion} entry shim (${profile.patchMarker},${buildSha8}).
+const path=require('node:path');
+${cfgPrefix}const HOST_CFG=${cfgExpr};
+const RUNTIME_DIR=${runtimeLookupExpr};
+const rt=require(path.join(RUNTIME_DIR,'main','init-main.js'));
+const cfg=()=>({...HOST_CFG,preloadBridgePath:path.join(RUNTIME_DIR,'preload','preload-bridge.cjs'),kernelBundlePath:path.join(RUNTIME_DIR,'renderer','kernel-bundle.cjs')});
+module.exports={HOST_CFG,RUNTIME_DIR,initMain:(a,d)=>rt.initMain(a,cfg(),d),createHostRuntimeController:d=>rt.createHostRuntimeController(cfg(),d),getBuildInfo:()=>({hostVersion:HOST_CFG.hostVersion,buildSha8:HOST_CFG.buildSha8,patchMarker:HOST_CFG.profile.patchMarker})};
 `;
 }
 

@@ -435,3 +435,212 @@ test(
     }
   }
 );
+
+test(
+  'TC-GM-E2E (v2.5.3 Real Electron E2E): uiGridMerges merges split 2-column plugin grids (Swarm + GitHub) with pure CSS and zero DOM mutation',
+  { skip: ELECTRON_BIN ? false : 'electron devDependency not installed' },
+  () => {
+    const buildInfo = readDistRuntimeBuildInfo();
+    assert.ok(buildInfo, 'dist/runtime/build-manifest.json must exist (run npm run build:runtime)');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addon-host-v253-gm-'));
+    try {
+      const pluginsRoot = path.join(dir, 'plugins');
+      const addonsDir = path.join(dir, 'addons.d');
+      const configPath = path.join(dir, 'config.json');
+      const trustPolicyPath = path.join(dir, 'trust-policy.json');
+      const loaderPath = path.join(dir, 'addon-host-loader.js');
+      fs.mkdirSync(addonsDir, { recursive: true });
+      fs.mkdirSync(pluginsRoot, { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({ plugins: {} }), 'utf8');
+      fs.writeFileSync(trustPolicyPath, JSON.stringify({ schemaVersion: 1, approved: {} }), 'utf8');
+
+      const loaderSrc = buildHostLoaderScriptSource(
+        {
+          ADDONS_DIR: addonsDir,
+          PLUGINS_ROOT_DIR: pluginsRoot,
+          CONFIG_JSON_PATH: configPath,
+          TRUST_POLICY_PATH: trustPolicyPath,
+        },
+        ANTIGRAVITY_HOST_PROFILE,
+        {
+          runtimeEntryDir: buildInfo.distRuntimeDir,
+          buildSha8: buildInfo.buildSha8,
+        }
+      );
+      fs.writeFileSync(loaderPath, loaderSrc, 'utf8');
+
+      const appScript = path.join(dir, 'electron-gm-main.cjs');
+      fs.writeFileSync(
+        appScript,
+        `'use strict';
+        const http = require('node:http');
+        const { app, BrowserWindow } = require('electron');
+
+        app.commandLine.appendSwitch('no-sandbox');
+        app.commandLine.appendSwitch('disable-gpu');
+        app.commandLine.appendSwitch('disable-dev-shm-usage');
+
+        const loader = require(${JSON.stringify(loaderPath)});
+        loader.initMain(app);
+
+        async function waitFor(fn, timeoutMs = 8000) {
+          const start = Date.now();
+          while (Date.now() - start < timeoutMs) {
+            const val = await fn();
+            if (val) return val;
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          throw new Error('GM_E2E_WAIT_TIMEOUT');
+        }
+
+        app.whenReady().then(async () => {
+          const html = \`<!doctype html><html><head><style>
+            * { box-sizing: border-box; }
+            body { margin: 0; padding: 24px; font-family: sans-serif; }
+            .flex { display: flex; }
+            .flex-col { flex-direction: column; }
+            .gap-3 { gap: 12px; }
+            .gap-2 { gap: 8px; }
+            .grid { display: grid; }
+            .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+            @media (min-width: 640px) {
+              .sm\\\\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            }
+            .card { height: 72px; border: 1px solid #333; padding: 8px; }
+          </style></head><body>
+            <section class="flex flex-col gap-3" data-testid="customizations-installed-plugins">
+              <div id="hdr" style="height: 28px">플러그인 6</div>
+              <div class="flex flex-col gap-2">
+                <div class="grid gap-2 grid-cols-1 sm:grid-cols-2">
+                  <div id="p1" class="card">MCP Manager</div>
+                  <div id="p2" class="card">Antigravity Statusbar</div>
+                  <div id="p3" class="card">Ko Translator</div>
+                  <div id="p4" class="card">Sennard</div>
+                  <div id="p5" class="card">Swarm</div>
+                </div>
+                <button id="show-more" type="button" style="height: 30px">더 보기</button>
+              </div>
+              <div class="grid gap-2 grid-cols-1 sm:grid-cols-2" data-testid="cloud-app-cards">
+                <div id="p6" class="card">GitHub</div>
+              </div>
+            </section>
+          </body></html>\`;
+
+          const server = http.createServer((_req, res) => {
+            res.writeHead(200, {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'",
+            });
+            res.end(html);
+          });
+          await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+          const port = server.address().port;
+
+          const win = new BrowserWindow({
+            width: 1024,
+            height: 768,
+            show: false,
+            webPreferences: {
+              sandbox: true,
+              contextIsolation: true,
+              nodeIntegration: false,
+            },
+          });
+
+          const measureScript = \`(() => {
+            const rect = (id) => {
+              const b = document.getElementById(id).getBoundingClientRect();
+              return {
+                left: Math.round(b.left),
+                top: Math.round(b.top),
+                right: Math.round(b.right),
+                bottom: Math.round(b.bottom),
+                width: Math.round(b.width),
+                height: Math.round(b.height),
+              };
+            };
+            const hdr = rect('hdr');
+            const p1 = rect('p1');
+            const p2 = rect('p2');
+            const p5 = rect('p5');
+            const p6 = rect('p6');
+            const showMore = rect('show-more');
+            return {
+              viewportWidth: window.innerWidth,
+              styleCount: document.querySelectorAll('style[data-addon-host-ui-grid-merge="1"]').length,
+              hdr,
+              p1,
+              p2,
+              p5_swarm: p5,
+              p6_github: p6,
+              showMore,
+              sameRowAsSwarm: Math.abs(p6.top - p5.top) <= 2,
+              rightOfSwarm: p6.left > p5.right,
+              domParentIntact: document.getElementById('p6').parentElement.getAttribute('data-testid') === 'cloud-app-cards',
+            };
+          })()\`;
+
+          try {
+            await win.loadURL('http://127.0.0.1:' + port + '/customizations');
+            await waitFor(async () => {
+              const booted = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+                { code: 'Boolean(globalThis.__addonHostKernel && globalThis.__addonHostKernel.getBridgeStatus().booted)' },
+              ]);
+              return booted ? true : null;
+            });
+            // Allow one animation frame for Chromium style recalc
+            await new Promise((r) => setTimeout(r, 80));
+            const desktop = await win.webContents.executeJavaScript(measureScript);
+
+            // Narrow viewport (< 640px) must keep 1-column mobile stack
+            win.setContentSize(520, 768);
+            await new Promise((r) => setTimeout(r, 120));
+            const mobile = await win.webContents.executeJavaScript(measureScript);
+
+            process.stdout.write('GM_E2E_RESULT:' + JSON.stringify({ desktop, mobile }) + '\\n');
+            server.close();
+            win.destroy();
+            app.exit(0);
+          } catch (err) {
+            process.stderr.write(String(err && err.stack ? err.stack : err) + '\\n');
+            server.close();
+            app.exit(1);
+          }
+        });
+        `,
+        'utf8'
+      );
+
+      const env = { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' };
+      delete env.ELECTRON_RUN_AS_NODE;
+
+      const stdout = execFileSync(ELECTRON_BIN, ['--no-sandbox', '--disable-gpu', appScript], {
+        encoding: 'utf8',
+        env,
+        timeout: 30000,
+      });
+
+      const line = stdout.split(/\r?\n/).find((l) => l.startsWith('GM_E2E_RESULT:'));
+      assert.ok(line, `Expected GM_E2E_RESULT line in Electron stdout, got:\n${stdout}`);
+      const res = JSON.parse(line.slice('GM_E2E_RESULT:'.length));
+      const d = res.desktop;
+      const m = res.mobile;
+
+      assert.equal(d.styleCount, 1, `Expected 1 ui-grid-merge style element; desktop=${JSON.stringify(d)}`);
+      assert.equal(d.domParentIntact, true, `React DOM parent must stay cloud-app-cards; desktop=${JSON.stringify(d)}`);
+      assert.equal(d.sameRowAsSwarm, true, `GitHub must be on same row as Swarm; desktop=${JSON.stringify(d)}`);
+      assert.equal(d.rightOfSwarm, true, `GitHub must be to the right of Swarm; desktop=${JSON.stringify(d)}`);
+      assert.ok(Math.abs(d.p6_github.left - d.p2.left) <= 2, `GitHub left must align with col 2; desktop=${JSON.stringify(d)}`);
+      assert.ok(Math.abs(d.p6_github.width - d.p5_swarm.width) <= 2, `GitHub width must match Swarm; desktop=${JSON.stringify(d)}`);
+      assert.ok(Math.abs(d.hdr.width - (d.p2.right - d.p1.left)) <= 4, `Header must span full width; desktop=${JSON.stringify(d)}`);
+      assert.ok(d.showMore.top >= d.p6_github.bottom, `Show-more button must sit below merged grid; desktop=${JSON.stringify(d)}`);
+      assert.ok(Math.abs(d.showMore.width - d.hdr.width) <= 4, `Show-more button must span full width; desktop=${JSON.stringify(d)}`);
+
+      assert.equal(m.domParentIntact, true, `Mobile DOM parent must stay intact; mobile=${JSON.stringify(m)}`);
+      assert.ok(m.p6_github.top >= m.p5_swarm.bottom, `Mobile (<640px) must keep 1-column vertical stack; mobile=${JSON.stringify(m)}`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+);

@@ -189,6 +189,7 @@ function createRendererInjector({
       extraNoTranslateAttributes: Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [],
       uiAnchors: profile.uiAnchors || {},
       uiSurfaces: profile.uiSurfaces || {},
+      uiGridMerges: Array.isArray(profile.uiGridMerges) ? profile.uiGridMerges : [],
       settingsUi: profile.settingsUi || null,
       worldId,
     };

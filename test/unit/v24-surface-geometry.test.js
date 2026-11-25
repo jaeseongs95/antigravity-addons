@@ -12,7 +12,8 @@ const {
   toBrowserRemoteWebProfile,
 } = require('../../src/profiles/antigravity-remote-web');
 const { createSurfaceGeometry } = require('../../src/runtime/renderer/surface-geometry');
-const { createRendererKernel } = require('../../src/runtime/renderer/kernel');
+const { createRendererKernel, buildUiGridMergeCss } = require('../../src/runtime/renderer/kernel');
+const { buildHostLoaderScriptSource } = require('../../src/adapters/electron/host-loader-builder');
 const { verifyRemoteBundleAst } = require('../../scripts/build-remote');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -481,4 +482,117 @@ test('TC-SG-007: Real Antigravity 2.0 DOM selectors (sidebar-split / conversatio
 
   handle.dispose();
   renamedHandle.dispose();
+});
+
+test('TC-GM-001: Declarative uiGridMerges validation, selector sanitization, pure CSS generation, SOLID #0, and <4096B Linux/Windows thin shim budget', () => {
+  // 1. Profile contract validation (desktop & remote-web + malformed rejections)
+  assert.equal(validateHostProfile(ANTIGRAVITY_HOST_PROFILE).ok, true);
+  assert.equal(validateHostProfile(ANTIGRAVITY_REMOTE_WEB_PROFILE).ok, true);
+  assert.equal(ANTIGRAVITY_HOST_PROFILE.uiGridMerges.length, 1);
+
+  const browserProfile = toBrowserRemoteWebProfile(ANTIGRAVITY_REMOTE_WEB_PROFILE);
+  assert.equal(browserProfile.uiGridMerges.length, 1);
+  assert.equal(browserProfile.uiGridMerges[0].section, '[data-testid="customizations-installed-plugins"]');
+  assert.equal(browserProfile.uiGridMerges[0].secondary, '[data-testid="cloud-app-cards"]');
+  assert.doesNotThrow(() => JSON.stringify(browserProfile));
+
+  const base = { id: 'test-host', resolvePaths: () => ({}) };
+  assert.equal(validateHostProfile({ ...base, uiGridMerges: 'bad' }).ok, false);
+  assert.equal(validateHostProfile({ ...base, uiGridMerges: [{ section: '', secondary: '.b' }] }).ok, false);
+  assert.equal(validateHostProfile({ ...base, uiGridMerges: [{ section: '.a', secondary: '.b', minWidthPx: -1 }] }).ok, false);
+  assert.equal(validateHostProfile({ ...base, uiGridMerges: [{ section: '.a', secondary: '.b', columns: 1 }] }).ok, false);
+  assert.equal(validateHostProfile({ ...base, uiGridMerges: [{ section: '.a', secondary: '.b', columns: 13 }] }).ok, false);
+  assert.equal(validateHostProfile({ ...base, uiGridMerges: [{ section: '.a', secondary: '.b', gapPx: -4 }] }).ok, false);
+
+  // 2. CSS generation & selector injection blocking
+  const css = buildUiGridMergeCss([
+    ...ANTIGRAVITY_HOST_PROFILE.uiGridMerges,
+    { section: '.ok } body { display: none', secondary: '.b' },
+    { section: '@import url(x)', secondary: '.b' },
+    { section: '.a', secondary: '</style><script>alert(1)</script>' },
+    { section: '.a/*comment*/', secondary: '.b' },
+    { section: '.a', secondary: '.b;color:red' },
+  ]);
+  assert.ok(css.includes('@media (min-width: 640px)'));
+  assert.ok(css.includes('display: contents'));
+  assert.ok(css.includes('customizations-installed-plugins'));
+  assert.equal(css.includes('display: none'), false);
+  assert.equal(css.includes('@import'), false);
+  assert.equal(css.includes('</style>'), false);
+  assert.equal(css.includes('color:red'), false);
+
+  // 3. Idempotent style injection in kernel.boot()
+  const { doc, win } = makeGeometryMockDom({ viewportWidth: 1024, viewportHeight: 768 });
+  const headEl = doc.createElement('head');
+  doc.head = headEl;
+  doc.querySelector = (sel) => {
+    if (sel === 'style[data-addon-host-ui-grid-merge="1"]') {
+      return headEl.children.find((c) => c.getAttribute('data-addon-host-ui-grid-merge') === '1') || null;
+    }
+    return null;
+  };
+  const kernel = createRendererKernel(doc, win);
+  const boot = kernel.boot({
+    docGenId: 1,
+    hostToken: 'test-token-grid-merge-123456',
+    hostProfileId: 'antigravity-desktop',
+    uiGridMerges: ANTIGRAVITY_HOST_PROFILE.uiGridMerges,
+  });
+  assert.equal(boot.ok, true);
+  assert.equal(boot.hasUiGridMerges, true);
+  assert.equal(headEl.children.length, 1);
+  assert.equal(headEl.children[0].getAttribute('data-addon-host-ui-grid-merge'), '1');
+  assert.equal(headEl.children[0].getAttribute('data-addon-host-ignore'), 'true');
+  assert.ok(headEl.children[0].textContent.includes('display: contents'));
+
+  // 4. SOLID #0 & AST verification on kernel.js
+  const kernelSrc = fs.readFileSync(path.join(REPO_ROOT, 'src', 'runtime', 'renderer', 'kernel.js'), 'utf8');
+  assert.equal(/antigravity/i.test(kernelSrc), false);
+  assert.equal(/data-agy-/i.test(kernelSrc), false);
+  assert.equal(/customizations-installed-plugins/i.test(kernelSrc), false);
+  assert.equal(/cloud-app-cards/i.test(kernelSrc), false);
+  const ast = verifyRemoteBundleAst(kernelSrc);
+  assert.equal(ast.ok, true, `kernel.js AST violations: ${JSON.stringify(ast.violations)}`);
+
+  // 5. Thin shim stays strictly under 4096 bytes on BOTH Windows & Linux CI runner paths
+  const longWinBase = 'C:\\Users\\runneradmin\\AppData\\Local\\Temp\\addon-host-v2-tc008-long-ci-runner-dir-999999';
+  const winShim = buildHostLoaderScriptSource(
+    {
+      ADDONS_DIR: `${longWinBase}\\addons.d`,
+      PLUGINS_ROOT_DIR: `${longWinBase}\\plugins`,
+      CONFIG_JSON_PATH: `${longWinBase}\\config.json`,
+      TRUST_POLICY_PATH: `${longWinBase}\\trust-policy.json`,
+    },
+    ANTIGRAVITY_HOST_PROFILE,
+    { hostVersion: '2.5.3', buildSha8: 'testsha8' }
+  );
+  assert.equal(winShim.length < 4096, true, `Windows long-path shim exceeded 4096B: ${winShim.length}`);
+  assert.match(winShim, /const _B = /);
+  assert.match(winShim, /uiGridMerges/);
+
+  const linuxRunnerHome = '/home/runner/work/antigravity-addons/antigravity-addons/.tmp-e2e-runner';
+  const linuxShim = buildHostLoaderScriptSource(
+    {
+      HOME_DIR: linuxRunnerHome,
+      HOST_DATA_DIR: `${linuxRunnerHome}/.gemini/antigravity`,
+      ADDONS_DIR: `${linuxRunnerHome}/.gemini/antigravity/addons.d`,
+      PLUGINS_ROOT_DIR: `${linuxRunnerHome}/.gemini/config/plugins`,
+      CONFIG_JSON_PATH: `${linuxRunnerHome}/.gemini/config/config.json`,
+      MCP_CONFIG_PATH: `${linuxRunnerHome}/.gemini/config/mcp_config.json`,
+      MCP_CONFIG_LEGACY_PATH: `${linuxRunnerHome}/.gemini/antigravity/mcp_config.json`,
+      CONFIG_BACKUPS_DIR: `${linuxRunnerHome}/.gemini/config/.mcp-manager-backups`,
+      TRUST_POLICY_PATH: `${linuxRunnerHome}/.gemini/antigravity/trust-policy.json`,
+      REMOTE_PREFS_PATH: `${linuxRunnerHome}/.gemini/antigravity/remote-preferences.json`,
+      REMOTE_DIST_DIR: `${linuxRunnerHome}/.gemini/antigravity/remote-dist`,
+    },
+    ANTIGRAVITY_HOST_PROFILE,
+    {
+      hostVersion: '2.5.3',
+      buildSha8: 'testsha8',
+      runtimeEntryDir: '/home/runner/work/antigravity-addons/antigravity-addons/dist/runtime',
+    }
+  );
+  assert.equal(linuxShim.length < 4096, true, `Linux long-path shim exceeded 4096B: ${linuxShim.length}`);
+  assert.match(linuxShim, /const _B = /);
+  assert.match(linuxShim, /uiGridMerges/);
 });

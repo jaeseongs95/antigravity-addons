@@ -633,6 +633,7 @@ async function bootRemoteWebHost({
     hostBridge: existingKernelState ? undefined : createSwappableBridgePort(kernelState),
     uiAnchors: profile.uiAnchors || {},
     uiSurfaces: profile.uiSurfaces || {},
+    uiGridMerges: Array.isArray(profile.uiGridMerges) ? profile.uiGridMerges : [],
     extraNoTranslateAttributes: safeExtraNoTranslateAttributes,
   });
   if (!bootRes || bootRes.ok !== true) {
