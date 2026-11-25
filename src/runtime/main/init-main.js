@@ -23,6 +23,7 @@ const { createSettingsBridge } = require('./settings-bridge');
 const { createConfigBridge } = require('./config-bridge');
 const { createHostAdminService } = require('./host-admin-service');
 const { createRendererInjector } = require('./renderer-injector');
+const { createUpdateSurvivalHook } = require('./update-survival-hook');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
 const { createNodeFileSystemPort } = require('../../adapters/node-fs-port');
 const { isPluginEnabledInConfig } = require('../../adapters/electron/config-reader');
@@ -122,6 +123,16 @@ function createHostRuntimeController(cfg, deps = {}) {
   const portalArbiter = createPortalArbiter({
     ipcMain,
     portalBridge: profile.portalBridge || null,
+    recordDiag,
+  });
+
+  const updateSurvivalHook = createUpdateSurvivalHook({
+    updateSurvival: profile.updateSurvival || null,
+    hostDataDir: cfg.settingsDataDir || (cfg.addonsDir ? path.dirname(path.resolve(cfg.addonsDir)) : null),
+    platform: deps.platform || process.platform,
+    moduleApi: deps.moduleApi,
+    spawnFn: deps.spawnFn,
+    sleepSyncFn: deps.sleepSyncFn,
     recordDiag,
   });
 
@@ -358,6 +369,8 @@ function createHostRuntimeController(cfg, deps = {}) {
 
     // 1. Install PortalArbiter BEFORE app.whenReady() so we capture host's wcv:set-portal-overlay-open
     portalArbiter.install();
+    // 1b. Install Layer-1 fail-open update survival hook BEFORE updater module loads
+    updateSurvivalHook.install();
     // 2. Register host v2 IPC endpoints
     registerIpcHandlers();
     // 3. Schedule defaultSession preload registration strictly AFTER app.whenReady()
@@ -379,6 +392,7 @@ function createHostRuntimeController(cfg, deps = {}) {
         }
       });
       app.on('will-quit', () => {
+        updateSurvivalHook.dispose();
         settingsBridge.dispose();
         portalArbiter.dispose();
         mainHookRunner.disposeAll();
@@ -396,6 +410,7 @@ function createHostRuntimeController(cfg, deps = {}) {
     getDiagnostics: () => diagnostics.slice(),
     getAddonLifecycleStates: () => Object.fromEntries(lifecycleStates.entries()),
     getPortalArbiterStatus: () => portalArbiter.getStatus(),
+    getUpdateSurvivalStatus: () => updateSurvivalHook.getStatus(),
     getPreloadStatus: () => preloadRegistrar.getStatus(),
     getSettingsBridgeStatus: () => settingsBridge.getStatus(),
     getConfigBridgeStatus: () => configBridge.getStatus(),
@@ -403,6 +418,7 @@ function createHostRuntimeController(cfg, deps = {}) {
     setRemoteAddonPreference: (pluginId, enabled) => hostAdminService.setRemoteAddonPreference(pluginId, enabled),
     refreshSettingsBridge: () => settingsBridge.refreshNow(),
     dispose: () => {
+      updateSurvivalHook.dispose();
       settingsBridge.dispose();
       portalArbiter.dispose();
       return mainHookRunner.disposeAll();

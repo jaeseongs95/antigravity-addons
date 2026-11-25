@@ -649,7 +649,8 @@ function renderAddonCardList(doc, container, addons, hostActions, onInvokeHostAc
         if (act.runnable === false) {
           actBtn.disabled = true;
         } else {
-          actBtn.addEventListener('click', () => {
+          actBtn.addEventListener('click', (ev) => {
+            if (ev && ev.isTrusted === false) return;
             onInvokeHostAction(act.pluginId, act.actionId);
             if (typeof onAfterAction === 'function') onAfterAction();
           });
@@ -685,7 +686,8 @@ function renderSettingsTabCardList(doc, container, settingsTabs, onSelectSetting
     card.appendChild(row);
     card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta' }, `${tab.pluginId} · ${tab.tabId}`));
     if (canSelect) {
-      card.addEventListener('click', () => {
+      card.addEventListener('click', (ev) => {
+        if (ev && ev.isTrusted === false) return;
         const res = onSelectSettingsTab(tab.pluginId, tab.tabId);
         if (!res || res.ok !== false) {
           if (typeof onSelectedOk === 'function') onSelectedOk();
@@ -785,7 +787,8 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
       },
       def.label
     );
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
       activeTab = def.id;
       render();
     });
@@ -839,8 +842,12 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
     }
   }
 
-  pillBtn.addEventListener('click', () => setOpen(!isOpen));
-  closeBtn.addEventListener('click', () => {
+  pillBtn.addEventListener('click', (ev) => {
+    if (ev && ev.isTrusted === false) return;
+    setOpen(!isOpen);
+  });
+  closeBtn.addEventListener('click', (ev) => {
+    if (ev && ev.isTrusted === false) return;
     setOpen(false);
     if (typeof pillBtn.focus === 'function') pillBtn.focus();
   });

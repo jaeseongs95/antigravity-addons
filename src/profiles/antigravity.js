@@ -40,6 +40,7 @@ function resolveAntigravityPaths(env = process.env) {
   const asarLockPath = path.join(agyDir, 'addon-host-asar.lock');
   const backupsDir = path.join(agyDir, 'backups');
   const trustPolicyPath = path.join(agyDir, 'trust-policy.json');
+  const reconcileStatePath = path.join(agyDir, 'reconcile-state.json');
   const remotePrefsPath = path.join(agyDir, 'remote-preferences.json');
   const remoteDistDir =
     env && typeof env.AGY_REMOTE_DIST_DIR === 'string' && env.AGY_REMOTE_DIST_DIR.trim()
@@ -84,6 +85,7 @@ function resolveAntigravityPaths(env = process.env) {
     ASAR_LOCK_PATH: asarLockPath,
     BACKUPS_DIR: backupsDir,
     TRUST_POLICY_PATH: trustPolicyPath,
+    RECONCILE_STATE_PATH: reconcileStatePath,
     REMOTE_PREFS_PATH: remotePrefsPath,
     REMOTE_DIST_DIR: remoteDistDir,
     RUNTIME_DIR: runtimeDir,
@@ -156,6 +158,13 @@ const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
   portalBridge: Object.freeze({
     channel: 'wcv:set-portal-overlay-open',
     allowDegradedLocal: true,
+  }),
+  updateSurvival: Object.freeze({
+    updaterModule: 'electron-updater',
+    method: 'quitAndInstall',
+    platforms: Object.freeze(['win32']),
+    ackTimeoutMs: 250,
+    waitTimeoutMs: 45000,
   }),
   extraNoTranslateAttributes: Object.freeze(['data-agy-no-translate']),
   uiAnchors: Object.freeze({

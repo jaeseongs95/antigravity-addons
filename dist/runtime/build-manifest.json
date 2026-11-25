@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "dac28bb0",
-  "buildSha256": "dac28bb06daecc4a6fd981282320fa24db4789ac529c97e97a3ec2600da77221",
-  "fileCount": 31,
+  "buildSha8": "f571f1a0",
+  "buildSha256": "f571f1a0cd54fdee8e381e6d477dd67d9bd953742eac419c81cda2a26288c9ca",
+  "fileCount": 33,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
     "preload/preload-bridge.cjs": "d395cf0b392b746fcefbcd079c3c91a37350cb4b9115c1d58e5f58e2bd2489c2",
@@ -23,16 +23,18 @@
     "src/core/manifest-validator.js": "2e16e76829e2a43886a01bbd40f59b0d0bfc4b322c9293d23d5401abd7834f20",
     "src/core/slot-registry.js": "e17349af5514e088fb786b63229ec25f23de3b16cc2285b7828cb15d81b5832e",
     "src/core/trust-policy-port.js": "b7f00db398e17cdfaa7b22b75d88fa7b32b3a1077955557c6c525e63f88b2e3b",
+    "src/core/update-survival-port.js": "f3561cc8516b7eb4d2d4f130a520ccd7171fde4447d75f3af473697cb4c237de",
     "src/runtime/main/config-bridge.js": "758b00c117a1c9384b12ee3d0be6a0bab900c5bce8a52f95e827b5f5501a5347",
     "src/runtime/main/host-admin-service.js": "30b8994295930e5c4bbda24d74e20e775deaf6c094b266608c01ea1af4451840",
     "src/runtime/main/host-origin-resolver.js": "faed20a13ba9d26139743b9e79a0bbdf5c9e80c2103f81ee9e7b2a693fd0ad44",
-    "src/runtime/main/init-main.js": "0389e37ddec0a5421027416f6d50a7705ed2f24655e048099097ba868a3abe72",
+    "src/runtime/main/init-main.js": "5975212d93670d5c9329a186e2e31b08eb5eade4cce7b5d84777c3c48f7fbc39",
     "src/runtime/main/main-hook-runner.js": "7aaa3ea2b8cf3664592eed241b1521e7fbffa1a49d7bc35ff3f298cb4a4a9682",
     "src/runtime/main/portal-arbiter.js": "3dbb4c85ada7a7d9046956aef130d655ce1b05c8dfb196bb4230b12f7a473704",
     "src/runtime/main/preload-registrar.js": "c323aa7c2a4da31091fe57ca66e0d90b4c549883b739dcbed513fae766a79c47",
     "src/runtime/main/renderer-injector.js": "2a228f0a68e7cfec40a4d3b0e4023a0ccb91415f2b10c8464e60e9bc131bf5fe",
     "src/runtime/main/settings-bridge.js": "3d259e387f87107d6b860ae6d39a0eeddc313946dd232c9ceb83370879fa81a3",
     "src/runtime/main/trust-verifier.js": "cd2857094274b7b861b096376eb2222a29748d4c20923e6f727ade6212971c30",
+    "src/runtime/main/update-survival-hook.js": "635464986b983e15ae1f84aeb17f537deedcc25998994a7994cfae7a3336d3d5",
     "src/runtime/shared/constants.js": "f4240b7601ee38485baeec57f43b91a3d72c7729fc27624ea005840909de1e6c",
     "src/runtime/shared/safe-json.js": "7c7924f2964d20fb1060bc83e6149dd7a4db81d04f31a182630e8e6ecf3d7095"
   }

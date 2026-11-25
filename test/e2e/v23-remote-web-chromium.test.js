@@ -38,6 +38,43 @@ function sha256(str) {
   return crypto.createHash('sha256').update(str, 'utf8').digest('hex');
 }
 
+const CLICK_SHADOW_TRUSTED_HELPER = `
+async function ensureInputReady(win) {
+  try { win.setOpacity(0); } catch (_e) { /* headless platforms may not support setOpacity */ }
+  win.showInactive();
+  win.webContents.focus();
+  await win.webContents.executeJavaScript(
+    'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))'
+  );
+}
+
+async function clickShadowTrusted(win, worldId, selector, index = 0) {
+  const rect = await win.webContents.executeJavaScriptInIsolatedWorld(worldId, [{
+    code:
+      '(() => {' +
+      '  const host = document.getElementById("remote-addon-host-drawer-root");' +
+      '  const sr = host && host.shadowRoot;' +
+      '  if (!sr) return null;' +
+      '  const els = sr.querySelectorAll(' + JSON.stringify(selector) + ');' +
+      '  const el = els[' + Number(index) + '];' +
+      '  if (!el) return null;' +
+      '  if (typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "center", inline: "center" });' +
+      '  const r = el.getBoundingClientRect();' +
+      '  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), width: r.width, height: r.height };' +
+      '})()',
+  }]);
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    throw new Error('clickShadowTrusted target not visible: ' + selector + '[' + index + '] -> ' + JSON.stringify(rect));
+  }
+  win.webContents.focus();
+  win.webContents.sendInputEvent({ type: 'mouseMove', x: rect.x, y: rect.y });
+  win.webContents.sendInputEvent({ type: 'mouseDown', x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
+  win.webContents.sendInputEvent({ type: 'mouseUp', x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
+  await new Promise((r) => setTimeout(r, 90));
+  return rect;
+}
+`;
+
 test(
   'TC-RW-E2E (Real Chromium): packed AddonManifest.v2 plugins + ShadowRoot CSS isolation + Drawer Escape + settingsBridge persistence across reload + disallowed-origin abort',
   { skip: ELECTRON_BIN ? false : 'electron devDependency not installed' },
@@ -182,6 +219,7 @@ app.commandLine.appendSwitch('disable-dev-shm-usage');
 
 const extContentCode = fs.readFileSync(${JSON.stringify(extContentScriptPath)}, 'utf8');
 const userscriptCode = fs.readFileSync(${JSON.stringify(userscriptPath)}, 'utf8');
+${CLICK_SHADOW_TRUSTED_HELPER}
 
 async function waitFor(fn, timeoutMs = 4000) {
   const start = Date.now();
@@ -230,10 +268,11 @@ app.whenReady().then(async () => {
 
   try {
     await win.loadURL(allowed.origin + '/workspace');
+    await ensureInputReady(win);
     // Inject MV3 extension content-script.js into Chromium Isolated World 998 under strict TrustedTypes + nonce CSP
     await win.webContents.executeJavaScriptInIsolatedWorld(998, [{ code: extContentCode }]);
 
-    const firstBoot = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+    const bootBase = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
       {
         code:
           '(async () => {' +
@@ -241,37 +280,63 @@ app.whenReady().then(async () => {
           JSON.stringify(allowed.origin) +
           '], allowLoopbackHttp: true });' +
           'if (!res.ok) return { ok: false, reason: res.reason };' +
+          'globalThis.__rwE2eBoot = res;' +
           'const statusHost = document.querySelector(\\'[data-addon-host-slot="rw-status-addon.bar"]\\');' +
           'const statusLabel = statusHost && statusHost.shadowRoot && statusHost.shadowRoot.querySelector(".rw-label");' +
           'const labelColor = statusLabel ? getComputedStyle(statusLabel).color : null;' +
           'const bodyBg = getComputedStyle(document.body).backgroundColor;' +
           'const drawerHost = document.getElementById("remote-addon-host-drawer-root");' +
           'const pill = drawerHost && drawerHost.shadowRoot && drawerHost.shadowRoot.querySelector(".rah-pill");' +
-          'pill.click();' +
           'const drawerPanel = drawerHost.shadowRoot.querySelector("#rah-drawer-panel");' +
-          'const openedAfterClick = !drawerPanel.hasAttribute("hidden");' +
-          'const tabs = drawerHost.shadowRoot.querySelectorAll(".rah-tab");' +
-          'tabs[1].focus();' +
-          'tabs[1].click();' +
-          'const tabLabel = drawerHost.shadowRoot.querySelector(".rah-tab-label");' +
-          'const tabText = tabLabel ? tabLabel.textContent : null;' +
-          'const saveRes = await res.controller.bridge.port.saveSettings("rw-dual-settings", JSON.stringify({ theme: "midnight", count: 42 }));' +
+          'pill.click();' +
+          'const blockedSyntheticOpen = drawerPanel.hasAttribute("hidden");' +
           'return {' +
           '  ok: true,' +
           '  profileId: res.controller.profileId,' +
-          '  addonStates: res.controller.getAddonStates(),' +
           '  statusText: statusLabel ? statusLabel.textContent : null,' +
           '  labelColor,' +
           '  bodyBg,' +
-          '  openedAfterClick,' +
-          '  tabText,' +
+          '  blockedSyntheticOpen,' +
           '  initTheme: document.documentElement.getAttribute("data-rw-init-theme"),' +
-          '  liveTheme: document.documentElement.getAttribute("data-rw-live-theme"),' +
-          '  saveOk: saveRes.ok,' +
           '};' +
           '})()',
       },
     ]);
+
+    let firstBoot = bootBase;
+    if (bootBase.ok) {
+      await clickShadowTrusted(win, 998, '.rah-pill', 0);
+      const openedAfterClick = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+        {
+          code:
+            '(() => {' +
+            'const h = document.getElementById("remote-addon-host-drawer-root");' +
+            'const p = h && h.shadowRoot && h.shadowRoot.querySelector("#rah-drawer-panel");' +
+            'return Boolean(p && !p.hasAttribute("hidden"));' +
+            '})()',
+        },
+      ]);
+      await clickShadowTrusted(win, 998, '.rah-tab', 1);
+      const afterTab = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+        {
+          code:
+            '(async () => {' +
+            'const res = globalThis.__rwE2eBoot;' +
+            'const drawerHost = document.getElementById("remote-addon-host-drawer-root");' +
+            'const tabLabel = drawerHost.shadowRoot.querySelector(".rah-tab-label");' +
+            'const tabText = tabLabel ? tabLabel.textContent : null;' +
+            'const saveRes = await res.controller.bridge.port.saveSettings("rw-dual-settings", JSON.stringify({ theme: "midnight", count: 42 }));' +
+            'return {' +
+            '  addonStates: res.controller.getAddonStates(),' +
+            '  tabText,' +
+            '  liveTheme: document.documentElement.getAttribute("data-rw-live-theme"),' +
+            '  saveOk: saveRes.ok,' +
+            '};' +
+            '})()',
+        },
+      ]);
+      firstBoot = { ...bootBase, openedAfterClick, ...afterTab };
+    }
 
     // Verify MAIN world cannot see ISOLATED world runtime globals
     const pageWorldSeesGlobals = await win.webContents.executeJavaScript(
@@ -386,6 +451,7 @@ app.whenReady().then(async () => {
       assert.equal(result.firstBoot.statusText, 'RW_STATUS_OK:antigravity-remote-web');
       assert.equal(result.firstBoot.labelColor, 'rgb(20, 140, 60)');
       assert.equal(result.firstBoot.bodyBg, 'rgb(255, 255, 255)', 'ShadowRoot CSS isolation must protect document.body');
+      assert.equal(result.firstBoot.blockedSyntheticOpen, true, 'Synthetic ev.isTrusted===false click must not open Remote Host drawer');
       assert.equal(result.firstBoot.openedAfterClick, true);
       assert.equal(result.firstBoot.tabText, 'RW Status Settings');
       assert.equal(result.firstBoot.initTheme, 'packed-default');
@@ -445,6 +511,7 @@ app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-dev-shm-usage');
 
 const hostLibCode = fs.readFileSync(${JSON.stringify(hostLibPath)}, 'utf8');
+${CLICK_SHADOW_TRUSTED_HELPER}
 
 function startStrictLiveCspServer() {
   return new Promise((resolve) => {
@@ -492,10 +559,11 @@ app.whenReady().then(async () => {
 
   try {
     await win.loadURL(target.origin + '/workspace');
+    await ensureInputReady(win);
     // Load 0-addon host library into Isolated World 998 (matching @inject-into content)
     await win.webContents.executeJavaScriptInIsolatedWorld(998, [{ code: hostLibCode }]);
 
-    const outcome = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+    const bootStep = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
       {
         code: \`(async () => {
           const rt = globalThis.__addonHostRemoteRuntime;
@@ -542,65 +610,93 @@ app.whenReady().then(async () => {
             allowLoopbackHttp: true,
           });
           if (!boot.ok) return { ok: false, reason: boot.reason };
+          globalThis.__u6Boot = boot;
 
           const drawerHost = document.getElementById('remote-addon-host-drawer-root');
           const sr = drawerHost && drawerHost.shadowRoot;
           const pill = sr.querySelector('.rah-pill');
           const pillRect = pill.getBoundingClientRect();
-
-          // Open mobile drawer -> verify bottom-sheet geometry
-          pill.click();
           const panel = sr.querySelector('#rah-drawer-panel');
-          const panelRect = panel.getBoundingClientRect();
-
-          // Click Quick Action inside Addons tab
-          const actBtn = sr.querySelector('[data-host-action-plugin="u6-mobile-addon"][data-host-action-id="ping-action"]');
-          const actRect = actBtn ? actBtn.getBoundingClientRect() : null;
-          if (actBtn) actBtn.click();
-
-          // Switch to Settings Tabs & click tab -> opens modal dialog and auto-closes drawer
-          const tabs = sr.querySelectorAll('.rah-tab');
-          tabs[1].click();
-          const settingsBtn = sr.querySelector('[data-settings-tab-action="select"]');
-          const settingsRect = settingsBtn ? settingsBtn.getBoundingClientRect() : null;
-          if (settingsBtn) settingsBtn.click();
-          const drawerHiddenAfterSelect = panel.hasAttribute('hidden');
-
-          // 2. Post-boot dynamic registerAddon() mounts live
-          const reg2 = rt.registerAddon({
-            pluginMeta: {
-              schemaVersion: 2,
-              pluginId: 'u6-late-addon',
-              displayName: 'Late Dynamic Addon',
-              version: '1.0.0',
-              trustLevel: 'restricted',
-              capabilities: ['renderer'],
-              uiSlots: [],
-            },
-            run() {
-              document.documentElement.setAttribute('data-u6-late-mounted', 'yes');
-            },
-          });
-          const lateMount = reg2.promise ? await reg2.promise : null;
-
+          pill.click();
+          const blockedSyntheticOpen = panel.hasAttribute('hidden');
           return {
             ok: true,
             reg1Queued: reg1.queued,
             pillHeight: pillRect.height,
-            panelWidth: panelRect.width,
-            panelBottom: panelRect.bottom,
-            actBtnHeight: actRect ? actRect.height : 0,
-            settingsBtnHeight: settingsRect ? settingsRect.height : 0,
-            actionCount: document.documentElement.getAttribute('data-u6-action-count'),
-            modalOpen: document.documentElement.getAttribute('data-u6-modal-open'),
-            drawerHiddenAfterSelect,
-            lateMounted: document.documentElement.getAttribute('data-u6-late-mounted'),
-            lateStatus: lateMount ? lateMount.status : null,
-            addonCount: boot.controller.getAddonStates().length,
+            blockedSyntheticOpen,
           };
         })()\`,
       },
     ]);
+
+    let outcome = bootStep;
+    if (bootStep.ok) {
+      await clickShadowTrusted(win, 998, '.rah-pill', 0);
+      const panelMetrics = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+        {
+          code: \`(() => {
+            const sr = document.getElementById('remote-addon-host-drawer-root').shadowRoot;
+            const panelRect = sr.querySelector('#rah-drawer-panel').getBoundingClientRect();
+            const actBtn = sr.querySelector('[data-host-action-plugin="u6-mobile-addon"][data-host-action-id="ping-action"]');
+            const actRect = actBtn ? actBtn.getBoundingClientRect() : null;
+            return {
+              panelWidth: panelRect.width,
+              panelBottom: panelRect.bottom,
+              actBtnHeight: actRect ? actRect.height : 0,
+            };
+          })()\`,
+        },
+      ]);
+
+      await clickShadowTrusted(win, 998, '[data-host-action-plugin="u6-mobile-addon"][data-host-action-id="ping-action"]', 0);
+      await clickShadowTrusted(win, 998, '.rah-tab', 1);
+      const settingsMetrics = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+        {
+          code: \`(() => {
+            const sr = document.getElementById('remote-addon-host-drawer-root').shadowRoot;
+            const settingsBtn = sr.querySelector('[data-settings-tab-action="select"]');
+            const settingsRect = settingsBtn ? settingsBtn.getBoundingClientRect() : null;
+            return { settingsBtnHeight: settingsRect ? settingsRect.height : 0 };
+          })()\`,
+        },
+      ]);
+      await clickShadowTrusted(win, 998, '[data-settings-tab-action="select"]', 0);
+
+      const finalStep = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+        {
+          code: \`(async () => {
+            const rt = globalThis.__addonHostRemoteRuntime;
+            const boot = globalThis.__u6Boot;
+            const sr = document.getElementById('remote-addon-host-drawer-root').shadowRoot;
+            const drawerHiddenAfterSelect = sr.querySelector('#rah-drawer-panel').hasAttribute('hidden');
+            const reg2 = rt.registerAddon({
+              pluginMeta: {
+                schemaVersion: 2,
+                pluginId: 'u6-late-addon',
+                displayName: 'Late Dynamic Addon',
+                version: '1.0.0',
+                trustLevel: 'restricted',
+                capabilities: ['renderer'],
+                uiSlots: [],
+              },
+              run() {
+                document.documentElement.setAttribute('data-u6-late-mounted', 'yes');
+              },
+            });
+            const lateMount = reg2.promise ? await reg2.promise : null;
+            return {
+              actionCount: document.documentElement.getAttribute('data-u6-action-count'),
+              modalOpen: document.documentElement.getAttribute('data-u6-modal-open'),
+              drawerHiddenAfterSelect,
+              lateMounted: document.documentElement.getAttribute('data-u6-late-mounted'),
+              lateStatus: lateMount ? lateMount.status : null,
+              addonCount: boot.controller.getAddonStates().length,
+            };
+          })()\`,
+        },
+      ]);
+      outcome = { ...bootStep, ...panelMetrics, ...settingsMetrics, ...finalStep };
+    }
 
     process.stdout.write(JSON.stringify({ outcome, consoleErrors }) + '\\n');
     win.destroy();
@@ -631,6 +727,7 @@ app.whenReady().then(async () => {
       assert.deepEqual(result.consoleErrors, [], `Expected 0 console/CSP errors, got: ${JSON.stringify(result.consoleErrors)}`);
       assert.equal(result.outcome.ok, true);
       assert.equal(result.outcome.reg1Queued, true);
+      assert.equal(result.outcome.blockedSyntheticOpen, true, 'Synthetic pill.click() must be blocked by isTrusted guard');
       assert.ok(result.outcome.pillHeight >= 44, `Pill touch target must be >= 44px, got ${result.outcome.pillHeight}`);
       assert.ok(result.outcome.panelWidth >= 360, `Mobile 390px bottom-sheet width should span viewport, got ${result.outcome.panelWidth}`);
       assert.ok(result.outcome.actBtnHeight >= 44, `Quick action button must be >= 44px, got ${result.outcome.actBtnHeight}`);
@@ -740,6 +837,7 @@ app.commandLine.appendSwitch('disable-dev-shm-usage');
 const hostLibCode = fs.readFileSync(${JSON.stringify(hostLibPath)}, 'utf8');
 const alphaCode = fs.readFileSync(${JSON.stringify(alphaBuilt.userscriptPath)}, 'utf8');
 const betaCode = fs.readFileSync(${JSON.stringify(betaBuilt.userscriptPath)}, 'utf8');
+${CLICK_SHADOW_TRUSTED_HELPER}
 
 function startStrictLiveCspServer() {
   return new Promise((resolve) => {
@@ -786,6 +884,7 @@ app.whenReady().then(async () => {
 
   try {
     await win.loadURL(target.origin + '/workspace');
+    await ensureInputReady(win);
 
     const patchBootOrigin = (code) =>
       code.replace(
@@ -805,7 +904,7 @@ app.whenReady().then(async () => {
       'Boolean(globalThis.__addonHostKernel || globalThis.__addonHostRemoteRuntime)'
     );
 
-    const outcome = await win.webContents.executeJavaScriptInIsolatedWorld(997, [
+    const preClick = await win.webContents.executeJavaScriptInIsolatedWorld(997, [
       {
         code: \`(() => {
           const drawerHost = document.getElementById('remote-addon-host-drawer-root');
@@ -814,41 +913,49 @@ app.whenReady().then(async () => {
           const pill = sr.querySelector('.rah-pill');
           const badgeBefore = sr.querySelector('[data-rah-count-badge]').textContent;
           pill.click();
-          const aBtn = sr.querySelector('[data-host-action-plugin="alpha-mod"][data-host-action-id="act"]');
-          const bBtn = sr.querySelector('[data-host-action-plugin="beta-mod"][data-host-action-id="act"]');
-          if (aBtn) aBtn.click();
-          if (bBtn) bBtn.click();
-
-          const tabs = sr.querySelectorAll('.rah-tab');
-          tabs[1].click();
-          const aTab = sr.querySelector('[data-settings-tab-plugin="alpha-mod"][data-settings-tab-id="prefs"]');
-          if (aTab) aTab.click();
-          const closedAfterA = sr.querySelector('#rah-drawer-panel').hasAttribute('hidden');
-
-          pill.click();
-          tabs[1].click();
-          const bTab = sr.querySelector('[data-settings-tab-plugin="beta-mod"][data-settings-tab-id="prefs"]');
-          if (bTab) bTab.click();
-          const closedAfterB = sr.querySelector('#rah-drawer-panel').hasAttribute('hidden');
-
-          return {
-            ok: true,
-            drawerCount: document.querySelectorAll('#remote-addon-host-drawer-root').length,
-            dockCount: document.querySelectorAll('#remote-addon-host-slot-dock').length,
-            mountedAttr: document.documentElement.getAttribute('data-remote-addon-host-plugins'),
-            badgeBefore,
-            alphaMounted: document.documentElement.getAttribute('data-alpha-mounted'),
-            betaMounted: document.documentElement.getAttribute('data-beta-mounted'),
-            alphaAct: document.documentElement.getAttribute('data-alpha-act'),
-            betaAct: document.documentElement.getAttribute('data-beta-act'),
-            alphaModal: document.documentElement.getAttribute('data-alpha-modal'),
-            betaModal: document.documentElement.getAttribute('data-beta-modal'),
-            closedAfterA,
-            closedAfterB,
-          };
+          const blockedSyntheticOpen = sr.querySelector('#rah-drawer-panel').hasAttribute('hidden');
+          return { ok: true, badgeBefore, blockedSyntheticOpen };
         })()\`,
       },
     ]);
+
+    let outcome = preClick;
+    if (preClick.ok) {
+      await clickShadowTrusted(win, 997, '.rah-pill', 0);
+      await clickShadowTrusted(win, 997, '[data-host-action-plugin="alpha-mod"][data-host-action-id="act"]', 0);
+      await clickShadowTrusted(win, 997, '[data-host-action-plugin="beta-mod"][data-host-action-id="act"]', 0);
+      await clickShadowTrusted(win, 997, '.rah-tab', 1);
+      await clickShadowTrusted(win, 997, '[data-settings-tab-plugin="alpha-mod"][data-settings-tab-id="prefs"]', 0);
+      const closedAfterA = await win.webContents.executeJavaScriptInIsolatedWorld(997, [
+        {
+          code: \`Boolean(document.getElementById('remote-addon-host-drawer-root').shadowRoot.querySelector('#rah-drawer-panel').hasAttribute('hidden'))\`,
+        },
+      ]);
+
+      await clickShadowTrusted(win, 997, '.rah-pill', 0);
+      await clickShadowTrusted(win, 997, '.rah-tab', 1);
+      await clickShadowTrusted(win, 997, '[data-settings-tab-plugin="beta-mod"][data-settings-tab-id="prefs"]', 0);
+      const postClick = await win.webContents.executeJavaScriptInIsolatedWorld(997, [
+        {
+          code: \`(() => {
+            const sr = document.getElementById('remote-addon-host-drawer-root').shadowRoot;
+            return {
+              drawerCount: document.querySelectorAll('#remote-addon-host-drawer-root').length,
+              dockCount: document.querySelectorAll('#remote-addon-host-slot-dock').length,
+              mountedAttr: document.documentElement.getAttribute('data-remote-addon-host-plugins'),
+              alphaMounted: document.documentElement.getAttribute('data-alpha-mounted'),
+              betaMounted: document.documentElement.getAttribute('data-beta-mounted'),
+              alphaAct: document.documentElement.getAttribute('data-alpha-act'),
+              betaAct: document.documentElement.getAttribute('data-beta-act'),
+              alphaModal: document.documentElement.getAttribute('data-alpha-modal'),
+              betaModal: document.documentElement.getAttribute('data-beta-modal'),
+              closedAfterB: sr.querySelector('#rah-drawer-panel').hasAttribute('hidden'),
+            };
+          })()\`,
+        },
+      ]);
+      outcome = { ...preClick, closedAfterA, ...postClick };
+    }
 
     process.stdout.write(JSON.stringify({ outcome, pageWorldSeesGlobals, consoleErrors }) + '\\n');
     win.destroy();
@@ -879,6 +986,7 @@ app.whenReady().then(async () => {
       assert.deepEqual(result.consoleErrors, [], `Expected 0 CSP/console errors, got: ${JSON.stringify(result.consoleErrors)}`);
       assert.equal(result.pageWorldSeesGlobals, false);
       assert.equal(result.outcome.ok, true);
+      assert.equal(result.outcome.blockedSyntheticOpen, true, 'Synthetic pill.click() must be blocked by isTrusted guard');
       assert.equal(result.outcome.drawerCount, 1);
       assert.equal(result.outcome.dockCount, 1);
       assert.equal(result.outcome.mountedAttr, 'alpha-mod,beta-mod');
