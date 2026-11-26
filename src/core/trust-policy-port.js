@@ -65,6 +65,9 @@ function getPrivilegedRequirements(manifest) {
         (entry) => entry && typeof entry.name === 'string' && entry.name.trim().startsWith('host.')
       )
   );
+  const hasSecrets = Boolean(
+    perms && perms.secrets && typeof perms.secrets === 'object' && !Array.isArray(perms.secrets)
+  );
   const required = [];
   if (hasMainHook) required.push('mainHook');
   if (hasDocumentTransform) required.push('document-transform');
@@ -72,6 +75,7 @@ function getPrivilegedRequirements(manifest) {
   if (hasConfigBridge) required.push('configBridge');
   if (hasLocalLoopback) required.push('net.localLoopback');
   if (hasHostServiceProvide) required.push('services.host');
+  if (hasSecrets) required.push('secrets');
   return {
     hasMainHook,
     hasDocumentTransform,
@@ -79,6 +83,7 @@ function getPrivilegedRequirements(manifest) {
     hasConfigBridge,
     hasLocalLoopback,
     hasHostServiceProvide,
+    hasSecrets,
     requiresTrustApproval: required.length > 0 || (manifest && manifest.trustLevel === 'trusted'),
     privilegedCapabilities: required,
   };

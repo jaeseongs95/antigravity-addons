@@ -32,6 +32,11 @@ const IPC_HOST_ADMIN_CONFIGURE_REMOTE_BRIDGE = 'addon-host:v3:host-admin-configu
 const IPC_HOST_ADMIN_ROTATE_REMOTE_TOKEN = 'addon-host:v3:host-admin-rotate-remote-token';
 const IPC_HOST_ADMIN_REBUILD_REMOTE_BUNDLE = 'addon-host:v3:host-admin-rebuild-remote-bundle';
 const IPC_NET_FETCH = 'addon-host:v3:net-fetch';
+const IPC_SECRETS_SET = 'addon-host:v3:secrets-set';
+const IPC_SECRETS_GET = 'addon-host:v3:secrets-get';
+const IPC_SECRETS_HAS = 'addon-host:v3:secrets-has';
+const IPC_SECRETS_DELETE = 'addon-host:v3:secrets-delete';
+const IPC_SECRETS_LIST = 'addon-host:v3:secrets-list';
 const IPC_REPORT_ERROR = 'addon-host:v2:report-error';
 const IPC_PING = 'addon-host:v2:ping';
 
@@ -131,7 +136,7 @@ try {
         },
         netFetch(pluginId, url, init) {
           const safeInit = init && typeof init === 'object' ? init : {};
-          return ipcRenderer.invoke(IPC_NET_FETCH, {
+          const payload = {
             docGenId,
             pluginId: String(pluginId || ''),
             url: String(url || ''),
@@ -139,6 +144,45 @@ try {
             headers: safeInit.headers && typeof safeInit.headers === 'object' ? safeInit.headers : {},
             body: typeof safeInit.body === 'string' ? safeInit.body : null,
             timeoutMs: Number.isFinite(Number(safeInit.timeoutMs)) ? Number(safeInit.timeoutMs) : undefined,
+          };
+          if (safeInit.secretHeaders && typeof safeInit.secretHeaders === 'object' && !Array.isArray(safeInit.secretHeaders)) {
+            payload.secretHeaders = safeInit.secretHeaders;
+          }
+          return ipcRenderer.invoke(IPC_NET_FETCH, payload);
+        },
+        secretsSet(pluginId, key, value) {
+          return ipcRenderer.invoke(IPC_SECRETS_SET, {
+            docGenId,
+            pluginId: String(pluginId || ''),
+            key: String(key || ''),
+            value: typeof value === 'string' ? value : '',
+          });
+        },
+        secretsGet(pluginId, key) {
+          return ipcRenderer.invoke(IPC_SECRETS_GET, {
+            docGenId,
+            pluginId: String(pluginId || ''),
+            key: String(key || ''),
+          });
+        },
+        secretsHas(pluginId, key) {
+          return ipcRenderer.invoke(IPC_SECRETS_HAS, {
+            docGenId,
+            pluginId: String(pluginId || ''),
+            key: String(key || ''),
+          });
+        },
+        secretsDelete(pluginId, key) {
+          return ipcRenderer.invoke(IPC_SECRETS_DELETE, {
+            docGenId,
+            pluginId: String(pluginId || ''),
+            key: String(key || ''),
+          });
+        },
+        secretsList(pluginId) {
+          return ipcRenderer.invoke(IPC_SECRETS_LIST, {
+            docGenId,
+            pluginId: String(pluginId || ''),
           });
         },
         reportError(pluginId, detail) {

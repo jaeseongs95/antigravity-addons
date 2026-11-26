@@ -1127,6 +1127,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
   let pluginNavElements = [];
   let unsubSettingsPages = null;
   let unsubInlineHost = null;
+  let unsubLocale = null;
   let paneHostElement = null;
   let shadowRoot = null;
   let pluginPaneHostElement = null;
@@ -1159,6 +1160,10 @@ function createHostSettingsUi(doc, win, opts = {}) {
   }
 
   function getLanguage() {
+    if (themeAndI18n && typeof themeAndI18n.getLocale === 'function') {
+      const fromHost = normalizeLang(themeAndI18n.getLocale());
+      if (fromHost) return fromHost;
+    }
     return resolveLanguage(win, doc, userLangOverride);
   }
 
@@ -1166,7 +1171,11 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const norm = normalizeLang(nextLang);
     if (!norm) return getLanguage();
     userLangOverride = norm;
-    writeStoredLanguage(win, norm);
+    if (themeAndI18n && typeof themeAndI18n.setLocale === 'function') {
+      themeAndI18n.setLocale(norm, { persist: true });
+    } else {
+      writeStoredLanguage(win, norm);
+    }
     mountedLang = norm;
     if (navElement && navElement.isConnected) {
       replaceLeafText(navElement, getNavLabel(norm), doc);
@@ -2774,6 +2783,18 @@ function createHostSettingsUi(doc, win, opts = {}) {
         if (isOpen) renderPanel();
       });
     }
+    if (themeAndI18n && typeof themeAndI18n.onLocaleDidChange === 'function') {
+      unsubLocale = themeAndI18n.onLocaleDidChange((nextLoc) => {
+        if (disposed) return;
+        const norm = normalizeLang(nextLoc) || getLanguage();
+        userLangOverride = norm;
+        mountedLang = norm;
+        if (navElement && navElement.isConnected) {
+          replaceLeafText(navElement, getNavLabel(norm), doc);
+        }
+        if (isOpen) renderPanel();
+      });
+    }
     ensureMount();
     const MO = (win && win.MutationObserver) || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
     const observeTarget = doc && (doc.documentElement || doc.body);
@@ -2830,6 +2851,12 @@ function createHostSettingsUi(doc, win, opts = {}) {
         unsubSettingsPages();
       } catch (_err) {}
       unsubSettingsPages = null;
+    }
+    if (unsubLocale) {
+      try {
+        unsubLocale();
+      } catch (_err) {}
+      unsubLocale = null;
     }
     closePluginPane({ restoreNative: false });
     closePanel({ restoreNative: true });

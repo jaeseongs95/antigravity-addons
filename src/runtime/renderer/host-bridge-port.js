@@ -34,6 +34,11 @@ const HOST_BRIDGE_PORT_OPTIONAL_METHODS = _ObjectFreeze([
   'rebuildRemoteBundle',
   'getRemoteBridgeStatus',
   'netFetch',
+  'secretsSet',
+  'secretsGet',
+  'secretsHas',
+  'secretsDelete',
+  'secretsList',
 ]);
 
 function isValidHostBridgePort(candidate) {
@@ -77,6 +82,11 @@ function wrapHostBridgePort(candidate) {
   const fnGetRemoteBridgeStatus =
     typeof candidate.getRemoteBridgeStatus === 'function' ? candidate.getRemoteBridgeStatus : null;
   const fnNetFetch = typeof candidate.netFetch === 'function' ? candidate.netFetch : null;
+  const fnSecretsSet = typeof candidate.secretsSet === 'function' ? candidate.secretsSet : null;
+  const fnSecretsGet = typeof candidate.secretsGet === 'function' ? candidate.secretsGet : null;
+  const fnSecretsHas = typeof candidate.secretsHas === 'function' ? candidate.secretsHas : null;
+  const fnSecretsDelete = typeof candidate.secretsDelete === 'function' ? candidate.secretsDelete : null;
+  const fnSecretsList = typeof candidate.secretsList === 'function' ? candidate.secretsList : null;
 
   const wrapped = {
     docGenId,
@@ -138,6 +148,31 @@ function wrapHostBridgePort(candidate) {
   if (fnNetFetch) {
     wrapped.netFetch = function netFetch(pluginId, url, init) {
       return _ReflectApply(fnNetFetch, candidate, [pluginId, url, init]);
+    };
+  }
+  if (fnSecretsSet) {
+    wrapped.secretsSet = function secretsSet(pluginId, key, value) {
+      return _ReflectApply(fnSecretsSet, candidate, [pluginId, key, value]);
+    };
+  }
+  if (fnSecretsGet) {
+    wrapped.secretsGet = function secretsGet(pluginId, key) {
+      return _ReflectApply(fnSecretsGet, candidate, [pluginId, key]);
+    };
+  }
+  if (fnSecretsHas) {
+    wrapped.secretsHas = function secretsHas(pluginId, key) {
+      return _ReflectApply(fnSecretsHas, candidate, [pluginId, key]);
+    };
+  }
+  if (fnSecretsDelete) {
+    wrapped.secretsDelete = function secretsDelete(pluginId, key) {
+      return _ReflectApply(fnSecretsDelete, candidate, [pluginId, key]);
+    };
+  }
+  if (fnSecretsList) {
+    wrapped.secretsList = function secretsList(pluginId) {
+      return _ReflectApply(fnSecretsList, candidate, [pluginId]);
     };
   }
 

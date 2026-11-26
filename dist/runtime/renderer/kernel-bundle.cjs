@@ -9,7 +9,7 @@
  * Pure vendor- & runtime-neutral Tier-2 Declarative UI Schema Validator &
  * Static JSON Predicate Evaluator (v3.0.0 — SOLID #0).
  *
- * - Closed set of 16 semantic UI primitives (zero raw HTML, zero script tags, zero eval).
+ * - Closed set of 17 semantic UI primitives (zero raw HTML, zero script tags, zero eval).
  * - Static JSON `visibleWhen` / `disabledWhen` predicates (`{ field, eq | neq | in | truthy }`
  *   plus bounded `{ all }` / `{ any }` combinators).
  * - Enforces max tree depth (12) and max node count (256) to prevent DoS.
@@ -29,6 +29,7 @@ const ALLOWED_UI_NODE_TYPES = Object.freeze([
   'input',
   'textarea',
   'select',
+  'segmented',
   'slider',
   'progress',
   'list',
@@ -171,9 +172,9 @@ function validateUiTree(tree) {
       const r = validateUiCondition(node.disabledWhen);
       if (!r.ok) errors.push(`${pathLabel}.disabledWhen: ${r.reason}`);
     }
-    if (node.type === 'select') {
+    if (node.type === 'select' || node.type === 'segmented') {
       if (!Array.isArray(node.options)) {
-        errors.push(`${pathLabel}: select node requires options array`);
+        errors.push(`${pathLabel}: ${node.type} node requires options array`);
       }
     }
     if (node.type === 'list') {
@@ -910,6 +911,317 @@ module.exports = {
   validateNetPermissions,
   sanitizeNetHeaders,
   evaluateNetRequest,
+};
+
+  },
+  "../../core/secrets-policy.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Pure vendor- & runtime-neutral Secrets Storage & Header Injection Policy (v3.3.0 — SOLID #0).
+ *
+ * ZERO Node.js built-in imports, ZERO vendor literals.
+ *
+ * Enforces:
+ * 1. Strict key validation (`SECRET_KEY_RE`, prototype-pollution rejection).
+ * 2. Bounded secret values (`MAX_SINGLE_SECRET_VALUE_BYTES = 8192`, non-empty, NUL-free).
+ * 3. Trusted-only `permissions.secrets` gating (`maxKeys`, `maxBytes`, `allowRead` opt-in).
+ * 4. Structured `secretHeaders` validation & resolution for host-side `net.fetch` injection,
+ *    blocking forbidden/hop-by-hop/host-reserved headers and CR/LF/NUL header injection.
+ * 5. Cross-host redirect sensitive header strip list (`SENSITIVE_REDIRECT_STRIP_HEADERS`).
+ */
+
+const SECRET_KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/;
+const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/;
+const FORBIDDEN_SECRET_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const FORBIDDEN_SECRET_REQUEST_HEADERS = Object.freeze([
+  'cookie',
+  'cookie2',
+  'host',
+  'origin',
+  'referer',
+  'proxy-authorization',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-real-ip',
+]);
+
+const DEFAULT_MAX_SECRET_KEYS = 32;
+const MAX_SECRET_KEYS_LIMIT = 64;
+const DEFAULT_MAX_SECRET_BYTES = 32768;
+const MIN_MAX_SECRET_BYTES = 1024;
+const MAX_SECRET_BYTES_LIMIT = 65536;
+const MAX_SINGLE_SECRET_VALUE_BYTES = 8192;
+const MAX_SECRET_HEADERS_PER_REQUEST = 8;
+const MAX_SECRET_HEADER_AFFIX_LEN = 64;
+
+const SENSITIVE_REDIRECT_STRIP_HEADERS = Object.freeze([
+  'authorization',
+  'proxy-authorization',
+  'x-api-key',
+  'api-key',
+  'x-goog-api-key',
+  'x-auth-token',
+  'x-access-token',
+  'x-secret',
+]);
+
+function utf8ByteLength(str) {
+  const s = String(str || '');
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(s).length;
+  }
+  if (typeof Buffer !== 'undefined' && typeof Buffer.byteLength === 'function') {
+    return Buffer.byteLength(s, 'utf8');
+  }
+  let bytes = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const code = s.charCodeAt(i);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4;
+      i += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+function validateSecretKey(rawKey) {
+  if (typeof rawKey !== 'string') {
+    return { ok: false, reason: 'ERR_SECRETS_INVALID_KEY' };
+  }
+  const key = rawKey.trim();
+  if (!key || FORBIDDEN_SECRET_KEYS.has(key) || !SECRET_KEY_RE.test(key)) {
+    return { ok: false, reason: 'ERR_SECRETS_INVALID_KEY' };
+  }
+  return { ok: true, key };
+}
+
+function validateSecretValue(rawValue, { maxSingleBytes = MAX_SINGLE_SECRET_VALUE_BYTES } = {}) {
+  if (typeof rawValue !== 'string') {
+    return { ok: false, reason: 'ERR_SECRETS_INVALID_VALUE' };
+  }
+  if (rawValue.length === 0) {
+    return { ok: false, reason: 'ERR_SECRETS_EMPTY_VALUE' };
+  }
+  if (rawValue.indexOf('\0') !== -1) {
+    return { ok: false, reason: 'ERR_SECRETS_INVALID_VALUE' };
+  }
+  const byteLength = utf8ByteLength(rawValue);
+  if (byteLength > maxSingleBytes) {
+    return { ok: false, reason: 'ERR_SECRETS_VALUE_TOO_LARGE' };
+  }
+  return { ok: true, value: rawValue, byteLength };
+}
+
+function validateSecretsPermissions(secretsPerm, { trustLevel = 'restricted' } = {}) {
+  if (secretsPerm === null || secretsPerm === undefined) {
+    return {
+      ok: true,
+      enabled: false,
+      maxKeys: 0,
+      maxBytes: 0,
+      allowRead: false,
+    };
+  }
+  if (typeof secretsPerm !== 'object' || Array.isArray(secretsPerm)) {
+    return {
+      ok: false,
+      reason: 'ERR_INVALID_SECRETS_PERMISSIONS',
+      errors: ['permissions.secrets must be an object'],
+    };
+  }
+  if (trustLevel !== 'trusted') {
+    return {
+      ok: false,
+      reason: 'ERR_RESTRICTED_SECRETS_FORBIDDEN',
+      errors: ['permissions.secrets requires trustLevel: "trusted" and host trust approval'],
+    };
+  }
+
+  const errors = [];
+  let maxKeys = DEFAULT_MAX_SECRET_KEYS;
+  if (secretsPerm.maxKeys !== undefined) {
+    if (!Number.isInteger(secretsPerm.maxKeys) || secretsPerm.maxKeys < 1 || secretsPerm.maxKeys > MAX_SECRET_KEYS_LIMIT) {
+      errors.push(`permissions.secrets.maxKeys must be an integer between 1 and ${MAX_SECRET_KEYS_LIMIT}`);
+    } else {
+      maxKeys = secretsPerm.maxKeys;
+    }
+  }
+
+  let maxBytes = DEFAULT_MAX_SECRET_BYTES;
+  if (secretsPerm.maxBytes !== undefined) {
+    if (
+      !Number.isInteger(secretsPerm.maxBytes) ||
+      secretsPerm.maxBytes < MIN_MAX_SECRET_BYTES ||
+      secretsPerm.maxBytes > MAX_SECRET_BYTES_LIMIT
+    ) {
+      errors.push(
+        `permissions.secrets.maxBytes must be an integer between ${MIN_MAX_SECRET_BYTES} and ${MAX_SECRET_BYTES_LIMIT}`
+      );
+    } else {
+      maxBytes = secretsPerm.maxBytes;
+    }
+  }
+
+  let allowRead = false;
+  if (secretsPerm.allowRead !== undefined) {
+    if (typeof secretsPerm.allowRead !== 'boolean') {
+      errors.push('permissions.secrets.allowRead must be a boolean');
+    } else {
+      allowRead = secretsPerm.allowRead;
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, reason: 'ERR_INVALID_SECRETS_PERMISSIONS', errors };
+  }
+
+  return {
+    ok: true,
+    enabled: true,
+    maxKeys,
+    maxBytes,
+    allowRead,
+  };
+}
+
+function isForbiddenSecretHeaderName(lowerName) {
+  if (!lowerName) return true;
+  if (FORBIDDEN_SECRET_KEYS.has(lowerName)) return true;
+  if (FORBIDDEN_SECRET_REQUEST_HEADERS.includes(lowerName)) return true;
+  if (lowerName.startsWith('sec-fetch-') || lowerName.startsWith('proxy-') || lowerName.startsWith('x-addon-host-')) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeSecretHeadersSpec(rawSecretHeaders) {
+  if (rawSecretHeaders === null || rawSecretHeaders === undefined) {
+    return { ok: true, entries: [] };
+  }
+  if (typeof rawSecretHeaders !== 'object' || Array.isArray(rawSecretHeaders)) {
+    return { ok: false, reason: 'ERR_NET_INVALID_SECRET_HEADERS' };
+  }
+
+  const keys = Object.keys(rawSecretHeaders);
+  if (keys.length > MAX_SECRET_HEADERS_PER_REQUEST) {
+    return { ok: false, reason: 'ERR_NET_TOO_MANY_SECRET_HEADERS' };
+  }
+
+  const entries = [];
+  const seenLower = new Set();
+  for (let i = 0; i < keys.length; i += 1) {
+    const rawHeaderName = String(keys[i] || '').trim();
+    const lower = rawHeaderName.toLowerCase();
+    if (!rawHeaderName || !HEADER_NAME_RE.test(rawHeaderName) || isForbiddenSecretHeaderName(lower)) {
+      return { ok: false, reason: `ERR_NET_SECRET_HEADER_FORBIDDEN:${rawHeaderName || 'empty'}` };
+    }
+    if (seenLower.has(lower)) {
+      return { ok: false, reason: `ERR_NET_SECRET_HEADER_DUPLICATE:${lower}` };
+    }
+    seenLower.add(lower);
+
+    const spec = rawSecretHeaders[keys[i]];
+    let secretKeyRaw;
+    let prefix = '';
+    let suffix = '';
+    if (typeof spec === 'string') {
+      secretKeyRaw = spec;
+    } else if (spec && typeof spec === 'object' && !Array.isArray(spec)) {
+      secretKeyRaw = spec.secretKey;
+      if (spec.prefix !== undefined) {
+        if (typeof spec.prefix !== 'string' || spec.prefix.length > MAX_SECRET_HEADER_AFFIX_LEN || /[\r\n\0]/.test(spec.prefix)) {
+          return { ok: false, reason: 'ERR_NET_INVALID_SECRET_HEADER_PREFIX' };
+        }
+        prefix = spec.prefix;
+      }
+      if (spec.suffix !== undefined) {
+        if (typeof spec.suffix !== 'string' || spec.suffix.length > MAX_SECRET_HEADER_AFFIX_LEN || /[\r\n\0]/.test(spec.suffix)) {
+          return { ok: false, reason: 'ERR_NET_INVALID_SECRET_HEADER_SUFFIX' };
+        }
+        suffix = spec.suffix;
+      }
+    } else {
+      return { ok: false, reason: 'ERR_NET_INVALID_SECRET_HEADERS' };
+    }
+
+    const keyCheck = validateSecretKey(secretKeyRaw);
+    if (!keyCheck.ok) {
+      return { ok: false, reason: keyCheck.reason };
+    }
+
+    entries.push({
+      headerName: rawHeaderName,
+      lowerName: lower,
+      secretKey: keyCheck.key,
+      prefix,
+      suffix,
+    });
+  }
+
+  return { ok: true, entries };
+}
+
+function resolveSecretHeaders(rawSecretHeaders, lookupFn) {
+  const specRes = normalizeSecretHeadersSpec(rawSecretHeaders);
+  if (!specRes.ok) {
+    return { ok: false, reason: specRes.reason, headers: {}, injectedHeaderNames: [] };
+  }
+  if (specRes.entries.length === 0) {
+    return { ok: true, reason: null, headers: {}, injectedHeaderNames: [] };
+  }
+  if (typeof lookupFn !== 'function') {
+    return { ok: false, reason: 'ERR_SECRETS_NOT_DECLARED', headers: {}, injectedHeaderNames: [] };
+  }
+
+  const headers = {};
+  const injectedHeaderNames = [];
+  for (let i = 0; i < specRes.entries.length; i += 1) {
+    const entry = specRes.entries[i];
+    const lookupRes = lookupFn(entry.secretKey);
+    if (!lookupRes || lookupRes.ok !== true || typeof lookupRes.value !== 'string' || lookupRes.value.length === 0) {
+      return {
+        ok: false,
+        reason: (lookupRes && lookupRes.reason) || `ERR_SECRET_NOT_FOUND:${entry.secretKey}`,
+        headers: {},
+        injectedHeaderNames: [],
+      };
+    }
+    if (/[\r\n\0]/.test(lookupRes.value)) {
+      return {
+        ok: false,
+        reason: 'ERR_SECRET_INVALID_HEADER_VALUE',
+        headers: {},
+        injectedHeaderNames: [],
+      };
+    }
+    headers[entry.headerName] = `${entry.prefix}${lookupRes.value}${entry.suffix}`;
+    injectedHeaderNames.push(entry.lowerName);
+  }
+
+  return { ok: true, reason: null, headers, injectedHeaderNames };
+}
+
+module.exports = {
+  SECRET_KEY_RE,
+  HEADER_NAME_RE,
+  FORBIDDEN_SECRET_KEYS,
+  DEFAULT_MAX_SECRET_KEYS,
+  MAX_SECRET_KEYS_LIMIT,
+  DEFAULT_MAX_SECRET_BYTES,
+  MIN_MAX_SECRET_BYTES,
+  MAX_SECRET_BYTES_LIMIT,
+  MAX_SINGLE_SECRET_VALUE_BYTES,
+  MAX_SECRET_HEADERS_PER_REQUEST,
+  SENSITIVE_REDIRECT_STRIP_HEADERS,
+  utf8ByteLength,
+  validateSecretKey,
+  validateSecretValue,
+  validateSecretsPermissions,
+  normalizeSecretHeadersSpec,
+  resolveSecretHeaders,
 };
 
   },
@@ -3829,6 +4141,40 @@ const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
 const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
 
 const _RGB_COLOR_RE = /^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)$/i;
+const HOST_LOCALE_STORAGE_KEY = 'addon-host:settings-ui-lang';
+const _SAFE_LOCALE_RE = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i;
+
+function normalizeHostLocale(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = _StringTrim(value);
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower === 'ko' || lower.startsWith('ko-')) return 'ko';
+  if (lower === 'en' || lower.startsWith('en-')) return 'en';
+  if (_SAFE_LOCALE_RE.test(trimmed)) return trimmed;
+  return null;
+}
+
+function readStoredHostLocale(win) {
+  try {
+    const storage = win && win.localStorage;
+    if (storage && typeof storage.getItem === 'function') {
+      return normalizeHostLocale(storage.getItem(HOST_LOCALE_STORAGE_KEY));
+    }
+  } catch (_e) {}
+  return null;
+}
+
+function writeStoredHostLocale(win, locale) {
+  try {
+    const storage = win && win.localStorage;
+    if (storage && typeof storage.setItem === 'function') {
+      storage.setItem(HOST_LOCALE_STORAGE_KEY, locale);
+      return true;
+    }
+  } catch (_e) {}
+  return false;
+}
 
 function parseOpaqueRgb(colorStr) {
   if (typeof colorStr !== 'string') return null;
@@ -3928,6 +4274,8 @@ function buildTokenCss(mode) {
 
 function createThemeAndI18n(doc, win) {
   const listeners = new _Set();
+  const localeListeners = new _Set();
+  let overrideLocale = readStoredHostLocale(win);
 
   function detectMode() {
     try {
@@ -3984,6 +4332,7 @@ function createThemeAndI18n(doc, win) {
   }
 
   function getLocale() {
+    if (overrideLocale) return overrideLocale;
     try {
       const docLang =
         doc && doc.documentElement && typeof doc.documentElement.lang === 'string'
@@ -3998,6 +4347,51 @@ function createThemeAndI18n(doc, win) {
     } catch (_e) {}
     return 'en';
   }
+
+  function notifyLocaleChange(nextLocale) {
+    _SetForEach(localeListeners, (cb) => {
+      try {
+        cb(nextLocale);
+      } catch (_e) {}
+    });
+  }
+
+  function setLocale(nextLocale, { persist = true } = {}) {
+    const normalized = normalizeHostLocale(nextLocale);
+    if (!normalized) return getLocale();
+    const prev = getLocale();
+    overrideLocale = normalized;
+    if (persist !== false) {
+      writeStoredHostLocale(win, normalized);
+    }
+    if (normalized !== prev) {
+      notifyLocaleChange(normalized);
+    }
+    return normalized;
+  }
+
+  function onLocaleDidChange(cb, registerDisposer) {
+    if (typeof cb !== 'function') throw new Error('ERR_INVALID_I18N_LISTENER');
+    _SetAdd(localeListeners, cb);
+    const unsub = () => _SetDelete(localeListeners, cb);
+    if (typeof registerDisposer === 'function') registerDisposer(unsub);
+    return unsub;
+  }
+
+  const handleStorageLocaleSync = (ev) => {
+    if (!ev || ev.key !== HOST_LOCALE_STORAGE_KEY) return;
+    const prev = getLocale();
+    overrideLocale = normalizeHostLocale(ev.newValue);
+    const next = getLocale();
+    if (next !== prev) {
+      notifyLocaleChange(next);
+    }
+  };
+  try {
+    if (win && typeof win.addEventListener === 'function') {
+      win.addEventListener('storage', handleStorageLocaleSync);
+    }
+  } catch (_e) {}
 
   function translate(key, dictOrParams = null, params = null) {
     const locale = getLocale().toLowerCase();
@@ -4041,18 +4435,27 @@ function createThemeAndI18n(doc, win) {
     });
   }
 
-  function createI18nHandle() {
+  function createI18nHandle(registerDisposer) {
     return _ObjectFreeze({
       getLocale,
       t: translate,
+      onDidChange(cb) {
+        return onLocaleDidChange(cb, registerDisposer);
+      },
     });
   }
 
   function dispose() {
     _SetClear(listeners);
+    _SetClear(localeListeners);
     try {
       if (mediaQuery && typeof mediaQuery.removeEventListener === 'function') {
         mediaQuery.removeEventListener('change', handleMediaChange);
+      }
+    } catch (_e) {}
+    try {
+      if (win && typeof win.removeEventListener === 'function') {
+        win.removeEventListener('storage', handleStorageLocaleSync);
       }
     } catch (_e) {}
   }
@@ -4061,6 +4464,8 @@ function createThemeAndI18n(doc, win) {
     getSnapshot,
     buildTokenCss,
     getLocale,
+    setLocale,
+    onLocaleDidChange,
     t: translate,
     createThemeHandle,
     createI18nHandle,
@@ -4069,8 +4474,10 @@ function createThemeAndI18n(doc, win) {
 }
 
 module.exports = {
+  HOST_LOCALE_STORAGE_KEY,
   DARK_TOKENS,
   LIGHT_TOKENS,
+  normalizeHostLocale,
   buildTokenCss,
   createThemeAndI18n,
 };
@@ -4084,7 +4491,7 @@ module.exports = {
  *
  * - Strictly ZERO HTML sinks (`innerHTML`, `outerHTML`, `insertAdjacentHTML` = 0).
  * - Strictly ZERO `eval` / `new Function`.
- * - Renders validated 16-primitive JSON trees using `--ag-*` semantic CSS tokens.
+ * - Renders validated 17-primitive JSON trees using `--ag-*` semantic CSS tokens.
  * - Supports static JSON `visibleWhen` / `disabledWhen` predicates evaluated against current state.
  * - Supports `update(nextTree, nextState)` with ID-based in-place DOM patching so focused inputs
  *   and scroll positions are preserved across updates.
@@ -4442,6 +4849,53 @@ const SCHEMA_UI_CSS = `
   background: var(--ag-surface, #161b24);
   color: var(--ag-text, #f1f5f9);
 }
+.ag-segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  width: fit-content;
+  max-width: 100%;
+  flex-wrap: wrap;
+  border-radius: 8px;
+  border: 1px solid var(--ag-border-strong, rgba(255, 255, 255, 0.16));
+  background: var(--ag-input-bg, rgba(9, 12, 18, 0.78));
+}
+.ag-segmented-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--ag-text-muted, #94a3b8);
+  border-radius: 6px;
+  min-height: 28px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease, opacity 140ms ease;
+}
+.ag-segmented-btn:hover:not(:disabled):not([aria-pressed="true"]) {
+  color: var(--ag-text, #f1f5f9);
+  background: var(--ag-surface-hover, rgba(255, 255, 255, 0.08));
+}
+.ag-segmented-btn[aria-pressed="true"] {
+  background: var(--ag-primary, #2563eb);
+  color: var(--ag-primary-fg, #ffffff);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
+}
+.ag-segmented-btn:focus-visible {
+  outline: 2px solid var(--ag-primary, #2563eb);
+  outline-offset: 1px;
+}
+.ag-segmented-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .ag-progress {
   appearance: none;
   -webkit-appearance: none;
@@ -4478,7 +4932,8 @@ const SCHEMA_UI_CSS = `
   .ag-toggle-row input[type="checkbox"]::before,
   .ag-input,
   .ag-textarea,
-  .ag-select {
+  .ag-select,
+  .ag-segmented-btn {
     transition: none;
   }
 }
@@ -4549,6 +5004,52 @@ function createSchemaUiController(doc, containerEl, {
     if (controlEl && 'disabled' in controlEl) {
       controlEl.disabled = disabled;
     }
+    if (
+      controlEl &&
+      typeof controlEl.getAttribute === 'function' &&
+      controlEl.getAttribute('data-ag-segmented') === '1'
+    ) {
+      if (typeof controlEl.setAttribute === 'function') {
+        controlEl.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+      }
+      const kids = controlEl.childNodes || [];
+      for (let i = 0; i < kids.length; i += 1) {
+        const kid = kids[i];
+        if (kid && 'disabled' in kid) {
+          kid.disabled = disabled;
+        }
+      }
+    }
+  }
+
+  function renderSegmentedButtons(targetEl, optionsList, activeValue, fieldName) {
+    while (targetEl.firstChild) targetEl.removeChild(targetEl.firstChild);
+    const activeStr = activeValue !== undefined && activeValue !== null ? String(activeValue) : '';
+    const opts = Array.isArray(optionsList) ? optionsList : [];
+    for (let i = 0; i < opts.length; i += 1) {
+      const o = opts[i];
+      const optVal = String(o && typeof o === 'object' ? o.value : o);
+      const optLabel = String(o && typeof o === 'object' ? o.label || o.value : o);
+      const btn = doc.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ag-segmented-btn';
+      btn.setAttribute('data-ag-segment-value', optVal);
+      btn.setAttribute('aria-pressed', activeStr === optVal ? 'true' : 'false');
+      btn.textContent = optLabel;
+      btn.addEventListener('click', (ev) => {
+        if (ev && ev.isTrusted === false) return;
+        if (btn.disabled) return;
+        const kids = targetEl.childNodes || [];
+        for (let j = 0; j < kids.length; j += 1) {
+          const kid = kids[j];
+          if (kid && typeof kid.setAttribute === 'function') {
+            kid.setAttribute('aria-pressed', kid === btn ? 'true' : 'false');
+          }
+        }
+        emitChange(fieldName, optVal);
+      });
+      targetEl.appendChild(btn);
+    }
   }
 
   function syncVisibilityAndDisabled(node) {
@@ -4581,6 +5082,7 @@ function createSchemaUiController(doc, containerEl, {
       case 'button':
         ref.controlEl.textContent = String(node.label || node.text || 'Action');
         if (node.variant) ref.controlEl.setAttribute('data-variant', String(node.variant));
+        else if (typeof ref.controlEl.removeAttribute === 'function') ref.controlEl.removeAttribute('data-variant');
         return true;
       case 'toggle':
         if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
@@ -4624,6 +5126,31 @@ function createSchemaUiController(doc, containerEl, {
           if (val !== undefined && val !== null) ref.controlEl.value = String(val);
         }
         return true;
+      case 'segmented': {
+        if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
+        if (ref.controlEl) {
+          const opts = Array.isArray(node.options) ? node.options : [];
+          const optSig = JSON.stringify(opts);
+          if (ref.optSig !== optSig) {
+            renderSegmentedButtons(ref.controlEl, opts, val, node.field || node.id);
+            ref.optSig = optSig;
+          } else {
+            const activeStr = val !== undefined && val !== null ? String(val) : '';
+            const kids = ref.controlEl.childNodes || [];
+            for (let i = 0; i < kids.length; i += 1) {
+              const kid = kids[i];
+              if (kid && typeof kid.getAttribute === 'function' && typeof kid.setAttribute === 'function') {
+                kid.setAttribute(
+                  'aria-pressed',
+                  kid.getAttribute('data-ag-segment-value') === activeStr ? 'true' : 'false'
+                );
+              }
+            }
+          }
+          applyCommonFlags(ref.wrapperEl, ref.controlEl, node);
+        }
+        return true;
+      }
       case 'slider':
         if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
         if (ref.controlEl && val !== undefined && val !== null) {
@@ -4845,6 +5372,26 @@ function createSchemaUiController(doc, containerEl, {
           if (ev && ev.isTrusted === false) return;
           emitChange(node.field || node.id, controlEl.value);
         });
+        wrapperEl.appendChild(controlEl);
+        break;
+      }
+      case 'segmented': {
+        wrapperEl = doc.createElement('div');
+        wrapperEl.className = 'ag-field';
+        if (node.label) {
+          labelEl = doc.createElement('span');
+          labelEl.className = 'ag-field-label';
+          labelEl.textContent = String(node.label);
+          wrapperEl.appendChild(labelEl);
+        }
+        controlEl = doc.createElement('div');
+        controlEl.className = 'ag-segmented';
+        controlEl.setAttribute('role', 'group');
+        controlEl.setAttribute('data-ag-segmented', '1');
+        if (node.label) controlEl.setAttribute('aria-label', String(node.label));
+        const opts = Array.isArray(node.options) ? node.options : [];
+        optSig = JSON.stringify(opts);
+        renderSegmentedButtons(controlEl, opts, stateVal, node.field || node.id);
         wrapperEl.appendChild(controlEl);
         break;
       }
@@ -6821,6 +7368,593 @@ module.exports = {
 };
 
   },
+  "./section-action-registry.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Tier-1 Declarative Section Action Registry (v3.3.0 — SOLID #0).
+ *
+ * - Lets plugins register host-styled action buttons on declarative host section targets
+ *   (configured exclusively in `HostProfile.uiSectionTargets` — zero vendor literals here).
+ * - Strictly ZERO HTML sinks (`innerHTML` / `outerHTML` / `insertAdjacentHTML` = 0).
+ * - Mounts a single debounced `MutationObserver` ONLY while at least 1 action is registered,
+ *   re-attaching seamlessly across SPA re-renders and disconnecting automatically on empty/dispose.
+ * - Enforces `ev.isTrusted !== false` on user clicks.
+ */
+
+const _ObjectFreeze = Object.freeze;
+const _ObjectKeys = Object.keys;
+const _ArrayIsArray = Array.isArray;
+const _ArrayFrom = Array.from;
+const _Map = Map;
+const _MapGet = Function.prototype.call.bind(Map.prototype.get);
+const _MapSet = Function.prototype.call.bind(Map.prototype.set);
+const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
+const _MapValues = Function.prototype.call.bind(Map.prototype.values);
+const _Number = Number;
+const _NumberIsFinite = Number.isFinite;
+const _String = String;
+
+const SAFE_ACTION_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/;
+const SAFE_TARGET_ID_RE = /^[a-z0-9][a-z0-9._-]{1,95}$/;
+const SECTION_STYLE_ATTR = 'data-addon-host-section-action-style';
+const SECTION_GROUP_ATTR = 'data-addon-host-section-actions';
+const SECTION_BTN_ATTR = 'data-addon-host-section-action-btn';
+
+function normalizeText(value) {
+  return _String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function buildSectionActionCss(mode) {
+  const isLight = mode === 'light';
+  const bg = isLight ? 'rgba(15, 23, 42, 0.05)' : 'rgba(255, 255, 255, 0.06)';
+  const hoverBg = isLight ? 'rgba(15, 23, 42, 0.1)' : 'rgba(255, 255, 255, 0.12)';
+  const border = isLight ? 'rgba(15, 23, 42, 0.16)' : 'rgba(255, 255, 255, 0.14)';
+  const text = isLight ? '#0f172a' : '#f1f5f9';
+  const badgeBg = isLight ? 'rgba(37, 99, 235, 0.12)' : 'rgba(56, 189, 248, 0.16)';
+  const badgeFg = isLight ? '#1d4ed8' : '#7dd3fc';
+  return `
+[${SECTION_GROUP_ATTR}] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+[${SECTION_BTN_ATTR}] {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 11px;
+  border-radius: 7px;
+  border: 1px solid ${border};
+  background: ${bg};
+  color: ${text};
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease, opacity 140ms ease;
+}
+[${SECTION_BTN_ATTR}]:hover:not(:disabled) {
+  background: ${hoverBg};
+}
+[${SECTION_BTN_ATTR}]:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+[${SECTION_BTN_ATTR}]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+[${SECTION_BTN_ATTR}] .ag-sec-act-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: ${badgeBg};
+  color: ${badgeFg};
+}
+@media (prefers-reduced-motion: reduce) {
+  [${SECTION_BTN_ATTR}] { transition: none; }
+}
+`;
+}
+
+function applyShieldAttrs(el, extraNoTranslateAttributes) {
+  if (!el || typeof el.setAttribute !== 'function') return;
+  el.setAttribute('translate', 'no');
+  el.setAttribute('data-addon-host-no-translate', 'true');
+  el.setAttribute('data-addon-host-ignore', 'true');
+  if (_ArrayIsArray(extraNoTranslateAttributes)) {
+    for (let i = 0; i < extraNoTranslateAttributes.length; i += 1) {
+      const attr = extraNoTranslateAttributes[i];
+      if (typeof attr === 'string' && attr) {
+        try {
+          el.setAttribute(attr, 'true');
+        } catch (_e) {}
+      }
+    }
+  }
+}
+
+function resolveTargetMountPoint(doc, targetConfig) {
+  if (!doc || !targetConfig || typeof targetConfig !== 'object') return null;
+  const rootSelectors = _ArrayIsArray(targetConfig.rootSelectors) ? targetConfig.rootSelectors : [];
+  let root = null;
+  if (rootSelectors.length > 0 && typeof doc.querySelector === 'function') {
+    for (let i = 0; i < rootSelectors.length; i += 1) {
+      const sel = rootSelectors[i];
+      if (typeof sel !== 'string' || !sel.trim()) continue;
+      try {
+        const hit = doc.querySelector(sel);
+        if (hit) {
+          root = hit;
+          break;
+        }
+      } catch (_e) {}
+    }
+    if (!root) return null;
+  } else {
+    root = doc.body || doc.documentElement || doc;
+  }
+
+  const containerSelectors = _ArrayIsArray(targetConfig.containerSelectors) ? targetConfig.containerSelectors : [];
+  if (containerSelectors.length > 0 && root && typeof root.querySelector === 'function') {
+    for (let i = 0; i < containerSelectors.length; i += 1) {
+      const sel = containerSelectors[i];
+      if (typeof sel !== 'string' || !sel.trim()) continue;
+      try {
+        const hit = root.querySelector(sel);
+        if (hit) {
+          return {
+            container: hit,
+            insertPosition: targetConfig.insertPosition || 'before-first-child',
+          };
+        }
+      } catch (_e) {}
+    }
+  }
+
+  const headingTexts = _ArrayIsArray(targetConfig.headingTexts)
+    ? targetConfig.headingTexts.map((t) => normalizeText(t)).filter(Boolean)
+    : [];
+  if (headingTexts.length === 0 || !root || typeof root.querySelectorAll !== 'function') {
+    return null;
+  }
+
+  let headings = [];
+  try {
+    headings = _ArrayFrom(root.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]'));
+  } catch (_e) {
+    headings = [];
+  }
+
+  let matchedHeading = null;
+  for (let i = 0; i < headings.length; i += 1) {
+    const h = headings[i];
+    if (!h) continue;
+    const txt = normalizeText(h.textContent);
+    if (txt && headingTexts.includes(txt)) {
+      matchedHeading = h;
+      break;
+    }
+  }
+  if (!matchedHeading) return null;
+
+  const headerRow = matchedHeading.parentElement || matchedHeading.parentNode;
+  if (!headerRow) return null;
+
+  // Prefer an existing sibling action container inside the header row (e.g., div holding native buttons)
+  const siblings = _ArrayFrom(headerRow.children || headerRow.childNodes || []).filter(
+    (node) =>
+      node &&
+      node.nodeType === 1 &&
+      node !== matchedHeading &&
+      !(typeof node.getAttribute === 'function' && node.getAttribute(SECTION_GROUP_ATTR))
+  );
+  for (let i = siblings.length - 1; i >= 0; i -= 1) {
+    const sib = siblings[i];
+    const tag = _String(sib.tagName || '').toUpperCase();
+    if (tag === 'DIV' || tag === 'SPAN' || tag === 'NAV') {
+      const hasInteractive =
+        typeof sib.querySelector === 'function' && Boolean(sib.querySelector('button, a, [role="button"]'));
+      if (hasInteractive) {
+        return {
+          container: sib,
+          insertPosition: targetConfig.insertPosition || 'before-first-child',
+        };
+      }
+    }
+  }
+
+  return {
+    container: headerRow,
+    insertPosition: 'append',
+  };
+}
+
+function createSectionActionRegistry(
+  doc,
+  win,
+  { uiSectionTargets = {}, themeAndI18n = null, extraNoTranslateAttributes = [] } = {}
+) {
+  const targetsConfig = uiSectionTargets && typeof uiSectionTargets === 'object' ? uiSectionTargets : {};
+  const items = new _Map(); // key (`${pluginId}:${id}`) -> record
+  const mountedGroups = new _Map(); // target -> wrapperEl
+  let observer = null;
+  let syncTimer = null;
+  let styleEl = null;
+  let unsubTheme = null;
+  let disposed = false;
+
+  function ensureStyle() {
+    if (!doc || typeof doc.createElement !== 'function') return;
+    const mode = themeAndI18n && typeof themeAndI18n.getSnapshot === 'function' ? themeAndI18n.getSnapshot().mode : 'dark';
+    const css = buildSectionActionCss(mode);
+    if (styleEl && styleEl.isConnected !== false) {
+      styleEl.textContent = css;
+      return;
+    }
+    const existing = typeof doc.querySelector === 'function' ? doc.querySelector(`style[${SECTION_STYLE_ATTR}="1"]`) : null;
+    if (existing) {
+      styleEl = existing;
+      styleEl.textContent = css;
+      return;
+    }
+    const parent = doc.head || doc.documentElement || doc.body;
+    if (!parent || typeof parent.appendChild !== 'function') return;
+    const el = doc.createElement('style');
+    el.setAttribute(SECTION_STYLE_ATTR, '1');
+    el.setAttribute('data-addon-host-ignore', 'true');
+    el.textContent = css;
+    parent.appendChild(el);
+    styleEl = el;
+  }
+
+  function disconnectObserver() {
+    if (syncTimer) {
+      clearTimeout(syncTimer);
+      syncTimer = null;
+    }
+    if (observer) {
+      try {
+        observer.disconnect();
+      } catch (_e) {}
+      observer = null;
+    }
+  }
+
+  function ensureObserver() {
+    if (disposed || observer || items.size === 0) return;
+    const MO = (win && win.MutationObserver) || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
+    const observeTarget = doc && (doc.body || doc.documentElement);
+    if (!MO || !observeTarget) return;
+    observer = new MO(() => {
+      if (disposed || syncTimer) return;
+      syncTimer = setTimeout(() => {
+        syncTimer = null;
+        if (!disposed) syncDomNow();
+      }, 30);
+    });
+    try {
+      observer.observe(observeTarget, { childList: true, subtree: true });
+    } catch (_e) {
+      observer = null;
+    }
+  }
+
+  function removeGroupForTarget(target) {
+    const grp = _MapGet(mountedGroups, target);
+    if (grp && grp.parentNode && typeof grp.parentNode.removeChild === 'function') {
+      try {
+        grp.parentNode.removeChild(grp);
+      } catch (_e) {}
+    }
+    _MapDelete(mountedGroups, target);
+  }
+
+  function buildButtonElement(rec) {
+    const btn = doc.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute(SECTION_BTN_ATTR, `${rec.pluginId}:${rec.id}`);
+    btn.setAttribute('data-addon-host-owner', rec.pluginId);
+    btn.setAttribute('data-addon-host-section-target', rec.target);
+    if (rec.tooltip) btn.setAttribute('title', rec.tooltip);
+    applyShieldAttrs(btn, extraNoTranslateAttributes);
+
+    if (rec.icon) {
+      const iconSpan = doc.createElement('span');
+      iconSpan.className = 'ag-sec-act-icon';
+      iconSpan.setAttribute('aria-hidden', 'true');
+      iconSpan.textContent = rec.icon;
+      btn.appendChild(iconSpan);
+    }
+    const labelSpan = doc.createElement('span');
+    labelSpan.className = 'ag-sec-act-label';
+    labelSpan.textContent = rec.label;
+    btn.appendChild(labelSpan);
+
+    if (rec.badge) {
+      const badgeSpan = doc.createElement('span');
+      badgeSpan.className = 'ag-sec-act-badge';
+      badgeSpan.textContent = rec.badge;
+      btn.appendChild(badgeSpan);
+    }
+
+    btn.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
+      invokeRecord(rec, {
+        shiftKey: Boolean(ev && ev.shiftKey),
+        ctrlKey: Boolean(ev && ev.ctrlKey),
+        metaKey: Boolean(ev && ev.metaKey),
+        altKey: Boolean(ev && ev.altKey),
+        anchorEl: btn,
+      });
+    });
+
+    rec.buttonEl = btn;
+    return btn;
+  }
+
+  function invokeRecord(rec, clickEv = {}) {
+    if (!rec || typeof rec.onClick !== 'function') {
+      return { ok: false, reason: 'ERR_SECTION_ACTION_NO_HANDLER' };
+    }
+    const payload = _ObjectFreeze({
+      pluginId: rec.pluginId,
+      actionId: rec.id,
+      target: rec.target,
+      shiftKey: Boolean(clickEv && clickEv.shiftKey),
+      ctrlKey: Boolean(clickEv && clickEv.ctrlKey),
+      metaKey: Boolean(clickEv && clickEv.metaKey),
+      altKey: Boolean(clickEv && clickEv.altKey),
+      anchorEl: (clickEv && clickEv.anchorEl) || rec.buttonEl || null,
+    });
+    try {
+      rec.onClick(payload);
+      return { ok: true, reason: null };
+    } catch (err) {
+      return { ok: false, reason: err && err.message ? err.message : 'ERR_SECTION_ACTION_CLICK_FAILED' };
+    }
+  }
+
+  function syncDomNow() {
+    if (disposed || !doc || typeof doc.createElement !== 'function') return;
+
+    // Group active items by target
+    const byTarget = new _Map();
+    for (const rec of _MapValues(items)) {
+      let arr = _MapGet(byTarget, rec.target);
+      if (!arr) {
+        arr = [];
+        _MapSet(byTarget, rec.target, arr);
+      }
+      arr.push(rec);
+    }
+
+    // Remove mounted groups whose targets no longer have items
+    for (const existingTarget of _ArrayFrom(mountedGroups.keys())) {
+      if (!byTarget.has(existingTarget)) {
+        removeGroupForTarget(existingTarget);
+      }
+    }
+
+    if (byTarget.size === 0) {
+      disconnectObserver();
+      return;
+    }
+
+    ensureStyle();
+
+    for (const [target, targetItems] of byTarget.entries()) {
+      const targetCfg = Object.prototype.hasOwnProperty.call(targetsConfig, target) ? targetsConfig[target] : null;
+      const mount = resolveTargetMountPoint(doc, targetCfg);
+      if (!mount || !mount.container) {
+        removeGroupForTarget(target);
+        continue;
+      }
+
+      targetItems.sort((a, b) => {
+        if (a.order !== b.order) return a.order - b.order;
+        return a.seq - b.seq;
+      });
+
+      let grp = _MapGet(mountedGroups, target);
+      if (!grp || grp.parentNode !== mount.container) {
+        if (grp && grp.parentNode && typeof grp.parentNode.removeChild === 'function') {
+          try {
+            grp.parentNode.removeChild(grp);
+          } catch (_e) {}
+        }
+        grp = doc.createElement('span');
+        grp.setAttribute(SECTION_GROUP_ATTR, target);
+        applyShieldAttrs(grp, extraNoTranslateAttributes);
+
+        if (
+          (mount.insertPosition === 'before-first-child' || mount.insertPosition === 'prepend') &&
+          mount.container.firstChild &&
+          typeof mount.container.insertBefore === 'function'
+        ) {
+          mount.container.insertBefore(grp, mount.container.firstChild);
+        } else if (typeof mount.container.appendChild === 'function') {
+          mount.container.appendChild(grp);
+        }
+        _MapSet(mountedGroups, target, grp);
+      }
+
+      while (grp.firstChild) {
+        grp.removeChild(grp.firstChild);
+      }
+      for (let i = 0; i < targetItems.length; i += 1) {
+        grp.appendChild(buildButtonElement(targetItems[i]));
+      }
+    }
+  }
+
+  let seqCounter = 0;
+
+  if (themeAndI18n && typeof themeAndI18n.createThemeHandle === 'function') {
+    try {
+      const th = themeAndI18n.createThemeHandle();
+      if (th && typeof th.onDidChange === 'function') {
+        unsubTheme = th.onDidChange(() => {
+          if (!disposed && styleEl) ensureStyle();
+        });
+      }
+    } catch (_e) {}
+  }
+
+  function registerSectionAction(pluginId, spec = {}) {
+    if (!spec || typeof spec !== 'object') {
+      throw new Error('ERR_INVALID_SECTION_ACTION_SPEC');
+    }
+    const id = typeof spec.id === 'string' ? spec.id.trim() : '';
+    if (!id || !SAFE_ACTION_ID_RE.test(id)) {
+      throw new Error('ERR_INVALID_SECTION_ACTION_ID');
+    }
+    const target = typeof spec.target === 'string' ? spec.target.trim() : '';
+    if (!target || !SAFE_TARGET_ID_RE.test(target)) {
+      throw new Error('ERR_INVALID_SECTION_ACTION_TARGET');
+    }
+    const label = typeof spec.label === 'string' && spec.label.trim() ? spec.label.trim() : '';
+    if (!label) {
+      throw new Error('ERR_INVALID_SECTION_ACTION_LABEL');
+    }
+
+    const key = `${pluginId}:${id}`;
+    seqCounter += 1;
+    const record = {
+      key,
+      pluginId,
+      id,
+      target,
+      label,
+      icon: typeof spec.icon === 'string' ? spec.icon : '',
+      tooltip: typeof spec.tooltip === 'string' ? spec.tooltip : '',
+      badge: spec.badge !== undefined && spec.badge !== null ? _String(spec.badge) : null,
+      order: _NumberIsFinite(_Number(spec.order)) ? _Number(spec.order) : 100,
+      onClick: typeof spec.onClick === 'function' ? spec.onClick : null,
+      seq: seqCounter,
+      buttonEl: null,
+    };
+    _MapSet(items, key, record);
+    syncDomNow();
+    ensureObserver();
+
+    let handleDisposed = false;
+    return _ObjectFreeze({
+      id,
+      target,
+      update(patch = {}) {
+        if (handleDisposed || disposed || !patch || typeof patch !== 'object') return;
+        if (typeof patch.label === 'string' && patch.label.trim()) record.label = patch.label.trim();
+        if (patch.icon !== undefined) record.icon = typeof patch.icon === 'string' ? patch.icon : '';
+        if (patch.tooltip !== undefined) record.tooltip = typeof patch.tooltip === 'string' ? patch.tooltip : '';
+        if (patch.badge !== undefined) record.badge = patch.badge === null ? null : _String(patch.badge);
+        if (patch.order !== undefined && _NumberIsFinite(_Number(patch.order))) record.order = _Number(patch.order);
+        syncDomNow();
+      },
+      dispose() {
+        if (handleDisposed) return;
+        handleDisposed = true;
+        if (_MapGet(items, key) === record) {
+          _MapDelete(items, key);
+          syncDomNow();
+        }
+      },
+    });
+  }
+
+  function listSectionActions() {
+    const out = [];
+    for (const rec of _MapValues(items)) {
+      out.push(
+        _ObjectFreeze({
+          pluginId: rec.pluginId,
+          id: rec.id,
+          target: rec.target,
+          label: rec.label,
+          icon: rec.icon,
+          tooltip: rec.tooltip,
+          badge: rec.badge,
+          order: rec.order,
+          mounted: Boolean(rec.buttonEl && rec.buttonEl.parentNode),
+        })
+      );
+    }
+    return _ObjectFreeze(out);
+  }
+
+  function invokeSectionAction(pluginId, actionId, clickEv = {}) {
+    const rec = _MapGet(items, `${pluginId}:${actionId}`);
+    if (!rec) {
+      return { ok: false, reason: `ERR_SECTION_ACTION_NOT_FOUND:${pluginId}:${actionId}` };
+    }
+    return invokeRecord(rec, clickEv);
+  }
+
+  function disposePlugin(pluginId) {
+    let changed = false;
+    for (const rec of _ArrayFrom(_MapValues(items))) {
+      if (rec.pluginId === pluginId) {
+        _MapDelete(items, rec.key);
+        changed = true;
+      }
+    }
+    if (changed) syncDomNow();
+  }
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    disconnectObserver();
+    if (typeof unsubTheme === 'function') {
+      try {
+        unsubTheme();
+      } catch (_e) {}
+      unsubTheme = null;
+    }
+    items.clear();
+    for (const target of _ArrayFrom(mountedGroups.keys())) {
+      removeGroupForTarget(target);
+    }
+    if (styleEl && styleEl.parentNode && typeof styleEl.parentNode.removeChild === 'function') {
+      try {
+        styleEl.parentNode.removeChild(styleEl);
+      } catch (_e) {}
+    }
+    styleEl = null;
+  }
+
+  return _ObjectFreeze({
+    registerSectionAction,
+    listSectionActions,
+    invokeSectionAction,
+    syncDomNow,
+    disposePlugin,
+    dispose,
+    getConfiguredTargets: () => _ObjectFreeze(_ObjectKeys(targetsConfig)),
+  });
+}
+
+module.exports = {
+  SECTION_STYLE_ATTR,
+  SECTION_GROUP_ATTR,
+  SECTION_BTN_ATTR,
+  createSectionActionRegistry,
+};
+
+  },
   "./settings-page-coordinator.js": function(module, exports, require) {
 'use strict';
 
@@ -7084,6 +8218,7 @@ const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ReflectApply = Reflect.apply;
+const _PromiseResolve = Promise.resolve.bind(Promise);
 const _ArrayIsArray = Array.isArray;
 const _Set = Set;
 const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
@@ -7196,6 +8331,7 @@ function createAddonContextV3({
   themeAndI18n,
   toastManager,
   statusItemRegistry,
+  sectionActionRegistry,
   settingsPageCoordinator,
   serviceBus,
   eventBus,
@@ -7228,6 +8364,11 @@ function createAddonContextV3({
   const netPerm = rawNet && typeof rawNet === 'object' ? rawNet : null;
   const rawDom = getOwn(perms, 'dom');
   const domPerm = rawDom && typeof rawDom === 'object' ? rawDom : null;
+  const rawSecrets = getOwn(perms, 'secrets');
+  const secretsPerm = rawSecrets && typeof rawSecrets === 'object' && !_ArrayIsArray(rawSecrets) ? rawSecrets : null;
+  const rawUiPerm = getOwn(perms, 'ui');
+  const uiPerm = rawUiPerm && typeof rawUiPerm === 'object' && !_ArrayIsArray(rawUiPerm) ? rawUiPerm : null;
+  const allowSectionActions = !(uiPerm && getOwn(uiPerm, 'sectionActions') === false);
 
   const netHttpsHosts = getOwn(netPerm, 'httpsHosts');
   const netLocalLoopback = getOwn(netPerm, 'localLoopback');
@@ -7237,7 +8378,7 @@ function createAddonContextV3({
 
   const hasNetHttps = !!(
     (_ArrayIsArray(netHttpsHosts) && netHttpsHosts.length > 0) ||
-      (surface === 'remote-web' && netUserApprovedHttps)
+      (netUserApprovedHttps && (surface === 'remote-web' || effectiveTrustLevel === 'trusted'))
   );
   const supportsRemoteHostBridge = !!(
     surface === 'remote-web' && hostBridge && typeof hostBridge.getRemoteBridgeStatus === 'function'
@@ -7263,6 +8404,27 @@ function createAddonContextV3({
       hostBridge &&
       typeof hostBridge.netFetch === 'function'
   );
+  const hasSecretsCapability = !!(
+    effectiveTrustLevel === 'trusted' &&
+      secretsPerm &&
+      hostBridge &&
+      typeof hostBridge.secretsSet === 'function' &&
+      typeof hostBridge.secretsHas === 'function' &&
+      typeof hostBridge.secretsDelete === 'function' &&
+      typeof hostBridge.secretsList === 'function'
+  );
+  const secretsAllowRead = !!(
+    hasSecretsCapability &&
+      getOwn(secretsPerm, 'allowRead') === true &&
+      typeof hostBridge.secretsGet === 'function'
+  );
+  const getSecretsPersistenceMode = () => {
+    if (!hasSecretsCapability) return 'none';
+    if (surface === 'remote-web') {
+      return isRemoteHostBridgeConnected() ? 'remote-bridge' : 'session-memory';
+    }
+    return 'os-encrypted';
+  };
   const hasDocumentTransform = !!(
     effectiveTrustLevel === 'trusted' &&
       (getOwn(pluginMeta, 'hasDocumentTransformSlot') || getOwn(domPerm, 'documentTransform') === true)
@@ -7551,6 +8713,10 @@ function createAddonContextV3({
         return isRemoteHostBridgeConnected();
       },
       hasNetHttps,
+      hasSecrets: hasSecretsCapability,
+      get secretsPersistence() {
+        return getSecretsPersistenceMode();
+      },
       hasConfigBridge: !!hasConfigBridge,
       hasSettingsBridge: !!hasSettingsBridge,
       hasDocumentTransform,
@@ -7586,6 +8752,18 @@ function createAddonContextV3({
     registerStatusItem(spec) {
       assertActive();
       const handle = statusItemRegistry.registerStatusItem(pluginId, spec);
+      addDisposer(() => handle.dispose());
+      return handle;
+    },
+    registerSectionAction(spec) {
+      assertActive();
+      if (!allowSectionActions) {
+        throw new Error('ERR_UI_SECTION_ACTIONS_FORBIDDEN');
+      }
+      if (!sectionActionRegistry || typeof sectionActionRegistry.registerSectionAction !== 'function') {
+        throw new Error('ERR_SECTION_ACTIONS_UNAVAILABLE');
+      }
+      const handle = sectionActionRegistry.registerSectionAction(pluginId, spec);
       addDisposer(() => handle.dispose());
       return handle;
     },
@@ -7707,7 +8885,7 @@ function createAddonContextV3({
   defineSafeReadOnlyProp(ctx, 'meta', meta);
   defineSafeReadOnlyProp(ctx, 'env', env);
   defineSafeReadOnlyProp(ctx, 'theme', themeAndI18n.createThemeHandle(addDisposer));
-  defineSafeReadOnlyProp(ctx, 'i18n', themeAndI18n.createI18nHandle());
+  defineSafeReadOnlyProp(ctx, 'i18n', themeAndI18n.createI18nHandle(addDisposer));
   defineSafeReadOnlyProp(ctx, 'ui', ui);
   defineSafeReadOnlyProp(ctx, 'storage', storage);
   defineSafeReadOnlyProp(ctx, 'events', events);
@@ -7728,6 +8906,43 @@ function createAddonContextV3({
         },
       })
     );
+  }
+
+  if (hasSecretsCapability) {
+    const secretsApi = {};
+    defineSafeReadOnlyProp(secretsApi, 'set', function set(key, value) {
+      assertActive();
+      return _PromiseResolve(hostBridge.secretsSet(pluginId, key, value));
+    });
+    defineSafeReadOnlyProp(secretsApi, 'has', function has(key) {
+      assertActive();
+      return _PromiseResolve(hostBridge.secretsHas(pluginId, key)).then((res) => Boolean(res && res.ok && res.exists));
+    });
+    defineSafeReadOnlyProp(secretsApi, 'delete', function remove(key) {
+      assertActive();
+      return _PromiseResolve(hostBridge.secretsDelete(pluginId, key)).then((res) =>
+        Boolean(res && res.ok && res.deleted)
+      );
+    });
+    defineSafeReadOnlyProp(secretsApi, 'keys', function keys() {
+      assertActive();
+      return _PromiseResolve(hostBridge.secretsList(pluginId)).then((res) =>
+        res && res.ok && _ArrayIsArray(res.keys) ? res.keys.slice() : []
+      );
+    });
+    defineSafeReadOnlyProp(secretsApi, 'getPersistenceMode', function getPersistenceMode() {
+      assertActive();
+      return getSecretsPersistenceMode();
+    });
+    if (secretsAllowRead) {
+      defineSafeReadOnlyProp(secretsApi, 'get', function get(key) {
+        assertActive();
+        return _PromiseResolve(hostBridge.secretsGet(pluginId, key)).then((res) =>
+          res && res.ok && res.exists ? res.value : undefined
+        );
+      });
+    }
+    defineSafeReadOnlyProp(ctx, 'secrets', _ObjectFreeze(secretsApi));
   }
 
   if (hasDomCapability) {
@@ -7976,6 +9191,11 @@ const HOST_BRIDGE_PORT_OPTIONAL_METHODS = _ObjectFreeze([
   'rebuildRemoteBundle',
   'getRemoteBridgeStatus',
   'netFetch',
+  'secretsSet',
+  'secretsGet',
+  'secretsHas',
+  'secretsDelete',
+  'secretsList',
 ]);
 
 function isValidHostBridgePort(candidate) {
@@ -8019,6 +9239,11 @@ function wrapHostBridgePort(candidate) {
   const fnGetRemoteBridgeStatus =
     typeof candidate.getRemoteBridgeStatus === 'function' ? candidate.getRemoteBridgeStatus : null;
   const fnNetFetch = typeof candidate.netFetch === 'function' ? candidate.netFetch : null;
+  const fnSecretsSet = typeof candidate.secretsSet === 'function' ? candidate.secretsSet : null;
+  const fnSecretsGet = typeof candidate.secretsGet === 'function' ? candidate.secretsGet : null;
+  const fnSecretsHas = typeof candidate.secretsHas === 'function' ? candidate.secretsHas : null;
+  const fnSecretsDelete = typeof candidate.secretsDelete === 'function' ? candidate.secretsDelete : null;
+  const fnSecretsList = typeof candidate.secretsList === 'function' ? candidate.secretsList : null;
 
   const wrapped = {
     docGenId,
@@ -8080,6 +9305,31 @@ function wrapHostBridgePort(candidate) {
   if (fnNetFetch) {
     wrapped.netFetch = function netFetch(pluginId, url, init) {
       return _ReflectApply(fnNetFetch, candidate, [pluginId, url, init]);
+    };
+  }
+  if (fnSecretsSet) {
+    wrapped.secretsSet = function secretsSet(pluginId, key, value) {
+      return _ReflectApply(fnSecretsSet, candidate, [pluginId, key, value]);
+    };
+  }
+  if (fnSecretsGet) {
+    wrapped.secretsGet = function secretsGet(pluginId, key) {
+      return _ReflectApply(fnSecretsGet, candidate, [pluginId, key]);
+    };
+  }
+  if (fnSecretsHas) {
+    wrapped.secretsHas = function secretsHas(pluginId, key) {
+      return _ReflectApply(fnSecretsHas, candidate, [pluginId, key]);
+    };
+  }
+  if (fnSecretsDelete) {
+    wrapped.secretsDelete = function secretsDelete(pluginId, key) {
+      return _ReflectApply(fnSecretsDelete, candidate, [pluginId, key]);
+    };
+  }
+  if (fnSecretsList) {
+    wrapped.secretsList = function secretsList(pluginId) {
+      return _ReflectApply(fnSecretsList, candidate, [pluginId]);
     };
   }
 
@@ -9224,6 +10474,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
   let pluginNavElements = [];
   let unsubSettingsPages = null;
   let unsubInlineHost = null;
+  let unsubLocale = null;
   let paneHostElement = null;
   let shadowRoot = null;
   let pluginPaneHostElement = null;
@@ -9256,6 +10507,10 @@ function createHostSettingsUi(doc, win, opts = {}) {
   }
 
   function getLanguage() {
+    if (themeAndI18n && typeof themeAndI18n.getLocale === 'function') {
+      const fromHost = normalizeLang(themeAndI18n.getLocale());
+      if (fromHost) return fromHost;
+    }
     return resolveLanguage(win, doc, userLangOverride);
   }
 
@@ -9263,7 +10518,11 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const norm = normalizeLang(nextLang);
     if (!norm) return getLanguage();
     userLangOverride = norm;
-    writeStoredLanguage(win, norm);
+    if (themeAndI18n && typeof themeAndI18n.setLocale === 'function') {
+      themeAndI18n.setLocale(norm, { persist: true });
+    } else {
+      writeStoredLanguage(win, norm);
+    }
     mountedLang = norm;
     if (navElement && navElement.isConnected) {
       replaceLeafText(navElement, getNavLabel(norm), doc);
@@ -10871,6 +12130,18 @@ function createHostSettingsUi(doc, win, opts = {}) {
         if (isOpen) renderPanel();
       });
     }
+    if (themeAndI18n && typeof themeAndI18n.onLocaleDidChange === 'function') {
+      unsubLocale = themeAndI18n.onLocaleDidChange((nextLoc) => {
+        if (disposed) return;
+        const norm = normalizeLang(nextLoc) || getLanguage();
+        userLangOverride = norm;
+        mountedLang = norm;
+        if (navElement && navElement.isConnected) {
+          replaceLeafText(navElement, getNavLabel(norm), doc);
+        }
+        if (isOpen) renderPanel();
+      });
+    }
     ensureMount();
     const MO = (win && win.MutationObserver) || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
     const observeTarget = doc && (doc.documentElement || doc.body);
@@ -10927,6 +12198,12 @@ function createHostSettingsUi(doc, win, opts = {}) {
         unsubSettingsPages();
       } catch (_err) {}
       unsubSettingsPages = null;
+    }
+    if (unsubLocale) {
+      try {
+        unsubLocale();
+      } catch (_err) {}
+      unsubLocale = null;
     }
     closePluginPane({ restoreNative: false });
     closePanel({ restoreNative: true });
@@ -11024,6 +12301,7 @@ const { createServiceBus } = require('./service-bus');
 const { createEventBus } = require('./event-bus');
 const { createStorageV3 } = require('./storage-v3');
 const { createStatusItemRegistry } = require('./status-item-registry');
+const { createSectionActionRegistry } = require('./section-action-registry');
 const { createSettingsPageCoordinator } = require('./settings-page-coordinator');
 const { createAddonContextV3 } = require('./context-v3');
 const { createV2CompatAdapter } = require('./v2-compat-adapter');
@@ -11245,6 +12523,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   let eventBus = null;
   let storageV3 = null;
   let statusItemRegistry = null;
+  let sectionActionRegistry = null;
   let settingsPageCoordinator = null;
   let hostSettingsUi = null;
 
@@ -11399,6 +12678,11 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       extraNoTranslateAttributes,
       surface: hostSurface,
     });
+    sectionActionRegistry = createSectionActionRegistry(doc, win, {
+      uiSectionTargets: cfg.uiSectionTargets || {},
+      themeAndI18n,
+      extraNoTranslateAttributes,
+    });
     settingsPageCoordinator = createSettingsPageCoordinator({
       settingsTabs,
       openTier2Modal: (pMeta, modalOpts) => {
@@ -11493,6 +12777,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       if (settingsTabs) settingsTabs.disposePluginTabs(pluginId);
       if (toastManager) toastManager.disposePlugin(pluginId);
       if (statusItemRegistry) statusItemRegistry.disposePlugin(pluginId);
+      if (sectionActionRegistry) sectionActionRegistry.disposePlugin(pluginId);
       if (settingsPageCoordinator) settingsPageCoordinator.disposePlugin(pluginId);
       if (serviceBus) serviceBus.disposePlugin(pluginId);
       if (eventBus) eventBus.disposePlugin(pluginId);
@@ -11857,6 +13142,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       themeAndI18n,
       toastManager,
       statusItemRegistry,
+      sectionActionRegistry,
       settingsPageCoordinator,
       serviceBus,
       eventBus,
@@ -12065,6 +13351,26 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     invokeStatusItem: (pid, itemId, clickEv, token) => {
       assertHostToken(token);
       return statusItemRegistry ? statusItemRegistry.invokeStatusItem(pid, itemId, clickEv) : { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED' };
+    },
+    listSectionActions: () => (sectionActionRegistry ? sectionActionRegistry.listSectionActions() : []),
+    invokeSectionAction: (pid, actionId, clickEv, token) => {
+      assertHostToken(token);
+      return sectionActionRegistry
+        ? sectionActionRegistry.invokeSectionAction(pid, actionId, clickEv)
+        : { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED' };
+    },
+    syncSectionActions: (token) => {
+      assertHostToken(token);
+      if (sectionActionRegistry && typeof sectionActionRegistry.syncDomNow === 'function') {
+        sectionActionRegistry.syncDomNow();
+        return true;
+      }
+      return false;
+    },
+    getHostLocale: () => (themeAndI18n && typeof themeAndI18n.getLocale === 'function' ? themeAndI18n.getLocale() : 'en'),
+    setHostLocale: (locale, token) => {
+      assertHostToken(token);
+      return themeAndI18n && typeof themeAndI18n.setLocale === 'function' ? themeAndI18n.setLocale(locale) : 'en';
     },
     listHostActions,
     invokeHostAction,

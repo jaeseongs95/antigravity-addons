@@ -599,16 +599,65 @@ function createRemoteHostTransport({
       return { ok: false, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
     }
     const safeInit = init && typeof init === 'object' ? init : {};
-    const res = await requestJson('POST', '/v1/net/fetch', {
+    const reqBody = {
       pluginId,
       url: String(url || ''),
       method: typeof safeInit.method === 'string' ? safeInit.method : 'GET',
       headers: safeInit.headers && typeof safeInit.headers === 'object' ? safeInit.headers : {},
       body: typeof safeInit.body === 'string' ? safeInit.body : null,
       timeoutMs: Number.isFinite(Number(safeInit.timeoutMs)) ? Number(safeInit.timeoutMs) : undefined,
-    });
+    };
+    if (safeInit.secretHeaders && typeof safeInit.secretHeaders === 'object' && !Array.isArray(safeInit.secretHeaders)) {
+      reqBody.secretHeaders = safeInit.secretHeaders;
+    }
+    const res = await requestJson('POST', '/v1/net/fetch', reqBody);
     if (!res.ok || !res.data) {
       return { ok: false, reason: res.reason || 'ERR_REMOTE_NET_REQUEST_FAILED' };
+    }
+    return res.data;
+  }
+
+  async function secretsSet(pluginId, key, value) {
+    if (!connected) return { ok: false, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
+    const res = await requestJson('POST', '/v1/secrets/set', { pluginId, key, value });
+    if (!res.ok || !res.data) {
+      return { ok: false, reason: res.reason || 'ERR_REMOTE_SECRETS_SET_FAILED' };
+    }
+    return res.data;
+  }
+
+  async function secretsGet(pluginId, key) {
+    if (!connected) return { ok: false, exists: false, value: undefined, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
+    const res = await requestJson('POST', '/v1/secrets/get', { pluginId, key });
+    if (!res.ok || !res.data) {
+      return { ok: false, exists: false, value: undefined, reason: res.reason || 'ERR_REMOTE_SECRETS_GET_FAILED' };
+    }
+    return res.data;
+  }
+
+  async function secretsHas(pluginId, key) {
+    if (!connected) return { ok: false, exists: false, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
+    const res = await requestJson('POST', '/v1/secrets/has', { pluginId, key });
+    if (!res.ok || !res.data) {
+      return { ok: false, exists: false, reason: res.reason || 'ERR_REMOTE_SECRETS_HAS_FAILED' };
+    }
+    return res.data;
+  }
+
+  async function secretsDelete(pluginId, key) {
+    if (!connected) return { ok: false, deleted: false, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
+    const res = await requestJson('POST', '/v1/secrets/delete', { pluginId, key });
+    if (!res.ok || !res.data) {
+      return { ok: false, deleted: false, reason: res.reason || 'ERR_REMOTE_SECRETS_DELETE_FAILED' };
+    }
+    return res.data;
+  }
+
+  async function secretsList(pluginId) {
+    if (!connected) return { ok: false, keys: [], reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
+    const res = await requestJson('POST', '/v1/secrets/list', { pluginId });
+    if (!res.ok || !res.data) {
+      return { ok: false, keys: [], reason: res.reason || 'ERR_REMOTE_SECRETS_LIST_FAILED' };
     }
     return res.data;
   }
@@ -634,6 +683,11 @@ function createRemoteHostTransport({
     readConfigScope,
     writeConfigScope,
     netFetch,
+    secretsSet,
+    secretsGet,
+    secretsHas,
+    secretsDelete,
+    secretsList,
     getStatus,
     isConnected: () => Boolean(connected),
     onStatusChange,

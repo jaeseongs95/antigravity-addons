@@ -10,6 +10,11 @@
 
 const path = require('node:path');
 const { createRendererKernel } = require(path.resolve(__dirname, '..', '..', '..', 'src', 'runtime', 'renderer', 'kernel'));
+const {
+  validateSecretKey,
+  validateSecretValue,
+  resolveSecretHeaders,
+} = require(path.resolve(__dirname, '..', '..', '..', 'src', 'core', 'secrets-policy'));
 
 function createMockElement(tagName, ownerDocument) {
   const attrs = new Map();
@@ -35,6 +40,12 @@ function createMockElement(tagName, ownerDocument) {
     hidden: false,
     open: false,
     isConnected: true,
+    get parentElement() {
+      return el.parentNode;
+    },
+    get children() {
+      return childNodes.filter((c) => c && c.nodeType === 1);
+    },
     get firstChild() {
       return childNodes[0] || null;
     },
@@ -152,19 +163,31 @@ function createMockElement(tagName, ownerDocument) {
     },
     querySelectorAll(selector) {
       const results = [];
-      const attrMatch = String(selector || '').match(/^\[([^=\]]+)(?:="([^"]*)")?\]$/);
+      const seen = new Set();
+      const parts = String(selector || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const matchSingle = (c, sel) => {
+        const attrMatch = sel.match(/^([a-zA-Z0-9_-]+)?\[([^=\]]+)(?:="([^"]*)")?\]$/);
+        if (attrMatch) {
+          if (attrMatch[1] && String(c.tagName || '').toLowerCase() !== attrMatch[1].toLowerCase()) return false;
+          const val = typeof c.getAttribute === 'function' ? c.getAttribute(attrMatch[2]) : null;
+          return val !== null && (attrMatch[3] === undefined || val === attrMatch[3]);
+        }
+        return typeof c.tagName === 'string' && c.tagName.toLowerCase() === sel.toLowerCase();
+      };
       const walk = (node) => {
         if (!node || !Array.isArray(node.childNodes)) return;
         for (let i = 0; i < node.childNodes.length; i += 1) {
           const c = node.childNodes[i];
           if (!c || c.nodeType !== 1) continue;
-          if (attrMatch) {
-            const val = typeof c.getAttribute === 'function' ? c.getAttribute(attrMatch[1]) : null;
-            if (val !== null && (attrMatch[2] === undefined || val === attrMatch[2])) {
+          for (let p = 0; p < parts.length; p += 1) {
+            if (!seen.has(c) && matchSingle(c, parts[p])) {
+              seen.add(c);
               results.push(c);
+              break;
             }
-          } else if (typeof c.tagName === 'string' && c.tagName.toLowerCase() === String(selector).toLowerCase()) {
-            results.push(c);
           }
           walk(c);
         }
@@ -255,6 +278,7 @@ function createTestHost({
   locale = 'en',
   themeMode = 'dark',
   remoteBridgeConnected = false,
+  uiSectionTargets = {},
   netHandler = null,
   configScopes = {},
   initialSettings = {},
@@ -266,6 +290,19 @@ function createTestHost({
   const hostToken = 'sdk-test-host-token-0123456789abcdef';
   const scopeStore = new Map(Object.entries(configScopes || {}));
   const settingsStore = new Map(Object.entries(initialSettings || {}));
+  const secretsBindings = new Map(); // pluginId -> { maxKeys, maxBytes, allowRead }
+  const secretsStore = new Map(); // pluginId -> Map<key, value>
+  const defaultPersistence =
+    effectiveSurface === 'remote-web' ? (hasLiveRemoteBridge ? 'remote-bridge' : 'session-memory') : 'os-encrypted';
+
+  function getSecretBucket(pid, create = false) {
+    let b = secretsStore.get(pid);
+    if (!b && create) {
+      b = new Map();
+      secretsStore.set(pid, b);
+    }
+    return b || null;
+  }
 
   const hostBridge = {
     docGenId: 1,
@@ -296,7 +333,7 @@ function createTestHost({
             configured: true,
             connected: true,
             baseUrl: 'http://127.0.0.1:19384',
-            hostVersion: '3.1.0',
+            hostVersion: '3.3.0',
             buildSha8: 'test',
             activePlugins: [],
             lastCheckedAt: new Date().toISOString(),
@@ -304,9 +341,67 @@ function createTestHost({
           }),
         }
       : {}),
+    secretsSet: (pid, key, value) => {
+      const binding = secretsBindings.get(pid);
+      if (!binding) return Promise.resolve({ ok: false, reason: 'ERR_SECRETS_NOT_DECLARED' });
+      const kc = validateSecretKey(key);
+      if (!kc.ok) return Promise.resolve({ ok: false, reason: kc.reason });
+      const vc = validateSecretValue(value);
+      if (!vc.ok) return Promise.resolve({ ok: false, reason: vc.reason });
+      const bucket = getSecretBucket(pid, true);
+      if (!bucket.has(kc.key) && bucket.size >= binding.maxKeys) {
+        return Promise.resolve({ ok: false, reason: 'ERR_SECRETS_MAX_KEYS_EXCEEDED' });
+      }
+      bucket.set(kc.key, vc.value);
+      return Promise.resolve({ ok: true, key: kc.key, persistence: defaultPersistence, updatedAt: new Date().toISOString(), reason: null });
+    },
+    secretsHas: (pid, key) => {
+      const binding = secretsBindings.get(pid);
+      if (!binding) return Promise.resolve({ ok: false, exists: false, reason: 'ERR_SECRETS_NOT_DECLARED' });
+      const kc = validateSecretKey(key);
+      if (!kc.ok) return Promise.resolve({ ok: false, exists: false, reason: kc.reason });
+      const bucket = getSecretBucket(pid, false);
+      return Promise.resolve({ ok: true, exists: Boolean(bucket && bucket.has(kc.key)), persistence: defaultPersistence, reason: null });
+    },
+    secretsGet: (pid, key) => {
+      const binding = secretsBindings.get(pid);
+      if (!binding) return Promise.resolve({ ok: false, exists: false, value: undefined, reason: 'ERR_SECRETS_NOT_DECLARED' });
+      if (!binding.allowRead) return Promise.resolve({ ok: false, exists: false, value: undefined, reason: 'ERR_SECRETS_READ_NOT_ALLOWED' });
+      const kc = validateSecretKey(key);
+      if (!kc.ok) return Promise.resolve({ ok: false, exists: false, value: undefined, reason: kc.reason });
+      const bucket = getSecretBucket(pid, false);
+      if (!bucket || !bucket.has(kc.key)) return Promise.resolve({ ok: true, exists: false, value: undefined, persistence: defaultPersistence, reason: null });
+      return Promise.resolve({ ok: true, exists: true, value: bucket.get(kc.key), persistence: defaultPersistence, reason: null });
+    },
+    secretsDelete: (pid, key) => {
+      const binding = secretsBindings.get(pid);
+      if (!binding) return Promise.resolve({ ok: false, deleted: false, reason: 'ERR_SECRETS_NOT_DECLARED' });
+      const kc = validateSecretKey(key);
+      if (!kc.ok) return Promise.resolve({ ok: false, deleted: false, reason: kc.reason });
+      const bucket = getSecretBucket(pid, false);
+      return Promise.resolve({ ok: true, deleted: Boolean(bucket && bucket.delete(kc.key)), reason: null });
+    },
+    secretsList: (pid) => {
+      const binding = secretsBindings.get(pid);
+      if (!binding) return Promise.resolve({ ok: false, keys: [], reason: 'ERR_SECRETS_NOT_DECLARED' });
+      const bucket = getSecretBucket(pid, false);
+      return Promise.resolve({ ok: true, keys: bucket ? Array.from(bucket.keys()).sort() : [], persistence: defaultPersistence, reason: null });
+    },
     netFetch: (pluginId, url, init) => {
+      const safeInit = init && typeof init === 'object' ? { ...init } : {};
+      if (safeInit.secretHeaders && typeof safeInit.secretHeaders === 'object') {
+        const binding = secretsBindings.get(pluginId);
+        if (!binding) return Promise.resolve({ ok: false, reason: 'ERR_SECRETS_NOT_DECLARED' });
+        const bucket = getSecretBucket(pluginId, false);
+        const res = resolveSecretHeaders(safeInit.secretHeaders, (secretKey) => {
+          if (!bucket || !bucket.has(secretKey)) return { ok: false, reason: `ERR_SECRET_NOT_FOUND:${secretKey}` };
+          return { ok: true, value: bucket.get(secretKey) };
+        });
+        if (!res.ok) return Promise.resolve({ ok: false, reason: res.reason });
+        safeInit.headers = { ...(safeInit.headers || {}), ...res.headers };
+      }
       if (typeof netHandler === 'function') {
-        return Promise.resolve(netHandler(pluginId, url, init));
+        return Promise.resolve(netHandler(pluginId, url, safeInit));
       }
       return Promise.resolve({ ok: false, reason: 'ERR_TEST_HOST_NET_HANDLER_NOT_CONFIGURED' });
     },
@@ -318,6 +413,7 @@ function createTestHost({
     hostProfileId: hostBridge.profileId,
     surface: effectiveSurface,
     hostBridge,
+    uiSectionTargets,
   });
 
   async function mountPlugin(manifest, setupFn) {
@@ -342,6 +438,14 @@ function createTestHost({
       isolation: manifest.isolation || {},
     };
 
+    const secretsPerm = isTrusted && manifest.permissions && manifest.permissions.secrets ? manifest.permissions.secrets : null;
+    if (secretsPerm) {
+      secretsBindings.set(pluginId, {
+        maxKeys: Number.isInteger(secretsPerm.maxKeys) ? secretsPerm.maxKeys : 32,
+        maxBytes: Number.isInteger(secretsPerm.maxBytes) ? secretsPerm.maxBytes : 32768,
+        allowRead: secretsPerm.allowRead === true,
+      });
+    }
     const initialSnap = settingsStore.has(pluginId) ? settingsStore.get(pluginId) : null;
     const ctx = kernel.createPluginHandle(pluginMeta, hostToken, initialSnap);
     if (typeof setupFn === 'function') {
@@ -362,7 +466,10 @@ function createTestHost({
       win.innerHeight = height;
       win.dispatchEvent({ type: 'resize' });
     },
+    setLocale: (nextLocale) => kernel.setHostLocale(nextLocale, hostToken),
     getStatusItems: () => kernel.listStatusItems(),
+    getSectionActions: () => kernel.listSectionActions(),
+    invokeSectionAction: (pluginId, actionId, clickEv) => kernel.invokeSectionAction(pluginId, actionId, clickEv, hostToken),
     getSettingsPages: () => kernel.listSettingsPages(),
   });
 }

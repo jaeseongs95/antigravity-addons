@@ -5,7 +5,7 @@
  *
  * - Strictly ZERO HTML sinks (`innerHTML`, `outerHTML`, `insertAdjacentHTML` = 0).
  * - Strictly ZERO `eval` / `new Function`.
- * - Renders validated 16-primitive JSON trees using `--ag-*` semantic CSS tokens.
+ * - Renders validated 17-primitive JSON trees using `--ag-*` semantic CSS tokens.
  * - Supports static JSON `visibleWhen` / `disabledWhen` predicates evaluated against current state.
  * - Supports `update(nextTree, nextState)` with ID-based in-place DOM patching so focused inputs
  *   and scroll positions are preserved across updates.
@@ -363,6 +363,53 @@ const SCHEMA_UI_CSS = `
   background: var(--ag-surface, #161b24);
   color: var(--ag-text, #f1f5f9);
 }
+.ag-segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  width: fit-content;
+  max-width: 100%;
+  flex-wrap: wrap;
+  border-radius: 8px;
+  border: 1px solid var(--ag-border-strong, rgba(255, 255, 255, 0.16));
+  background: var(--ag-input-bg, rgba(9, 12, 18, 0.78));
+}
+.ag-segmented-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--ag-text-muted, #94a3b8);
+  border-radius: 6px;
+  min-height: 28px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease, opacity 140ms ease;
+}
+.ag-segmented-btn:hover:not(:disabled):not([aria-pressed="true"]) {
+  color: var(--ag-text, #f1f5f9);
+  background: var(--ag-surface-hover, rgba(255, 255, 255, 0.08));
+}
+.ag-segmented-btn[aria-pressed="true"] {
+  background: var(--ag-primary, #2563eb);
+  color: var(--ag-primary-fg, #ffffff);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
+}
+.ag-segmented-btn:focus-visible {
+  outline: 2px solid var(--ag-primary, #2563eb);
+  outline-offset: 1px;
+}
+.ag-segmented-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .ag-progress {
   appearance: none;
   -webkit-appearance: none;
@@ -399,7 +446,8 @@ const SCHEMA_UI_CSS = `
   .ag-toggle-row input[type="checkbox"]::before,
   .ag-input,
   .ag-textarea,
-  .ag-select {
+  .ag-select,
+  .ag-segmented-btn {
     transition: none;
   }
 }
@@ -470,6 +518,52 @@ function createSchemaUiController(doc, containerEl, {
     if (controlEl && 'disabled' in controlEl) {
       controlEl.disabled = disabled;
     }
+    if (
+      controlEl &&
+      typeof controlEl.getAttribute === 'function' &&
+      controlEl.getAttribute('data-ag-segmented') === '1'
+    ) {
+      if (typeof controlEl.setAttribute === 'function') {
+        controlEl.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+      }
+      const kids = controlEl.childNodes || [];
+      for (let i = 0; i < kids.length; i += 1) {
+        const kid = kids[i];
+        if (kid && 'disabled' in kid) {
+          kid.disabled = disabled;
+        }
+      }
+    }
+  }
+
+  function renderSegmentedButtons(targetEl, optionsList, activeValue, fieldName) {
+    while (targetEl.firstChild) targetEl.removeChild(targetEl.firstChild);
+    const activeStr = activeValue !== undefined && activeValue !== null ? String(activeValue) : '';
+    const opts = Array.isArray(optionsList) ? optionsList : [];
+    for (let i = 0; i < opts.length; i += 1) {
+      const o = opts[i];
+      const optVal = String(o && typeof o === 'object' ? o.value : o);
+      const optLabel = String(o && typeof o === 'object' ? o.label || o.value : o);
+      const btn = doc.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ag-segmented-btn';
+      btn.setAttribute('data-ag-segment-value', optVal);
+      btn.setAttribute('aria-pressed', activeStr === optVal ? 'true' : 'false');
+      btn.textContent = optLabel;
+      btn.addEventListener('click', (ev) => {
+        if (ev && ev.isTrusted === false) return;
+        if (btn.disabled) return;
+        const kids = targetEl.childNodes || [];
+        for (let j = 0; j < kids.length; j += 1) {
+          const kid = kids[j];
+          if (kid && typeof kid.setAttribute === 'function') {
+            kid.setAttribute('aria-pressed', kid === btn ? 'true' : 'false');
+          }
+        }
+        emitChange(fieldName, optVal);
+      });
+      targetEl.appendChild(btn);
+    }
   }
 
   function syncVisibilityAndDisabled(node) {
@@ -502,6 +596,7 @@ function createSchemaUiController(doc, containerEl, {
       case 'button':
         ref.controlEl.textContent = String(node.label || node.text || 'Action');
         if (node.variant) ref.controlEl.setAttribute('data-variant', String(node.variant));
+        else if (typeof ref.controlEl.removeAttribute === 'function') ref.controlEl.removeAttribute('data-variant');
         return true;
       case 'toggle':
         if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
@@ -545,6 +640,31 @@ function createSchemaUiController(doc, containerEl, {
           if (val !== undefined && val !== null) ref.controlEl.value = String(val);
         }
         return true;
+      case 'segmented': {
+        if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
+        if (ref.controlEl) {
+          const opts = Array.isArray(node.options) ? node.options : [];
+          const optSig = JSON.stringify(opts);
+          if (ref.optSig !== optSig) {
+            renderSegmentedButtons(ref.controlEl, opts, val, node.field || node.id);
+            ref.optSig = optSig;
+          } else {
+            const activeStr = val !== undefined && val !== null ? String(val) : '';
+            const kids = ref.controlEl.childNodes || [];
+            for (let i = 0; i < kids.length; i += 1) {
+              const kid = kids[i];
+              if (kid && typeof kid.getAttribute === 'function' && typeof kid.setAttribute === 'function') {
+                kid.setAttribute(
+                  'aria-pressed',
+                  kid.getAttribute('data-ag-segment-value') === activeStr ? 'true' : 'false'
+                );
+              }
+            }
+          }
+          applyCommonFlags(ref.wrapperEl, ref.controlEl, node);
+        }
+        return true;
+      }
       case 'slider':
         if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
         if (ref.controlEl && val !== undefined && val !== null) {
@@ -766,6 +886,26 @@ function createSchemaUiController(doc, containerEl, {
           if (ev && ev.isTrusted === false) return;
           emitChange(node.field || node.id, controlEl.value);
         });
+        wrapperEl.appendChild(controlEl);
+        break;
+      }
+      case 'segmented': {
+        wrapperEl = doc.createElement('div');
+        wrapperEl.className = 'ag-field';
+        if (node.label) {
+          labelEl = doc.createElement('span');
+          labelEl.className = 'ag-field-label';
+          labelEl.textContent = String(node.label);
+          wrapperEl.appendChild(labelEl);
+        }
+        controlEl = doc.createElement('div');
+        controlEl.className = 'ag-segmented';
+        controlEl.setAttribute('role', 'group');
+        controlEl.setAttribute('data-ag-segmented', '1');
+        if (node.label) controlEl.setAttribute('aria-label', String(node.label));
+        const opts = Array.isArray(node.options) ? node.options : [];
+        optSig = JSON.stringify(opts);
+        renderSegmentedButtons(controlEl, opts, stateVal, node.field || node.id);
         wrapperEl.appendChild(controlEl);
         break;
       }

@@ -25,7 +25,9 @@ const { createHostAdminService } = require('./host-admin-service');
 const { createRendererInjector } = require('./renderer-injector');
 const { createUpdateSurvivalHook } = require('./update-survival-hook');
 const { createNetFetchBroker } = require('./net-fetch-broker');
+const { DEFAULT_SECRETS_VAULT_FILENAME, createSecretsVault } = require('./secrets-vault');
 const { DEFAULT_REMOTE_BRIDGE_FILENAME, createRemoteBridgeServer } = require('./remote-bridge-server');
+const { isPublicFqdnHost, normalizeHostName } = require('../../core/net-policy');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
 const { createNodeFileSystemPort } = require('../../adapters/node-fs-port');
 const { isPluginEnabledInConfig } = require('../../adapters/electron/config-reader');
@@ -166,13 +168,23 @@ function createHostRuntimeController(cfg, deps = {}) {
   const remoteBridgeConfigPath =
     cfg.remoteBridgeConfigPath ||
     (settingsDataDir ? path.join(settingsDataDir, DEFAULT_REMOTE_BRIDGE_FILENAME) : null);
+  const secretsVaultPath =
+    cfg.secretsVaultPath ||
+    (settingsDataDir ? path.join(settingsDataDir, DEFAULT_SECRETS_VAULT_FILENAME) : null);
   const reservedHostFiles = [
     cfg.trustPolicyPath,
     cfg.configJsonPath,
     remoteBridgeConfigPath,
+    secretsVaultPath,
     cfg.remotePrefsPath || (settingsDataDir ? path.join(settingsDataDir, 'remote-preferences.json') : null),
     settingsDataDir ? path.join(settingsDataDir, 'host-cli.json') : null,
   ].filter(Boolean);
+
+  const secretsVault = createSecretsVault({
+    vaultPath: secretsVaultPath,
+    safeStorage: deps.safeStorage || (electron && electron.safeStorage) || null,
+    recordDiag,
+  });
 
   let rendererInjectorRef = null;
   const settingsBridge = createSettingsBridge({
@@ -226,8 +238,56 @@ function createHostRuntimeController(cfg, deps = {}) {
     return out;
   }
 
+  function extractDynamicHttpsHostsFromSettingsData(data, forbiddenHosts) {
+    const out = [];
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return out;
+    const seen = new Set();
+    const pushHttpsUrlHost = (rawUrl) => {
+      if (typeof rawUrl !== 'string' || !rawUrl.trim()) return;
+      try {
+        const u = new URL(rawUrl.trim());
+        if (u.protocol !== 'https:' || u.username || u.password) return;
+        const port = u.port ? Number(u.port) : 443;
+        if (port !== 443) return;
+        const h = normalizeHostName(u.hostname);
+        if (h && !seen.has(h) && isPublicFqdnHost(h, { forbiddenHosts })) {
+          seen.add(h);
+          out.push(h);
+        }
+      } catch (_err) {}
+    };
+    if (data.cloudApiConfig && typeof data.cloudApiConfig === 'object' && !Array.isArray(data.cloudApiConfig)) {
+      pushHttpsUrlHost(data.cloudApiConfig.baseUrl);
+    }
+    if (
+      data.llmConfig &&
+      typeof data.llmConfig === 'object' &&
+      !Array.isArray(data.llmConfig) &&
+      data.llmConfig.allowRemoteHttps === true
+    ) {
+      pushHttpsUrlHost(data.llmConfig.baseUrl);
+    }
+    if (Array.isArray(data.approvedHttpsHosts)) {
+      for (let i = 0; i < data.approvedHttpsHosts.length && out.length < 16; i += 1) {
+        const raw = String(data.approvedHttpsHosts[i] || '').trim();
+        if (!raw) continue;
+        if (raw.includes('://')) {
+          pushHttpsUrlHost(raw);
+        } else {
+          const h = normalizeHostName(raw);
+          if (h && !seen.has(h) && isPublicFqdnHost(h, { forbiddenHosts })) {
+            seen.add(h);
+            out.push(h);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  const forbiddenNetHosts = Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : [];
   const netFetchBroker = createNetFetchBroker({
-    forbiddenHosts: Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : [],
+    forbiddenHosts: forbiddenNetHosts,
     namedLoopbackTargets:
       profile.namedLoopbackTargets && typeof profile.namedLoopbackTargets === 'object'
         ? profile.namedLoopbackTargets
@@ -243,6 +303,21 @@ function createHostRuntimeController(cfg, deps = {}) {
       if (!snap || snap.status !== 'ok' || !snap.data) return [];
       return extractDynamicLoopbackPortsFromSettingsData(snap.data);
     },
+    resolveDynamicHttpsHosts: (binding) => {
+      if (!binding || !binding.userApprovedHttps || typeof binding.pluginId !== 'string') return [];
+      const snap =
+        settingsBridge && typeof settingsBridge.getLastSnapshot === 'function'
+          ? settingsBridge.getLastSnapshot(binding.pluginId)
+          : null;
+      if (!snap || snap.status !== 'ok' || !snap.data) return [];
+      return extractDynamicHttpsHostsFromSettingsData(snap.data, forbiddenNetHosts);
+    },
+    resolvePluginSecret: (pluginId, secretKey, binding) => {
+      if (!binding || !binding.secretsBinding) {
+        return { ok: false, reason: 'ERR_SECRETS_NOT_DECLARED' };
+      }
+      return secretsVault.resolveSecretForHost(pluginId, binding.secretsBinding, secretKey);
+    },
     lookupFn: deps.netLookupFn || null,
     httpModule: deps.httpModule,
     httpsModule: deps.httpsModule,
@@ -251,7 +326,7 @@ function createHostRuntimeController(cfg, deps = {}) {
 
   const remoteBridgeServer = createRemoteBridgeServer({
     configPath: remoteBridgeConfigPath,
-    hostVersion: cfg.hostVersion || '3.1.0',
+    hostVersion: cfg.hostVersion || '3.3.0',
     buildSha8: cfg.buildSha8 || 'dev',
     profileId: profile.id || null,
     allowedOrigins: Array.isArray(profile.remoteAllowedOrigins) ? profile.remoteAllowedOrigins : [],
@@ -262,6 +337,7 @@ function createHostRuntimeController(cfg, deps = {}) {
     settingsBridge,
     configBridge,
     netFetchBroker,
+    secretsVault,
     httpModule: deps.bridgeHttpModule,
     recordDiag,
   });
@@ -482,12 +558,103 @@ function createHostRuntimeController(cfg, deps = {}) {
         if (!binding) {
           return { ok: false, reason: 'ERR_NET_NOT_DECLARED' };
         }
-        return netFetchBroker.fetchForPlugin(binding, url, {
-          method: payload.method,
-          headers: payload.headers,
-          body: payload.body,
-          timeoutMs: payload.timeoutMs,
-        });
+        const secretsBinding = wcId !== null ? rendererInjector.getTrustedSecretsBinding(wcId, pluginId) : null;
+        return netFetchBroker.fetchForPlugin(
+          { ...binding, secretsBinding },
+          url,
+          {
+            method: payload.method,
+            headers: payload.headers,
+            secretHeaders: payload.secretHeaders,
+            body: payload.body,
+            timeoutMs: payload.timeoutMs,
+          }
+        );
+      });
+
+      ipcMain.handle(IPC_CHANNELS.SECRETS_SET, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, reason: 'ERR_INVALID_PAYLOAD' };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, reason: check.reason || 'ERR_INVALID_PAYLOAD' };
+        }
+        const pluginId = typeof payload.pluginId === 'string' ? payload.pluginId : '';
+        const wcId = ev && ev.sender && typeof ev.sender.id === 'number' ? ev.sender.id : null;
+        const binding = wcId !== null ? rendererInjector.getTrustedSecretsBinding(wcId, pluginId) : null;
+        if (!binding) {
+          return { ok: false, reason: 'ERR_SECRETS_NOT_DECLARED' };
+        }
+        return secretsVault.setSecret(binding.pluginId, binding, payload.key, payload.value);
+      });
+
+      ipcMain.handle(IPC_CHANNELS.SECRETS_GET, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, exists: false, value: undefined, reason: 'ERR_INVALID_PAYLOAD' };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, exists: false, value: undefined, reason: check.reason || 'ERR_INVALID_PAYLOAD' };
+        }
+        const pluginId = typeof payload.pluginId === 'string' ? payload.pluginId : '';
+        const wcId = ev && ev.sender && typeof ev.sender.id === 'number' ? ev.sender.id : null;
+        const binding = wcId !== null ? rendererInjector.getTrustedSecretsBinding(wcId, pluginId) : null;
+        if (!binding) {
+          return { ok: false, exists: false, value: undefined, reason: 'ERR_SECRETS_NOT_DECLARED' };
+        }
+        return secretsVault.getSecret(binding.pluginId, binding, payload.key);
+      });
+
+      ipcMain.handle(IPC_CHANNELS.SECRETS_HAS, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, exists: false, reason: 'ERR_INVALID_PAYLOAD' };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, exists: false, reason: check.reason || 'ERR_INVALID_PAYLOAD' };
+        }
+        const pluginId = typeof payload.pluginId === 'string' ? payload.pluginId : '';
+        const wcId = ev && ev.sender && typeof ev.sender.id === 'number' ? ev.sender.id : null;
+        const binding = wcId !== null ? rendererInjector.getTrustedSecretsBinding(wcId, pluginId) : null;
+        if (!binding) {
+          return { ok: false, exists: false, reason: 'ERR_SECRETS_NOT_DECLARED' };
+        }
+        return secretsVault.hasSecret(binding.pluginId, binding, payload.key);
+      });
+
+      ipcMain.handle(IPC_CHANNELS.SECRETS_DELETE, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, deleted: false, reason: 'ERR_INVALID_PAYLOAD' };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, deleted: false, reason: check.reason || 'ERR_INVALID_PAYLOAD' };
+        }
+        const pluginId = typeof payload.pluginId === 'string' ? payload.pluginId : '';
+        const wcId = ev && ev.sender && typeof ev.sender.id === 'number' ? ev.sender.id : null;
+        const binding = wcId !== null ? rendererInjector.getTrustedSecretsBinding(wcId, pluginId) : null;
+        if (!binding) {
+          return { ok: false, deleted: false, reason: 'ERR_SECRETS_NOT_DECLARED' };
+        }
+        return secretsVault.deleteSecret(binding.pluginId, binding, payload.key);
+      });
+
+      ipcMain.handle(IPC_CHANNELS.SECRETS_LIST, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, keys: [], reason: 'ERR_INVALID_PAYLOAD' };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, keys: [], reason: check.reason || 'ERR_INVALID_PAYLOAD' };
+        }
+        const pluginId = typeof payload.pluginId === 'string' ? payload.pluginId : '';
+        const wcId = ev && ev.sender && typeof ev.sender.id === 'number' ? ev.sender.id : null;
+        const binding = wcId !== null ? rendererInjector.getTrustedSecretsBinding(wcId, pluginId) : null;
+        if (!binding) {
+          return { ok: false, keys: [], reason: 'ERR_SECRETS_NOT_DECLARED' };
+        }
+        return secretsVault.listSecretKeys(binding.pluginId, binding);
       });
 
       ipcMain.handle(IPC_CHANNELS.PING, (ev, payload) => {
@@ -560,6 +727,7 @@ function createHostRuntimeController(cfg, deps = {}) {
     getPreloadStatus: () => preloadRegistrar.getStatus(),
     getSettingsBridgeStatus: () => settingsBridge.getStatus(),
     getConfigBridgeStatus: () => configBridge.getStatus(),
+    getSecretsVaultStatus: () => secretsVault.getStatus(),
     getRemoteBridgeStatus: (opts) => remoteBridgeServer.getStatus(opts),
     configureRemoteBridge: (patch) => hostAdminService.configureRemoteBridge(patch),
     rotateRemoteBridgeToken: () => hostAdminService.rotateRemoteBridgeToken(),

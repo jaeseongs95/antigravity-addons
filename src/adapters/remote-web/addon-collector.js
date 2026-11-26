@@ -69,6 +69,13 @@ function buildPackedPluginMeta(addon, verified) {
     remotePermissions = {};
     if (rawPerms.ui && typeof rawPerms.ui === 'object') remotePermissions.ui = rawPerms.ui;
     if (rawPerms.storage && typeof rawPerms.storage === 'object') remotePermissions.storage = rawPerms.storage;
+    if (rawPerms.secrets && typeof rawPerms.secrets === 'object' && verified.effectiveTrustLevel === 'trusted') {
+      remotePermissions.secrets = {
+        maxKeys: rawPerms.secrets.maxKeys,
+        maxBytes: rawPerms.secrets.maxBytes,
+        allowRead: rawPerms.secrets.allowRead === true,
+      };
+    }
     if (rawPerms.events && typeof rawPerms.events === 'object') remotePermissions.events = rawPerms.events;
     if (rawPerms.services && typeof rawPerms.services === 'object') remotePermissions.services = rawPerms.services;
     if (rawPerms.net && typeof rawPerms.net === 'object') {

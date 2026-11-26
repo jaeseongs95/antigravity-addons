@@ -22,6 +22,40 @@ const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
 const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
 
 const _RGB_COLOR_RE = /^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)$/i;
+const HOST_LOCALE_STORAGE_KEY = 'addon-host:settings-ui-lang';
+const _SAFE_LOCALE_RE = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i;
+
+function normalizeHostLocale(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = _StringTrim(value);
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower === 'ko' || lower.startsWith('ko-')) return 'ko';
+  if (lower === 'en' || lower.startsWith('en-')) return 'en';
+  if (_SAFE_LOCALE_RE.test(trimmed)) return trimmed;
+  return null;
+}
+
+function readStoredHostLocale(win) {
+  try {
+    const storage = win && win.localStorage;
+    if (storage && typeof storage.getItem === 'function') {
+      return normalizeHostLocale(storage.getItem(HOST_LOCALE_STORAGE_KEY));
+    }
+  } catch (_e) {}
+  return null;
+}
+
+function writeStoredHostLocale(win, locale) {
+  try {
+    const storage = win && win.localStorage;
+    if (storage && typeof storage.setItem === 'function') {
+      storage.setItem(HOST_LOCALE_STORAGE_KEY, locale);
+      return true;
+    }
+  } catch (_e) {}
+  return false;
+}
 
 function parseOpaqueRgb(colorStr) {
   if (typeof colorStr !== 'string') return null;
@@ -121,6 +155,8 @@ function buildTokenCss(mode) {
 
 function createThemeAndI18n(doc, win) {
   const listeners = new _Set();
+  const localeListeners = new _Set();
+  let overrideLocale = readStoredHostLocale(win);
 
   function detectMode() {
     try {
@@ -177,6 +213,7 @@ function createThemeAndI18n(doc, win) {
   }
 
   function getLocale() {
+    if (overrideLocale) return overrideLocale;
     try {
       const docLang =
         doc && doc.documentElement && typeof doc.documentElement.lang === 'string'
@@ -191,6 +228,51 @@ function createThemeAndI18n(doc, win) {
     } catch (_e) {}
     return 'en';
   }
+
+  function notifyLocaleChange(nextLocale) {
+    _SetForEach(localeListeners, (cb) => {
+      try {
+        cb(nextLocale);
+      } catch (_e) {}
+    });
+  }
+
+  function setLocale(nextLocale, { persist = true } = {}) {
+    const normalized = normalizeHostLocale(nextLocale);
+    if (!normalized) return getLocale();
+    const prev = getLocale();
+    overrideLocale = normalized;
+    if (persist !== false) {
+      writeStoredHostLocale(win, normalized);
+    }
+    if (normalized !== prev) {
+      notifyLocaleChange(normalized);
+    }
+    return normalized;
+  }
+
+  function onLocaleDidChange(cb, registerDisposer) {
+    if (typeof cb !== 'function') throw new Error('ERR_INVALID_I18N_LISTENER');
+    _SetAdd(localeListeners, cb);
+    const unsub = () => _SetDelete(localeListeners, cb);
+    if (typeof registerDisposer === 'function') registerDisposer(unsub);
+    return unsub;
+  }
+
+  const handleStorageLocaleSync = (ev) => {
+    if (!ev || ev.key !== HOST_LOCALE_STORAGE_KEY) return;
+    const prev = getLocale();
+    overrideLocale = normalizeHostLocale(ev.newValue);
+    const next = getLocale();
+    if (next !== prev) {
+      notifyLocaleChange(next);
+    }
+  };
+  try {
+    if (win && typeof win.addEventListener === 'function') {
+      win.addEventListener('storage', handleStorageLocaleSync);
+    }
+  } catch (_e) {}
 
   function translate(key, dictOrParams = null, params = null) {
     const locale = getLocale().toLowerCase();
@@ -234,18 +316,27 @@ function createThemeAndI18n(doc, win) {
     });
   }
 
-  function createI18nHandle() {
+  function createI18nHandle(registerDisposer) {
     return _ObjectFreeze({
       getLocale,
       t: translate,
+      onDidChange(cb) {
+        return onLocaleDidChange(cb, registerDisposer);
+      },
     });
   }
 
   function dispose() {
     _SetClear(listeners);
+    _SetClear(localeListeners);
     try {
       if (mediaQuery && typeof mediaQuery.removeEventListener === 'function') {
         mediaQuery.removeEventListener('change', handleMediaChange);
+      }
+    } catch (_e) {}
+    try {
+      if (win && typeof win.removeEventListener === 'function') {
+        win.removeEventListener('storage', handleStorageLocaleSync);
       }
     } catch (_e) {}
   }
@@ -254,6 +345,8 @@ function createThemeAndI18n(doc, win) {
     getSnapshot,
     buildTokenCss,
     getLocale,
+    setLocale,
+    onLocaleDidChange,
     t: translate,
     createThemeHandle,
     createI18nHandle,
@@ -262,8 +355,10 @@ function createThemeAndI18n(doc, win) {
 }
 
 module.exports = {
+  HOST_LOCALE_STORAGE_KEY,
   DARK_TOKENS,
   LIGHT_TOKENS,
+  normalizeHostLocale,
   buildTokenCss,
   createThemeAndI18n,
 };

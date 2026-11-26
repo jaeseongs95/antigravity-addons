@@ -18,6 +18,16 @@
  */
 
 const { evaluateNetRequest, isPublicFqdnHost, normalizeHostName } = require('../../core/net-policy');
+const {
+  DEFAULT_MAX_SECRET_KEYS,
+  MAX_SECRET_KEYS_LIMIT,
+  DEFAULT_MAX_SECRET_BYTES,
+  MIN_MAX_SECRET_BYTES,
+  MAX_SECRET_BYTES_LIMIT,
+  validateSecretKey,
+  validateSecretValue,
+  resolveSecretHeaders,
+} = require('../../core/secrets-policy');
 
 const DEFAULT_MAX_SETTINGS_BYTES = 65536;
 const MIN_SETTINGS_BYTES = 1024;
@@ -293,6 +303,8 @@ function createRemoteHostBridge({
   const recordedErrors = [];
   const allowedSettings = new Map(); // pluginId -> { maxBytes, revision }
   const allowedNet = new Map(); // pluginId -> { httpsHosts: string[], userApprovedHttps: boolean, localLoopback: Array<number|string> }
+  const allowedSecrets = new Map(); // pluginId -> { maxKeys: number, maxBytes: number, allowRead: boolean }
+  const sessionSecrets = new Map(); // pluginId -> Map<key, { value: string, byteLength: number, updatedAt: string }> (NEVER persisted to localStorage/GM)
   const packedConfigScopes = new Map(); // `${pluginId}:${scopeId}` -> snapshot
 
   function isRemoteTransportConnected() {
@@ -790,6 +802,164 @@ function createRemoteHostBridge({
     return true;
   }
 
+  function bindSecretsPlugin(pluginId, spec = {}) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) return false;
+    const rawKeys = Number(spec && spec.maxKeys);
+    const maxKeys = Number.isInteger(rawKeys)
+      ? Math.max(1, Math.min(MAX_SECRET_KEYS_LIMIT, rawKeys))
+      : DEFAULT_MAX_SECRET_KEYS;
+    const rawBytes = Number(spec && spec.maxBytes);
+    const maxBytes = Number.isInteger(rawBytes)
+      ? Math.max(MIN_MAX_SECRET_BYTES, Math.min(MAX_SECRET_BYTES_LIMIT, rawBytes))
+      : DEFAULT_MAX_SECRET_BYTES;
+    allowedSecrets.set(pluginId, {
+      maxKeys,
+      maxBytes,
+      allowRead: Boolean(spec && spec.allowRead === true),
+    });
+    return true;
+  }
+
+  function getSessionSecretsBucket(pluginId, createIfMissing = false) {
+    let bucket = sessionSecrets.get(pluginId);
+    if (!bucket && createIfMissing) {
+      bucket = new Map();
+      sessionSecrets.set(pluginId, bucket);
+    }
+    return bucket || null;
+  }
+
+  function secretsSet(pluginId, rawKey, rawValue) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+      return Promise.resolve({ ok: false, reason: 'ERR_INVALID_PLUGIN_ID' });
+    }
+    const binding = allowedSecrets.get(pluginId);
+    if (!binding) {
+      return Promise.resolve({ ok: false, reason: 'ERR_SECRETS_NOT_DECLARED' });
+    }
+    const kc = validateSecretKey(rawKey);
+    if (!kc.ok) return Promise.resolve({ ok: false, reason: kc.reason });
+    const vc = validateSecretValue(rawValue);
+    if (!vc.ok) return Promise.resolve({ ok: false, reason: vc.reason });
+
+    if (remoteTransport && typeof remoteTransport.secretsSet === 'function' && isRemoteTransportConnected()) {
+      return Promise.resolve(remoteTransport.secretsSet(pluginId, kc.key, vc.value)).then((res) =>
+        res && res.ok ? { ...res, persistence: 'remote-bridge' } : res
+      );
+    }
+
+    const bucket = getSessionSecretsBucket(pluginId, true);
+    const isNew = !bucket.has(kc.key);
+    if (isNew && bucket.size >= binding.maxKeys) {
+      return Promise.resolve({ ok: false, reason: 'ERR_SECRETS_MAX_KEYS_EXCEEDED' });
+    }
+    let projectedBytes = vc.byteLength;
+    for (const [k, rec] of bucket.entries()) {
+      if (k === kc.key) continue;
+      projectedBytes += Number(rec && rec.byteLength) || 0;
+    }
+    if (projectedBytes > binding.maxBytes) {
+      return Promise.resolve({ ok: false, reason: 'ERR_SECRETS_QUOTA_EXCEEDED' });
+    }
+    const updatedAt = new Date().toISOString();
+    bucket.set(kc.key, { value: vc.value, byteLength: vc.byteLength, updatedAt });
+    return Promise.resolve({ ok: true, key: kc.key, persistence: 'session-memory', updatedAt, reason: null });
+  }
+
+  function secretsHas(pluginId, rawKey) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+      return Promise.resolve({ ok: false, exists: false, reason: 'ERR_INVALID_PLUGIN_ID' });
+    }
+    const binding = allowedSecrets.get(pluginId);
+    if (!binding) {
+      return Promise.resolve({ ok: false, exists: false, reason: 'ERR_SECRETS_NOT_DECLARED' });
+    }
+    const kc = validateSecretKey(rawKey);
+    if (!kc.ok) return Promise.resolve({ ok: false, exists: false, reason: kc.reason });
+
+    if (remoteTransport && typeof remoteTransport.secretsHas === 'function' && isRemoteTransportConnected()) {
+      return Promise.resolve(remoteTransport.secretsHas(pluginId, kc.key)).then((res) =>
+        res && res.ok ? { ...res, persistence: 'remote-bridge' } : res
+      );
+    }
+
+    const bucket = getSessionSecretsBucket(pluginId, false);
+    return Promise.resolve({
+      ok: true,
+      exists: Boolean(bucket && bucket.has(kc.key)),
+      persistence: 'session-memory',
+      reason: null,
+    });
+  }
+
+  function secretsGet(pluginId, rawKey) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+      return Promise.resolve({ ok: false, exists: false, value: undefined, reason: 'ERR_INVALID_PLUGIN_ID' });
+    }
+    const binding = allowedSecrets.get(pluginId);
+    if (!binding) {
+      return Promise.resolve({ ok: false, exists: false, value: undefined, reason: 'ERR_SECRETS_NOT_DECLARED' });
+    }
+    if (!binding.allowRead) {
+      return Promise.resolve({ ok: false, exists: false, value: undefined, reason: 'ERR_SECRETS_READ_NOT_ALLOWED' });
+    }
+    const kc = validateSecretKey(rawKey);
+    if (!kc.ok) return Promise.resolve({ ok: false, exists: false, value: undefined, reason: kc.reason });
+
+    if (remoteTransport && typeof remoteTransport.secretsGet === 'function' && isRemoteTransportConnected()) {
+      return Promise.resolve(remoteTransport.secretsGet(pluginId, kc.key)).then((res) =>
+        res && res.ok ? { ...res, persistence: 'remote-bridge' } : res
+      );
+    }
+
+    const bucket = getSessionSecretsBucket(pluginId, false);
+    const rec = bucket ? bucket.get(kc.key) : null;
+    if (!rec) {
+      return Promise.resolve({ ok: true, exists: false, value: undefined, persistence: 'session-memory', reason: null });
+    }
+    return Promise.resolve({ ok: true, exists: true, value: rec.value, persistence: 'session-memory', reason: null });
+  }
+
+  function secretsDelete(pluginId, rawKey) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+      return Promise.resolve({ ok: false, deleted: false, reason: 'ERR_INVALID_PLUGIN_ID' });
+    }
+    const binding = allowedSecrets.get(pluginId);
+    if (!binding) {
+      return Promise.resolve({ ok: false, deleted: false, reason: 'ERR_SECRETS_NOT_DECLARED' });
+    }
+    const kc = validateSecretKey(rawKey);
+    if (!kc.ok) return Promise.resolve({ ok: false, deleted: false, reason: kc.reason });
+
+    if (remoteTransport && typeof remoteTransport.secretsDelete === 'function' && isRemoteTransportConnected()) {
+      return Promise.resolve(remoteTransport.secretsDelete(pluginId, kc.key));
+    }
+
+    const bucket = getSessionSecretsBucket(pluginId, false);
+    const deleted = Boolean(bucket && bucket.delete(kc.key));
+    return Promise.resolve({ ok: true, deleted, reason: null });
+  }
+
+  function secretsList(pluginId) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+      return Promise.resolve({ ok: false, keys: [], reason: 'ERR_INVALID_PLUGIN_ID' });
+    }
+    const binding = allowedSecrets.get(pluginId);
+    if (!binding) {
+      return Promise.resolve({ ok: false, keys: [], reason: 'ERR_SECRETS_NOT_DECLARED' });
+    }
+
+    if (remoteTransport && typeof remoteTransport.secretsList === 'function' && isRemoteTransportConnected()) {
+      return Promise.resolve(remoteTransport.secretsList(pluginId)).then((res) =>
+        res && res.ok ? { ...res, persistence: 'remote-bridge' } : res
+      );
+    }
+
+    const bucket = getSessionSecretsBucket(pluginId, false);
+    const keys = bucket ? Array.from(bucket.keys()).sort() : [];
+    return Promise.resolve({ ok: true, keys, persistence: 'session-memory', reason: null });
+  }
+
   function getEffectiveHttpsHosts(pluginId, binding) {
     const merged = [];
     const seen = new Set();
@@ -867,6 +1037,42 @@ function createRemoteHostBridge({
     if (!plan.ok) {
       return Promise.resolve({ ok: false, reason: plan.reason });
     }
+
+    const hasSecretHeaders = Boolean(
+      init && init.secretHeaders && typeof init.secretHeaders === 'object' && Object.keys(init.secretHeaders).length > 0
+    );
+
+    // When connected to Desktop Remote Bridge AND secretHeaders are requested, delegate to Desktop so
+    // the OS-encrypted secret is injected server-side without ever exposing plaintext in the browser.
+    if (hasSecretHeaders && remoteTransport && typeof remoteTransport.netFetch === 'function' && isRemoteTransportConnected()) {
+      return Promise.resolve(remoteTransport.netFetch(pluginId, rawUrl, init));
+    }
+
+    let finalHeaders = { ...plan.headers };
+    if (hasSecretHeaders) {
+      const secretsBinding = allowedSecrets.get(pluginId);
+      if (!secretsBinding) {
+        return Promise.resolve({ ok: false, reason: 'ERR_SECRETS_NOT_DECLARED' });
+      }
+      const bucket = getSessionSecretsBucket(pluginId, false);
+      const secretRes = resolveSecretHeaders(init.secretHeaders, (secretKey) => {
+        const rec = bucket ? bucket.get(secretKey) : null;
+        if (!rec) return { ok: false, reason: `ERR_SECRET_NOT_FOUND:${secretKey}` };
+        return { ok: true, value: rec.value };
+      });
+      if (!secretRes.ok) {
+        return Promise.resolve({ ok: false, reason: secretRes.reason });
+      }
+      const injectedSet = new Set(secretRes.injectedHeaderNames);
+      const merged = {};
+      for (const [k, v] of Object.entries(finalHeaders)) {
+        if (injectedSet.has(k.toLowerCase())) continue;
+        merged[k] = v;
+      }
+      Object.assign(merged, secretRes.headers);
+      finalHeaders = merged;
+    }
+
     const xhrFn = detectGmXhr();
     if (!xhrFn && remoteTransport && typeof remoteTransport.netFetch === 'function' && isRemoteTransportConnected()) {
       return Promise.resolve(remoteTransport.netFetch(pluginId, rawUrl, init));
@@ -879,7 +1085,7 @@ function createRemoteHostBridge({
         xhrFn({
           method: plan.method,
           url: plan.url,
-          headers: plan.headers,
+          headers: finalHeaders,
           data: typeof init.body === 'string' ? init.body : undefined,
           anonymous: true,
           timeout: Number.isFinite(Number(init.timeoutMs)) ? Math.min(30000, Math.max(500, Number(init.timeoutMs))) : 15000,
@@ -940,10 +1146,16 @@ function createRemoteHostBridge({
     writeConfigScope,
     getRemoteBridgeStatus,
     netFetch,
+    secretsSet,
+    secretsGet,
+    secretsHas,
+    secretsDelete,
+    secretsList,
   });
 
   function dispose() {
     activePortalClaims.clear();
+    sessionSecrets.clear();
     syncPortalAttribute();
   }
 
@@ -951,6 +1163,7 @@ function createRemoteHostBridge({
     port,
     bindSettingsPlugin,
     bindNetPlugin,
+    bindSecretsPlugin,
     hydrateSettings,
     loadPersistedSettings,
     hydrateUserAllowedHttpsHosts,

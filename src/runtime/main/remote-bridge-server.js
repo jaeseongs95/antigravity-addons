@@ -330,6 +330,7 @@ function createRemoteBridgeServer({
   settingsBridge = null,
   configBridge = null,
   netFetchBroker = null,
+  secretsVault = null,
   httpModule = http,
   recordDiag = () => {},
 } = {}) {
@@ -439,6 +440,22 @@ function createRemoteBridgeServer({
           scopes: configScopes,
         }
       : null;
+    const secretsPerm =
+      isTrusted &&
+      manifest.permissions &&
+      typeof manifest.permissions === 'object' &&
+      manifest.permissions.secrets &&
+      typeof manifest.permissions.secrets === 'object'
+        ? manifest.permissions.secrets
+        : null;
+    const secretsBinding = secretsPerm
+      ? {
+          pluginId: cleanId,
+          maxKeys: secretsPerm.maxKeys,
+          maxBytes: secretsPerm.maxBytes,
+          allowRead: secretsPerm.allowRead === true,
+        }
+      : null;
     const netPerm =
       manifest.permissions &&
       typeof manifest.permissions === 'object' &&
@@ -450,8 +467,10 @@ function createRemoteBridgeServer({
       ? {
           pluginId: cleanId,
           httpsHosts: Array.isArray(netPerm.httpsHosts) ? netPerm.httpsHosts.slice() : [],
+          userApprovedHttps: isTrusted && netPerm.userApprovedHttps === true,
           localLoopback: isTrusted && Array.isArray(netPerm.localLoopback) ? netPerm.localLoopback.slice() : [],
           allowLoopback: isTrusted && Array.isArray(netPerm.localLoopback) && netPerm.localLoopback.length > 0,
+          secretsBinding,
         }
       : null;
 
@@ -461,6 +480,7 @@ function createRemoteBridgeServer({
       trustLevel: verified.effectiveTrustLevel,
       settingsSpec,
       configBinding,
+      secretsBinding,
       netBinding,
     };
   }
@@ -670,9 +690,46 @@ function createRemoteBridgeServer({
       const result = await netFetchBroker.fetchForPlugin(verified.netBinding, url, {
         method: payload.method,
         headers: payload.headers,
+        secretHeaders: payload.secretHeaders,
         body: payload.body,
         timeoutMs: payload.timeoutMs,
       });
+      writeJsonResponse(res, 200, result, allowedCorsOrigin);
+      return;
+    }
+
+    if (
+      pathname === '/v1/secrets/set' ||
+      pathname === '/v1/secrets/get' ||
+      pathname === '/v1/secrets/has' ||
+      pathname === '/v1/secrets/delete' ||
+      pathname === '/v1/secrets/list'
+    ) {
+      if (!secretsVault) {
+        writeJsonResponse(res, 503, { ok: false, reason: 'ERR_SECRETS_VAULT_UNAVAILABLE' }, allowedCorsOrigin);
+        return;
+      }
+      const verified = resolveVerifiedPlugin(payload.pluginId);
+      if (!verified.ok) {
+        writeJsonResponse(res, 403, { ok: false, reason: verified.reason }, allowedCorsOrigin);
+        return;
+      }
+      if (!verified.secretsBinding) {
+        writeJsonResponse(res, 403, { ok: false, reason: 'ERR_SECRETS_NOT_DECLARED' }, allowedCorsOrigin);
+        return;
+      }
+      let result;
+      if (pathname === '/v1/secrets/set') {
+        result = secretsVault.setSecret(verified.pluginId, verified.secretsBinding, payload.key, payload.value);
+      } else if (pathname === '/v1/secrets/get') {
+        result = secretsVault.getSecret(verified.pluginId, verified.secretsBinding, payload.key);
+      } else if (pathname === '/v1/secrets/has') {
+        result = secretsVault.hasSecret(verified.pluginId, verified.secretsBinding, payload.key);
+      } else if (pathname === '/v1/secrets/delete') {
+        result = secretsVault.deleteSecret(verified.pluginId, verified.secretsBinding, payload.key);
+      } else {
+        result = secretsVault.listSecretKeys(verified.pluginId, verified.secretsBinding);
+      }
       writeJsonResponse(res, 200, result, allowedCorsOrigin);
       return;
     }

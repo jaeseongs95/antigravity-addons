@@ -282,6 +282,13 @@ const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
       gridSelector: 'div.grid',
     }),
   ]),
+  uiSectionTargets: Object.freeze({
+    'customizations.mcp-servers.header': Object.freeze({
+      rootSelectors: Object.freeze(['[data-testid="customizations-view"]']),
+      headingTexts: Object.freeze(['MCP Servers', 'MCP 서버']),
+      insertPosition: 'before-first-child',
+    }),
+  }),
   forbiddenNetHosts: Object.freeze([
     'antigravity.google.com',
     'accounts.google.com',

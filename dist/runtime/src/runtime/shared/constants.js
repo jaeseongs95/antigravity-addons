@@ -25,6 +25,11 @@ const IPC_CHANNELS = Object.freeze({
   HOST_ADMIN_ROTATE_REMOTE_TOKEN: 'addon-host:v3:host-admin-rotate-remote-token',
   HOST_ADMIN_REBUILD_REMOTE_BUNDLE: 'addon-host:v3:host-admin-rebuild-remote-bundle',
   NET_FETCH: 'addon-host:v3:net-fetch',
+  SECRETS_SET: 'addon-host:v3:secrets-set',
+  SECRETS_GET: 'addon-host:v3:secrets-get',
+  SECRETS_HAS: 'addon-host:v3:secrets-has',
+  SECRETS_DELETE: 'addon-host:v3:secrets-delete',
+  SECRETS_LIST: 'addon-host:v3:secrets-list',
   REPORT_ERROR: 'addon-host:v2:report-error',
   PING: 'addon-host:v2:ping',
 });
