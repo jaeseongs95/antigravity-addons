@@ -378,6 +378,31 @@ test('TC-V310-02: remote-bridge-server enforces reserved file, strict CORS, Bear
     assert.equal(pingBody.ok, true);
     assert.equal(pingBody.hostVersion, '3.1.0');
 
+    // 3b. Chrome Private Network Access (PNA) OPTIONS preflight: allowed origin only
+    const rPnaOk = await fetch(`${baseUrl}/v1/ping`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://allowed.example',
+        'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Private-Network': 'true',
+      },
+    });
+    assert.equal(rPnaOk.status, 204);
+    assert.equal(rPnaOk.headers.get('access-control-allow-origin'), 'https://allowed.example');
+    assert.equal(rPnaOk.headers.get('access-control-allow-private-network'), 'true');
+
+    const rPnaBad = await fetch(`${baseUrl}/v1/ping`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://evil.example',
+        'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Private-Network': 'true',
+      },
+    });
+    assert.equal(rPnaBad.status, 403);
+    assert.equal(rPnaBad.headers.get('access-control-allow-origin'), null);
+    assert.equal(rPnaBad.headers.get('access-control-allow-private-network'), null);
+
     // 4. Token rotation invalidates previous token immediately
     const rot = bridgeServer.rotateToken();
     assert.equal(rot.ok, true);

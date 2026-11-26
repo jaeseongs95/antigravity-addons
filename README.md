@@ -6,7 +6,14 @@
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
 > *(Formerly `antigravity-native-addon-host` — existing `addon-host` CLI command, `ADDON_HOST_LOADER_V2` marker, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Single, vendor-independent API-First native desktop & universal remote web addon host framework (`v3.1.0`) with Host-Managed Unified Remote Bridge (`ag-bridge-v1:` 1-line Pairing Code + 1-click in-app Remote Bundle rebuild), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + trusted `localLoopback`), separate `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+**Single, vendor-independent API-First native desktop & universal remote web addon host framework (`v3.1.1`) with Host-Managed Unified Remote Bridge (`ag-bridge-v1:` 1-line Pairing Code + Chrome PNA preflight + 1-click in-app Remote Bundle rebuild), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + trusted `localLoopback`), separate `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+
+## Key Updates in v3.1.1 (Chrome PNA Preflight & Self-Hosted Remote Bridge Guides)
+
+- **Chrome/Edge Private Network Access (PNA) Preflight (`remote-bridge-server.js`)**:
+  - Returns `Access-Control-Allow-Private-Network: true` (`Vary: Origin, Access-Control-Request-Private-Network`) on `OPTIONS` preflights strictly for allowlisted `Origin`s so `https://antigravity.google.com` connects cleanly to same-PC `http://127.0.0.1:19384` or private-network HTTPS reverse proxies in modern Chromium. Disallowed origins continue to fail closed with `403`.
+- **Self-Hosted Connection Examples**:
+  - Added concise setup examples below for Same PC, Home Router (Port Forwarding + DDNS + HTTPS Reverse Proxy), Cloudflare Tunnel, and Tailscale Funnel.
 
 ## Key Updates in v3.1.0 (Host-Managed Unified Remote Bridge Framework & `userApprovedHttps` Fix)
 
@@ -171,6 +178,39 @@ node ./bin/addon-host.js --upgrade
 node ./bin/addon-host.js --rollback
 ```
 
+## Exposing Remote Host Bridge (Self-Hosted Examples)
+
+The Remote Host Bridge is **disabled by default** (`127.0.0.1:19384`). Enable it in Desktop **Settings → Addon Manager → Remote Host Bridge**, then pair once by pasting the 1-line Pairing Code (`ag-bridge-v1:...`) into the Remote Web Drawer **Host Bridge** tab.
+
+> **Security**: Because `https://antigravity.google.com` is an HTTPS origin and requests carry `Authorization: Bearer <token>`, **never expose plain HTTP to the internet**. Always place HTTPS/TLS in front for external access.
+
+### 1. Same PC (Zero Tunnel)
+1. Enable **Remote Host Bridge** with `Bind: 127.0.0.1`, `Port: 19384`, leave **Public HTTPS URL** blank, and click **Save**.
+2. Click **Copy Pairing Code** and paste it into the Remote Web Drawer **Host Bridge** tab.
+
+### 2. Home Router (Port Forwarding + DDNS + HTTPS Reverse Proxy)
+1. Set `Bind: 0.0.0.0` (or keep `127.0.0.1` if the reverse proxy runs on the same PC) and `Port: 19384` in **Addon Manager**.
+2. Configure DDNS (`bridge.example.com` or `xxx.iptime.org`) and forward TCP `443` (and `80` for ACME) on your router to your reverse proxy host (PC / NAS / OpenWrt / Nginx Proxy Manager / Caddy).
+3. Terminate HTTPS with a reverse proxy — example `Caddyfile`:
+   ```caddyfile
+   bridge.example.com {
+       reverse_proxy 127.0.0.1:19384
+   }
+   ```
+4. Enter `https://bridge.example.com` in Desktop **Public HTTPS URL**, save, and copy the updated Pairing Code.
+
+### 3. Cloudflare Tunnel (Zero Port Forwarding)
+```bash
+cloudflared tunnel --url http://127.0.0.1:19384
+```
+Paste the printed `https://<random>.trycloudflare.com` (or your named tunnel domain) into **Public HTTPS URL**, save, and copy the Pairing Code.
+
+### 4. Tailscale Funnel (Zero Port Forwarding, Auto HTTPS)
+```bash
+tailscale funnel 19384
+```
+Paste your `https://<machine>.<tailnet>.ts.net` URL into **Public HTTPS URL**, save, and copy the Pairing Code.
+
 ## Plugin Renderer Usage (`AddonManifest.v2`)
 
 ```js
@@ -185,6 +225,8 @@ if (rootEl) {
 
 ## Documentation
 
+- [Release Notes (`v3.1.1` EN/KO)](./RELEASE_NOTES_v3.1.1.md)
+- [Release Notes (`v3.1.0` EN/KO)](./RELEASE_NOTES_v3.1.0.md)
 - [Release Notes (`v2.5.0` EN/KO)](./RELEASE_NOTES_v2.5.0.md)
 - [Release Notes (`v2.4.0` EN/KO)](./RELEASE_NOTES_v2.4.0.md)
 - [Release Notes (`v2.3.0` EN/KO)](./RELEASE_NOTES_v2.3.0.md)

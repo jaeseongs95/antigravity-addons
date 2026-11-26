@@ -319,7 +319,7 @@ function readJsonBody(req, maxBytes = MAX_BODY_BYTES) {
 
 function createRemoteBridgeServer({
   configPath = null,
-  hostVersion = '3.1.0',
+  hostVersion = '3.1.1',
   buildSha8 = 'dev',
   profileId = null,
   allowedOrigins = [],
@@ -484,10 +484,14 @@ function createRemoteBridgeServer({
       };
       if (allowedCorsOrigin) {
         headers['Access-Control-Allow-Origin'] = allowedCorsOrigin;
-        headers['Vary'] = 'Origin';
+        headers['Vary'] = 'Origin, Access-Control-Request-Private-Network';
         headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type';
         headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS';
         headers['Access-Control-Max-Age'] = '600';
+        const reqPna = req && req.headers ? req.headers['access-control-request-private-network'] : null;
+        if (typeof reqPna === 'string' && reqPna.trim().toLowerCase() === 'true') {
+          headers['Access-Control-Allow-Private-Network'] = 'true';
+        }
       }
       res.writeHead(204, headers);
       res.end();

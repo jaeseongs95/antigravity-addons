@@ -6,7 +6,14 @@
 > **언어**: [English (README.md)](./README.md) | 한국어  
 > *(구 `antigravity-native-addon-host` — 기존 `addon-host` CLI 명령, `ADDON_HOST_LOADER_V2` 패치 마커 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**호스트 중앙 관리형 통합 원격 브리지(`ag-bridge-v1:` 한 줄 페어링 코드 + 앱 내 1클릭 원격 번들 재빌드), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 신뢰 `localLoopback`), 별도 `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크(`v3.1.0`)입니다.**
+**호스트 중앙 관리형 통합 원격 브리지(`ag-bridge-v1:` 한 줄 페어링 코드 + Chrome PNA 프리플라이트 + 앱 내 1클릭 원격 번들 재빌드), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 신뢰 `localLoopback`), 별도 `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크(`v3.1.1`)입니다.**
+
+## v3.1.1 주요 업데이트 (Chrome PNA 프리플라이트 지원 · 원격 브리지 셀프 호스팅 예시 문서화)
+
+- **Chrome/Edge Private Network Access(PNA) 프리플라이트 지원 (`remote-bridge-server.js`)**:
+  - 허용된 `Origin`의 `OPTIONS` 프리플라이트 요청에 한해 `Access-Control-Allow-Private-Network: true`(`Vary: Origin, Access-Control-Request-Private-Network`)를 응답하여, 최신 Chromium에서 `https://antigravity.google.com` → 같은 PC `http://127.0.0.1:19384` 또는 사설망 HTTPS 리버스 프록시 연결이 차단되지 않도록 보강했습니다(미허용 오리진은 `403` 차단 유지).
+- **원격 호스트 브리지 셀프 호스팅 연결 예시 추가**:
+  - 같은 PC · 공유기(포트포워딩 + DDNS + HTTPS 리버스 프록시) · Cloudflare Tunnel · Tailscale Funnel 연결 예시를 문서화했습니다.
 
 ## v3.1.0 주요 업데이트 (호스트 중앙 관리형 통합 원격 브리지 · `userApprovedHttps` 수정)
 
@@ -170,8 +177,43 @@ node ./bin/addon-host.js --upgrade
 node ./bin/addon-host.js --rollback
 ```
 
+## 원격 호스트 브리지 외부 연결 예시 (셀프 호스팅)
+
+원격 호스트 브리지는 **기본 비활성**(`127.0.0.1:19384`)입니다. 데스크톱 **설정 → 애드온 관리 → 원격 호스트 브리지**에서 활성화한 뒤, 원격 웹 드로어의 **Host Bridge** 탭에 1줄 페어링 코드(`ag-bridge-v1:...`)를 한 번만 붙여 넣어 연결합니다.
+
+> **보안 주의**: `https://antigravity.google.com`은 HTTPS 페이지이며 모든 요청에 `Authorization: Bearer <토큰>`이 포함되므로 **평문 HTTP를 외부 인터넷에 직접 열지 마세요.** 외부 접속 시에는 반드시 HTTPS(TLS) 앞단을 두어야 합니다.
+
+### 1. 같은 PC (터널 불필요)
+1. **애드온 관리**에서 `바인드: 127.0.0.1`, `포트: 19384`, **공개 HTTPS URL**은 비워 두고 활성화·저장합니다.
+2. **페어링 코드 복사** 후 브라우저 원격 웹 드로어 **Host Bridge** 탭에 붙여 넣습니다.
+
+### 2. 공유기 (포트포워딩 + DDNS + HTTPS 리버스 프록시)
+1. **애드온 관리**에서 포트를 `19384`로 켭니다(리버스 프록시가 같은 PC에 있으면 `127.0.0.1`, NAS/공유기 등 다른 기기에 있으면 `0.0.0.0` + 방화벽 허용).
+2. 공유기에서 DDNS(`bridge.example.com` 또는 `xxx.iptime.org`)를 설정하고 외부 `443`(인증서 자동 발급용 `80`) 포트를 리버스 프록시 장비(PC · 시놀로지 NAS · Nginx Proxy Manager · Caddy 등)로 포트포워딩합니다.
+3. 리버스 프록시에서 HTTPS(Let's Encrypt)를 종단해 내부 `19384`로 전달합니다 — `Caddyfile` 예시:
+   ```caddyfile
+   bridge.example.com {
+       reverse_proxy 127.0.0.1:19384
+   }
+   ```
+4. 데스크톱 **공개 HTTPS URL**에 `https://bridge.example.com`을 입력·저장한 뒤 갱신된 페어링 코드를 복사합니다.
+
+### 3. Cloudflare Tunnel (포트포워딩 불필요)
+```bash
+cloudflared tunnel --url http://127.0.0.1:19384
+```
+출력된 `https://<random>.trycloudflare.com` (또는 고정 터널 도메인)을 **공개 HTTPS URL**에 입력·저장한 뒤 페어링 코드를 복사합니다.
+
+### 4. Tailscale Funnel (포트포워딩 불필요 · 자동 HTTPS)
+```bash
+tailscale funnel 19384
+```
+발급된 `https://<machine>.<tailnet>.ts.net` 주소를 **공개 HTTPS URL**에 입력·저장한 뒤 페어링 코드를 복사합니다.
+
 ## 문서
 
+- [릴리스 노트 (`v3.1.1` 영문/국문)](./RELEASE_NOTES_v3.1.1.md)
+- [릴리스 노트 (`v3.1.0` 영문/국문)](./RELEASE_NOTES_v3.1.0.md)
 - [릴리스 노트 (`v2.5.0` 영문/국문)](./RELEASE_NOTES_v2.5.0.md)
 - [릴리스 노트 (`v2.4.0` 영문/국문)](./RELEASE_NOTES_v2.4.0.md)
 - [릴리스 노트 (`v2.3.0` 영문/국문)](./RELEASE_NOTES_v2.3.0.md)
