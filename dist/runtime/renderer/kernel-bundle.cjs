@@ -3768,11 +3768,51 @@ module.exports = {
 
 const _ObjectFreeze = Object.freeze;
 const _ObjectKeys = Object.keys;
+const _Number = Number;
+const _NumberIsFinite = Number.isFinite;
+const _String = String;
+const _StringTrim = Function.prototype.call.bind(String.prototype.trim);
+const _RegExpExec = Function.prototype.call.bind(RegExp.prototype.exec);
 const _Set = Set;
 const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
 const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
 const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
 const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
+
+const _RGB_COLOR_RE = /^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)$/i;
+
+function parseOpaqueRgb(colorStr) {
+  if (typeof colorStr !== 'string') return null;
+  const trimmed = _StringTrim(colorStr);
+  if (!trimmed || trimmed === 'transparent') return null;
+  const match = _RegExpExec(_RGB_COLOR_RE, trimmed);
+  if (!match) return null;
+  const r = _Number(match[1]);
+  const g = _Number(match[2]);
+  const b = _Number(match[3]);
+  const a = match[4] !== undefined ? _Number(match[4]) : 1;
+  if (!_NumberIsFinite(r) || !_NumberIsFinite(g) || !_NumberIsFinite(b) || !_NumberIsFinite(a)) return null;
+  if (a <= 0.05) return null;
+  return { r, g, b };
+}
+
+function detectModeFromComputedBackground(doc, win) {
+  if (!doc || !win || typeof win.getComputedStyle !== 'function') return null;
+  const candidates = [doc.body, doc.documentElement];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const el = candidates[i];
+    if (!el) continue;
+    try {
+      const style = win.getComputedStyle(el);
+      const rgb = parseOpaqueRgb(style && style.backgroundColor);
+      if (rgb) {
+        const luminance = 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
+        return luminance < 128 ? 'dark' : 'light';
+      }
+    } catch (_e) {}
+  }
+  return null;
+}
 
 const DARK_TOKENS = _ObjectFreeze({
   '--ag-bg': '#0f131a',
@@ -3833,6 +3873,8 @@ function createThemeAndI18n(doc, win) {
         if (/\blight\b/i.test(docEl.className) && !/\bdark\b/i.test(docEl.className)) return 'light';
         if (/\bdark\b/i.test(docEl.className)) return 'dark';
       }
+      const bgMode = detectModeFromComputedBackground(doc, win);
+      if (bgMode) return bgMode;
       if (win && typeof win.matchMedia === 'function') {
         const mq = win.matchMedia('(prefers-color-scheme: light)');
         if (mq && mq.matches) return 'light';
@@ -5837,12 +5879,17 @@ module.exports = {
 'use strict';
 
 /**
- * Vendor-neutral Tier-1 Status Item Registry (v3.0.0 — SOLID #0).
+ * Vendor-neutral Tier-1 Status Item Registry (v3.0.2 — SOLID #0).
  *
  * - Delegates `ui.registerStatusItem` to the installed `'host.statusbar'` service
- *   (e.g., `antigravity-statusbar`) when available.
- * - Falls back automatically to a minimal, accessible Shadow-DOM host bar when
- *   `'host.statusbar'` is not installed.
+ *   when available.
+ * - On `surface === 'desktop'`, never mounts an uninvited floating fallback bar
+ *   when `'host.statusbar'` is absent (status items remain registered for
+ *   programmatic inspection/invocation and auto-delegate once `'host.statusbar'`
+ *   registers; settings belong in the Desktop Settings UI).
+ * - On `surface === 'remote-web'`, falls back automatically to a minimal,
+ *   accessible Shadow-DOM host bar anchored at the bottom-right above the
+ *   Remote Web drawer pill when `'host.statusbar'` is not installed.
  * - Delivers click modifiers `{ shiftKey, ctrlKey, metaKey, altKey, anchorEl, itemId }`
  *   to `onClick` and enforces `ev.isTrusted !== false`.
  */
@@ -5850,8 +5897,8 @@ module.exports = {
 const FALLBACK_BAR_CSS = `
 .ag-fallback-bar {
   position: fixed;
-  left: 12px;
-  bottom: 12px;
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: max(64px, calc(64px + env(safe-area-inset-bottom, 0px)));
   z-index: 2147482900;
   display: inline-flex;
   align-items: center;
@@ -5926,11 +5973,18 @@ function getOwn(obj, key) {
   return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
 }
 
-function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
+function createStatusItemRegistry(
+  doc,
+  _win,
+  { serviceBus = null, themeAndI18n = null, extraNoTranslateAttributes = [], surface = 'desktop' } = {}
+) {
+  const allowFallbackBar = surface === 'remote-web';
   const itemsByKey = new _Map(); // `${pluginId}:${itemId}` -> itemRecord
   const delegatedByKey = new _Map(); // `${pluginId}:${itemId}` -> { unregister }
   let fallbackHostEl = null;
   let fallbackBarEl = null;
+  let fallbackStyleEl = null;
+  let lastFallbackThemeMode = null;
 
   function getDelegatedService() {
     if (!serviceBus || typeof serviceBus.getInternalService !== 'function') return null;
@@ -5942,8 +5996,20 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     return null;
   }
 
+  function syncFallbackThemeCss() {
+    if (!fallbackStyleEl) return;
+    const mode = themeAndI18n ? themeAndI18n.getSnapshot().mode : 'dark';
+    if (mode === lastFallbackThemeMode) return;
+    lastFallbackThemeMode = mode;
+    const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(mode) : '';
+    fallbackStyleEl.textContent = `${tokenCss}\n${FALLBACK_BAR_CSS}`;
+  }
+
   function ensureFallbackBar() {
-    if (fallbackBarEl && fallbackHostEl && fallbackHostEl.isConnected !== false) return fallbackBarEl;
+    if (fallbackBarEl && fallbackHostEl && fallbackHostEl.isConnected !== false) {
+      syncFallbackThemeCss();
+      return fallbackBarEl;
+    }
     if (!doc || typeof doc.createElement !== 'function') return null;
     fallbackHostEl = doc.createElement('div');
     fallbackHostEl.setAttribute('data-addon-host-fallback-statusbar', '1');
@@ -5956,8 +6022,9 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     if (typeof fallbackHostEl.attachShadow === 'function') {
       const sr = fallbackHostEl.attachShadow({ mode: 'open' });
       const styleEl = doc.createElement('style');
-      const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
-      styleEl.textContent = `${tokenCss}\n${FALLBACK_BAR_CSS}`;
+      fallbackStyleEl = styleEl;
+      lastFallbackThemeMode = null;
+      syncFallbackThemeCss();
       sr.appendChild(styleEl);
       fallbackBarEl = doc.createElement('div');
       fallbackBarEl.className = 'ag-fallback-bar';
@@ -5965,6 +6032,7 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
       fallbackBarEl.setAttribute('aria-label', 'Addon Status Items');
       sr.appendChild(fallbackBarEl);
     } else {
+      fallbackStyleEl = null;
       fallbackBarEl = fallbackHostEl;
     }
     const parent = doc.body || doc.documentElement;
@@ -5997,7 +6065,7 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
 
   function renderFallbackItems() {
     const delegatedSvc = getDelegatedService();
-    if (delegatedSvc) {
+    if (delegatedSvc || !allowFallbackBar) {
       if (fallbackBarEl) {
         while (fallbackBarEl.firstChild) fallbackBarEl.removeChild(fallbackBarEl.firstChild);
         if (typeof fallbackBarEl.setAttribute === 'function') fallbackBarEl.setAttribute('hidden', 'true');
@@ -10083,6 +10151,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       serviceBus,
       themeAndI18n,
       extraNoTranslateAttributes,
+      surface: hostSurface,
     });
     settingsPageCoordinator = createSettingsPageCoordinator({
       settingsTabs,

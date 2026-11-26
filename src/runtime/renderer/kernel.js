@@ -397,6 +397,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       serviceBus,
       themeAndI18n,
       extraNoTranslateAttributes,
+      surface: hostSurface,
     });
     settingsPageCoordinator = createSettingsPageCoordinator({
       settingsTabs,

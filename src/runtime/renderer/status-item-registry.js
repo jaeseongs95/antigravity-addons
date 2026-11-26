@@ -1,12 +1,17 @@
 'use strict';
 
 /**
- * Vendor-neutral Tier-1 Status Item Registry (v3.0.0 — SOLID #0).
+ * Vendor-neutral Tier-1 Status Item Registry (v3.0.2 — SOLID #0).
  *
  * - Delegates `ui.registerStatusItem` to the installed `'host.statusbar'` service
- *   (e.g., `antigravity-statusbar`) when available.
- * - Falls back automatically to a minimal, accessible Shadow-DOM host bar when
- *   `'host.statusbar'` is not installed.
+ *   when available.
+ * - On `surface === 'desktop'`, never mounts an uninvited floating fallback bar
+ *   when `'host.statusbar'` is absent (status items remain registered for
+ *   programmatic inspection/invocation and auto-delegate once `'host.statusbar'`
+ *   registers; settings belong in the Desktop Settings UI).
+ * - On `surface === 'remote-web'`, falls back automatically to a minimal,
+ *   accessible Shadow-DOM host bar anchored at the bottom-right above the
+ *   Remote Web drawer pill when `'host.statusbar'` is not installed.
  * - Delivers click modifiers `{ shiftKey, ctrlKey, metaKey, altKey, anchorEl, itemId }`
  *   to `onClick` and enforces `ev.isTrusted !== false`.
  */
@@ -14,8 +19,8 @@
 const FALLBACK_BAR_CSS = `
 .ag-fallback-bar {
   position: fixed;
-  left: 12px;
-  bottom: 12px;
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: max(64px, calc(64px + env(safe-area-inset-bottom, 0px)));
   z-index: 2147482900;
   display: inline-flex;
   align-items: center;
@@ -90,11 +95,18 @@ function getOwn(obj, key) {
   return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
 }
 
-function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
+function createStatusItemRegistry(
+  doc,
+  _win,
+  { serviceBus = null, themeAndI18n = null, extraNoTranslateAttributes = [], surface = 'desktop' } = {}
+) {
+  const allowFallbackBar = surface === 'remote-web';
   const itemsByKey = new _Map(); // `${pluginId}:${itemId}` -> itemRecord
   const delegatedByKey = new _Map(); // `${pluginId}:${itemId}` -> { unregister }
   let fallbackHostEl = null;
   let fallbackBarEl = null;
+  let fallbackStyleEl = null;
+  let lastFallbackThemeMode = null;
 
   function getDelegatedService() {
     if (!serviceBus || typeof serviceBus.getInternalService !== 'function') return null;
@@ -106,8 +118,20 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     return null;
   }
 
+  function syncFallbackThemeCss() {
+    if (!fallbackStyleEl) return;
+    const mode = themeAndI18n ? themeAndI18n.getSnapshot().mode : 'dark';
+    if (mode === lastFallbackThemeMode) return;
+    lastFallbackThemeMode = mode;
+    const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(mode) : '';
+    fallbackStyleEl.textContent = `${tokenCss}\n${FALLBACK_BAR_CSS}`;
+  }
+
   function ensureFallbackBar() {
-    if (fallbackBarEl && fallbackHostEl && fallbackHostEl.isConnected !== false) return fallbackBarEl;
+    if (fallbackBarEl && fallbackHostEl && fallbackHostEl.isConnected !== false) {
+      syncFallbackThemeCss();
+      return fallbackBarEl;
+    }
     if (!doc || typeof doc.createElement !== 'function') return null;
     fallbackHostEl = doc.createElement('div');
     fallbackHostEl.setAttribute('data-addon-host-fallback-statusbar', '1');
@@ -120,8 +144,9 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     if (typeof fallbackHostEl.attachShadow === 'function') {
       const sr = fallbackHostEl.attachShadow({ mode: 'open' });
       const styleEl = doc.createElement('style');
-      const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
-      styleEl.textContent = `${tokenCss}\n${FALLBACK_BAR_CSS}`;
+      fallbackStyleEl = styleEl;
+      lastFallbackThemeMode = null;
+      syncFallbackThemeCss();
       sr.appendChild(styleEl);
       fallbackBarEl = doc.createElement('div');
       fallbackBarEl.className = 'ag-fallback-bar';
@@ -129,6 +154,7 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
       fallbackBarEl.setAttribute('aria-label', 'Addon Status Items');
       sr.appendChild(fallbackBarEl);
     } else {
+      fallbackStyleEl = null;
       fallbackBarEl = fallbackHostEl;
     }
     const parent = doc.body || doc.documentElement;
@@ -161,7 +187,7 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
 
   function renderFallbackItems() {
     const delegatedSvc = getDelegatedService();
-    if (delegatedSvc) {
+    if (delegatedSvc || !allowFallbackBar) {
       if (fallbackBarEl) {
         while (fallbackBarEl.firstChild) fallbackBarEl.removeChild(fallbackBarEl.firstChild);
         if (typeof fallbackBarEl.setAttribute === 'function') fallbackBarEl.setAttribute('hidden', 'true');

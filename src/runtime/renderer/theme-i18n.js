@@ -10,11 +10,51 @@
 
 const _ObjectFreeze = Object.freeze;
 const _ObjectKeys = Object.keys;
+const _Number = Number;
+const _NumberIsFinite = Number.isFinite;
+const _String = String;
+const _StringTrim = Function.prototype.call.bind(String.prototype.trim);
+const _RegExpExec = Function.prototype.call.bind(RegExp.prototype.exec);
 const _Set = Set;
 const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
 const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
 const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
 const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
+
+const _RGB_COLOR_RE = /^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)$/i;
+
+function parseOpaqueRgb(colorStr) {
+  if (typeof colorStr !== 'string') return null;
+  const trimmed = _StringTrim(colorStr);
+  if (!trimmed || trimmed === 'transparent') return null;
+  const match = _RegExpExec(_RGB_COLOR_RE, trimmed);
+  if (!match) return null;
+  const r = _Number(match[1]);
+  const g = _Number(match[2]);
+  const b = _Number(match[3]);
+  const a = match[4] !== undefined ? _Number(match[4]) : 1;
+  if (!_NumberIsFinite(r) || !_NumberIsFinite(g) || !_NumberIsFinite(b) || !_NumberIsFinite(a)) return null;
+  if (a <= 0.05) return null;
+  return { r, g, b };
+}
+
+function detectModeFromComputedBackground(doc, win) {
+  if (!doc || !win || typeof win.getComputedStyle !== 'function') return null;
+  const candidates = [doc.body, doc.documentElement];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const el = candidates[i];
+    if (!el) continue;
+    try {
+      const style = win.getComputedStyle(el);
+      const rgb = parseOpaqueRgb(style && style.backgroundColor);
+      if (rgb) {
+        const luminance = 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
+        return luminance < 128 ? 'dark' : 'light';
+      }
+    } catch (_e) {}
+  }
+  return null;
+}
 
 const DARK_TOKENS = _ObjectFreeze({
   '--ag-bg': '#0f131a',
@@ -75,6 +115,8 @@ function createThemeAndI18n(doc, win) {
         if (/\blight\b/i.test(docEl.className) && !/\bdark\b/i.test(docEl.className)) return 'light';
         if (/\bdark\b/i.test(docEl.className)) return 'dark';
       }
+      const bgMode = detectModeFromComputedBackground(doc, win);
+      if (bgMode) return bgMode;
       if (win && typeof win.matchMedia === 'function') {
         const mq = win.matchMedia('(prefers-color-scheme: light)');
         if (mq && mq.matches) return 'light';
