@@ -26,6 +26,9 @@ const MANIFEST_SCHEMA = MANIFEST_SCHEMA_V1;
 const FORBIDDEN_IDS = new Set(['__proto__', 'constructor', 'prototype']);
 const RESERVED_SETTINGS_BRIDGE_FILES = new Set([
   'trust-policy.json',
+  'remote-bridge.json',
+  'remote-preferences.json',
+  'host-cli.json',
   'config.json',
   'index.json',
   'build-manifest.json',

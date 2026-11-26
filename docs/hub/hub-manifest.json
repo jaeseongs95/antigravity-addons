@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "hostVersion": "3.0.4",
+  "hostVersion": "3.1.0",
   "releaseBaseUrl": "https://github.com/jaeseongs95/antigravity-addons/releases/latest/download",
   "safariRequiresCuratedBundle": true,
   "channels": {

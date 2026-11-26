@@ -22,6 +22,7 @@ const {
   createShadowContainer,
 } = require('./dom-guard');
 const { createRemoteHostBridge } = require('./remote-host-bridge');
+const { createRemoteHostTransport } = require('./remote-host-transport');
 
 const KERNEL_BOOT_STATE = new WeakMap();
 const WINDOW_ADDON_REGISTRIES = new WeakMap();
@@ -138,6 +139,12 @@ function createSwappableBridgePort(kernelState) {
       return p && typeof p.netFetch === 'function'
         ? p.netFetch(pluginId, url, init)
         : Promise.resolve({ ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
+    getRemoteBridgeStatus() {
+      const p = activePort();
+      return p && typeof p.getRemoteBridgeStatus === 'function'
+        ? p.getRemoteBridgeStatus()
+        : { configured: false, connected: false, baseUrl: null, hostVersion: null, buildSha8: null, activePlugins: [], lastCheckedAt: null, lastError: null };
     },
   });
 }
@@ -863,6 +870,197 @@ function renderErrorCardList(doc, container, errors) {
   }
 }
 
+function renderHostBridgePane(doc, container, bridgeStatus, controls, onUpdated) {
+  clearChildrenSafe(container);
+  const st = bridgeStatus && typeof bridgeStatus === 'object' ? bridgeStatus : { configured: false, connected: false };
+  const card = createElementSafe(doc, 'div', { class: 'rah-card', 'data-rah-bridge-card': '1' });
+
+  const head = createElementSafe(doc, 'div', { class: 'rah-card-row' });
+  head.appendChild(createElementSafe(doc, 'strong', null, 'Native Host Bridge'));
+  head.appendChild(
+    createElementSafe(
+      doc,
+      'span',
+      {
+        class: st.connected ? 'rah-status-ok' : 'rah-meta',
+        'data-rah-bridge-status': st.connected ? 'connected' : 'disconnected',
+      },
+      st.connected ? 'Connected' : 'Disconnected'
+    )
+  );
+  card.appendChild(head);
+
+  if (st.connected && st.baseUrl) {
+    const infoText = `${st.baseUrl}${st.hostVersion ? ` · host v${st.hostVersion}` : ''}${st.buildSha8 ? ` (${st.buildSha8})` : ''}`;
+    card.appendChild(createElementSafe(doc, 'div', { class: 'rah-meta', 'data-rah-bridge-url': st.baseUrl }, infoText));
+  } else {
+    card.appendChild(
+      createElementSafe(
+        doc,
+        'div',
+        { class: 'rah-meta' },
+        'Paste the Pairing Code from Desktop Settings -> Addon Manager -> Remote Host Bridge. All plugins automatically share this single authenticated connection.'
+      )
+    );
+  }
+
+  const errEl = createElementSafe(doc, 'div', {
+    class: 'rah-net-err',
+    'data-rah-bridge-error': '1',
+    ...(st.lastError ? {} : { hidden: 'true' }),
+  }, st.lastError || '');
+
+  if (controls && typeof controls.connect === 'function') {
+    const pairLabel = createElementSafe(doc, 'div', { class: 'rah-net-title' }, 'Pairing Code (Recommended)');
+    card.appendChild(pairLabel);
+
+    const pairRow = createElementSafe(doc, 'div', { class: 'rah-net-form' });
+    const pairInput = createElementSafe(doc, 'input', {
+      type: 'password',
+      class: 'rah-net-input',
+      placeholder: 'ag-bridge-v1:...',
+      'aria-label': 'Native Host Pairing Code',
+      'data-rah-bridge-pairing-input': '1',
+    });
+    const connectBtn = createElementSafe(
+      doc,
+      'button',
+      {
+        type: 'button',
+        class: 'rah-btn',
+        'data-rah-bridge-connect': '1',
+      },
+      'Connect'
+    );
+    connectBtn.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
+      const code = typeof pairInput.value === 'string' ? pairInput.value.trim() : '';
+      if (!code) {
+        errEl.removeAttribute('hidden');
+        setTextSafe(errEl, 'ERR_INVALID_PAIRING_CODE');
+        return;
+      }
+      connectBtn.disabled = true;
+      Promise.resolve(controls.connect(code))
+        .then((res) => {
+          connectBtn.disabled = false;
+          if (res && res.ok) {
+            pairInput.value = '';
+            errEl.setAttribute('hidden', 'true');
+            setTextSafe(errEl, '');
+          } else {
+            errEl.removeAttribute('hidden');
+            setTextSafe(errEl, (res && res.reason) || 'ERR_REMOTE_BRIDGE_UNREACHABLE');
+          }
+          if (typeof onUpdated === 'function') onUpdated();
+        })
+        .catch((err) => {
+          connectBtn.disabled = false;
+          errEl.removeAttribute('hidden');
+          setTextSafe(errEl, err && err.message ? err.message : 'ERR_REMOTE_BRIDGE_UNREACHABLE');
+        });
+    });
+    pairRow.appendChild(pairInput);
+    pairRow.appendChild(connectBtn);
+    card.appendChild(pairRow);
+
+    const manualBox = createElementSafe(doc, 'details', { class: 'rah-net-box' });
+    manualBox.appendChild(createElementSafe(doc, 'summary', { class: 'rah-net-title' }, 'Manual URL & Token'));
+    const urlInput = createElementSafe(doc, 'input', {
+      type: 'url',
+      class: 'rah-net-input',
+      placeholder: 'http://127.0.0.1:19384 or https://...',
+      'aria-label': 'Native Host Bridge URL',
+      'data-rah-bridge-url-input': '1',
+      value: st.baseUrl || '',
+    });
+    const tokInput = createElementSafe(doc, 'input', {
+      type: 'password',
+      class: 'rah-net-input',
+      placeholder: 'Bearer token (64 hex chars)',
+      'aria-label': 'Native Host Bridge Token',
+      'data-rah-bridge-token-input': '1',
+    });
+    const manualBtn = createElementSafe(
+      doc,
+      'button',
+      {
+        type: 'button',
+        class: 'rah-btn',
+        'data-rah-bridge-manual-connect': '1',
+      },
+      'Connect Manually'
+    );
+    manualBtn.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
+      const u = typeof urlInput.value === 'string' ? urlInput.value.trim() : '';
+      const tk = typeof tokInput.value === 'string' ? tokInput.value.trim() : '';
+      manualBtn.disabled = true;
+      Promise.resolve(controls.connect({ baseUrl: u, token: tk }))
+        .then((res) => {
+          manualBtn.disabled = false;
+          if (res && res.ok) {
+            tokInput.value = '';
+            errEl.setAttribute('hidden', 'true');
+            setTextSafe(errEl, '');
+          } else {
+            errEl.removeAttribute('hidden');
+            setTextSafe(errEl, (res && res.reason) || 'ERR_REMOTE_BRIDGE_UNREACHABLE');
+          }
+          if (typeof onUpdated === 'function') onUpdated();
+        })
+        .catch((err) => {
+          manualBtn.disabled = false;
+          errEl.removeAttribute('hidden');
+          setTextSafe(errEl, err && err.message ? err.message : 'ERR_REMOTE_BRIDGE_UNREACHABLE');
+        });
+    });
+    manualBox.appendChild(urlInput);
+    manualBox.appendChild(tokInput);
+    manualBox.appendChild(manualBtn);
+    card.appendChild(manualBox);
+
+    if (st.configured || st.connected) {
+      const actionRow = createElementSafe(doc, 'div', { class: 'rah-action-list' });
+      if (typeof controls.ping === 'function') {
+        const testBtn = createElementSafe(
+          doc,
+          'button',
+          { type: 'button', class: 'rah-btn rah-action-btn', 'data-rah-bridge-test': '1' },
+          'Test Connection'
+        );
+        testBtn.addEventListener('click', (ev) => {
+          if (ev && ev.isTrusted === false) return;
+          testBtn.disabled = true;
+          Promise.resolve(controls.ping()).finally(() => {
+            testBtn.disabled = false;
+            if (typeof onUpdated === 'function') onUpdated();
+          });
+        });
+        actionRow.appendChild(testBtn);
+      }
+      if (typeof controls.disconnect === 'function') {
+        const discBtn = createElementSafe(
+          doc,
+          'button',
+          { type: 'button', class: 'rah-btn rah-action-btn', 'data-rah-bridge-disconnect': '1' },
+          'Disconnect'
+        );
+        discBtn.addEventListener('click', (ev) => {
+          if (ev && ev.isTrusted === false) return;
+          controls.disconnect();
+          if (typeof onUpdated === 'function') onUpdated();
+        });
+        actionRow.appendChild(discBtn);
+      }
+      card.appendChild(actionRow);
+    }
+  }
+
+  card.appendChild(errEl);
+  container.appendChild(card);
+}
+
 function createHostDrawerUi({
   doc,
   win,
@@ -871,6 +1069,7 @@ function createHostDrawerUi({
   onSelectSettingsTab = null,
   onInvokeHostAction = null,
   netConsent = null,
+  remoteBridgeControls = null,
   shadowMode = 'open',
 }) {
   const noTranslateAttrs = Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [];
@@ -927,6 +1126,7 @@ function createHostDrawerUi({
     },
     { id: 'settings', label: 'Settings Tabs', emptyText: 'No plugin settings tabs registered.' },
     { id: 'errors', label: 'Diagnostics', emptyText: 'No runtime errors recorded.' },
+    { id: 'bridge', label: 'Host Bridge', emptyText: '' },
   ];
 
   let activeTab = 'addons';
@@ -1048,6 +1248,7 @@ function createHostDrawerUi({
     const addonsPane = paneRefs.get('addons');
     const settingsPane = paneRefs.get('settings');
     const errorsPane = paneRefs.get('errors');
+    const bridgePane = paneRefs.get('bridge');
 
     renderAddonCardList(
       doc,
@@ -1067,6 +1268,10 @@ function createHostDrawerUi({
       render
     );
     renderErrorCardList(doc, errorsPane.primaryItems, Array.isArray(state.errors) ? state.errors : []);
+    if (bridgePane) {
+      renderHostBridgePane(doc, bridgePane.primaryItems, state.remoteBridge, remoteBridgeControls, render);
+      if (bridgePane.emptyEl) bridgePane.emptyEl.setAttribute('hidden', 'true');
+    }
     syncDrawerShellSummary(shadowRoot);
   }
 
@@ -1302,14 +1507,29 @@ async function bootRemoteWebHost({
   const addonStates = [];
   let drawerUi = null;
 
+  const storageNamespace = profile.storageNamespace || `remote-addon-host:${profile.id}`;
+  let activeRemoteTransport = remoteTransport;
+  if (!activeRemoteTransport) {
+    activeRemoteTransport = createRemoteHostTransport({
+      win,
+      storage,
+      storageNamespace,
+    });
+    await activeRemoteTransport.hydrate();
+    const initialBridgeStatus = activeRemoteTransport.getStatus();
+    if (initialBridgeStatus && initialBridgeStatus.configured) {
+      await activeRemoteTransport.ping();
+    }
+  }
+
   const bridge = createRemoteHostBridge({
     doc,
     win,
     docGenId,
     profileId: profile.id,
-    storageNamespace: profile.storageNamespace || `remote-addon-host:${profile.id}`,
+    storageNamespace,
     storage,
-    remoteTransport,
+    remoteTransport: activeRemoteTransport,
     forbiddenNetHosts: Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : [],
     configScopeSnapshots,
     onSettingsSaved(pluginId, snapshot) {
@@ -1373,12 +1593,60 @@ async function bootRemoteWebHost({
     ownsFallbackDock = !isPeerCoexist && !preExistingDock && Boolean(fallbackDockEl);
   }
 
+  const mountedSettingsPluginIds = new Set();
+
+  async function syncRemoteBridgeChange() {
+    const status = bridge.getRemoteBridgeStatus();
+    if (status && status.connected) {
+      for (const pid of mountedSettingsPluginIds) {
+        try {
+          const snap = await bridge.hydrateSettings(pid);
+          if (snap) {
+            activeKernel.pushPluginSettings(pid, snap, hostToken);
+          }
+        } catch (_err) {}
+      }
+    }
+    if (typeof activeKernel.emitHostEvent === 'function') {
+      try {
+        activeKernel.emitHostEvent('host:remote-bridge-changed', status, hostToken);
+      } catch (_evErr) {}
+    }
+    if (drawerUi) drawerUi.render();
+  }
+
+  async function connectRemoteHost(input) {
+    if (!activeRemoteTransport) {
+      return { ok: false, reason: 'ERR_REMOTE_TRANSPORT_UNAVAILABLE' };
+    }
+    let res;
+    if (typeof input === 'string' && typeof activeRemoteTransport.connectWithPairingCode === 'function') {
+      res = await activeRemoteTransport.connectWithPairingCode(input);
+    } else if (input && typeof input === 'object' && typeof activeRemoteTransport.connect === 'function') {
+      res = await activeRemoteTransport.connect(input);
+    } else {
+      return { ok: false, reason: 'ERR_INVALID_PAIRING_CODE' };
+    }
+    await syncRemoteBridgeChange();
+    return res;
+  }
+
+  function disconnectRemoteHost() {
+    if (!activeRemoteTransport || typeof activeRemoteTransport.disconnect !== 'function') {
+      return { ok: false, reason: 'ERR_REMOTE_TRANSPORT_UNAVAILABLE' };
+    }
+    const res = activeRemoteTransport.disconnect();
+    syncRemoteBridgeChange().catch(() => {});
+    return res;
+  }
+
   const drawerCallbacks = {
     getState: () => ({
       addons: addonStates,
       settingsTabs: typeof activeKernel.listSettingsTabs === 'function' ? activeKernel.listSettingsTabs() : [],
       hostActions: typeof activeKernel.listHostActions === 'function' ? activeKernel.listHostActions(hostToken) : [],
       errors: bridge.getErrors(),
+      remoteBridge: bridge.getRemoteBridgeStatus(),
     }),
     onSelectSettingsTab(pluginId, tabId) {
       if (typeof activeKernel.selectSettingsTab !== 'function') {
@@ -1396,6 +1664,18 @@ async function bootRemoteWebHost({
       listHosts: (pluginId) => bridge.listUserAllowedHttpsHosts(pluginId),
       addHost: (pluginId, rawHostOrUrl) => bridge.addUserAllowedHttpsHost(pluginId, rawHostOrUrl),
       removeHost: (pluginId, rawHost) => bridge.removeUserAllowedHttpsHost(pluginId, rawHost),
+    },
+    remoteBridgeControls: {
+      connect: connectRemoteHost,
+      disconnect: disconnectRemoteHost,
+      ping: async () => {
+        if (!activeRemoteTransport || typeof activeRemoteTransport.ping !== 'function') {
+          return { ok: false, reason: 'ERR_REMOTE_TRANSPORT_UNAVAILABLE' };
+        }
+        const res = await activeRemoteTransport.ping();
+        await syncRemoteBridgeChange();
+        return res;
+      },
     },
   };
 
@@ -1438,6 +1718,10 @@ async function bootRemoteWebHost({
       meta.permissions && meta.permissions.net && typeof meta.permissions.net === 'object' ? meta.permissions.net : null;
     const staticHttpsHosts = netPerm && Array.isArray(netPerm.httpsHosts) ? netPerm.httpsHosts : [];
     const allowUserHttps = Boolean(netPerm && netPerm.userApprovedHttps === true);
+    const trustedLoopback =
+      meta.trustLevel === 'trusted' && netPerm && Array.isArray(netPerm.localLoopback)
+        ? netPerm.localLoopback.slice()
+        : [];
 
     const record = {
       pluginId,
@@ -1453,6 +1737,7 @@ async function bootRemoteWebHost({
 
     let initialSettings = addon.initialSettingsSnapshot || null;
     if (meta.hasSettingsBridge && meta.trustLevel === 'trusted') {
+      mountedSettingsPluginIds.add(pluginId);
       bridge.bindSettingsPlugin(pluginId, addon.settingsSpec || {});
       const persisted =
         typeof bridge.hydrateSettings === 'function'
@@ -1462,11 +1747,15 @@ async function bootRemoteWebHost({
         initialSettings = persisted;
       }
     }
-    if (staticHttpsHosts.length > 0 || allowUserHttps) {
+    if (staticHttpsHosts.length > 0 || allowUserHttps || trustedLoopback.length > 0) {
       if (allowUserHttps && typeof bridge.hydrateUserAllowedHttpsHosts === 'function') {
         await bridge.hydrateUserAllowedHttpsHosts();
       }
-      bridge.bindNetPlugin(pluginId, { httpsHosts: staticHttpsHosts, userApprovedHttps: allowUserHttps });
+      bridge.bindNetPlugin(pluginId, {
+        httpsHosts: staticHttpsHosts,
+        userApprovedHttps: allowUserHttps,
+        localLoopback: trustedLoopback,
+      });
     }
 
     let stageRes;
@@ -1573,6 +1862,9 @@ async function bootRemoteWebHost({
       if (res && res.ok && drawerUi) drawerUi.render();
       return res;
     },
+    connectRemoteHost,
+    disconnectRemoteHost,
+    getRemoteBridgeStatus: () => bridge.getRemoteBridgeStatus(),
     get disposed() {
       return disposed;
     },

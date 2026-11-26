@@ -51,6 +51,7 @@ const REMOTE_BROWSER_MODULES = Object.freeze([
   './origin-guard.js',
   './trusted-types-guard.js',
   './dom-guard.js',
+  './remote-host-transport.js',
   './remote-host-bridge.js',
   './remote-bootstrap.js',
 ]);
@@ -216,6 +217,7 @@ ${addonLiterals.join(',\n')}
   const bootstrapMod = __remoteReq('./remote-bootstrap.js');
   const originMod = __remoteReq('./origin-guard.js');
   const ttMod = __remoteReq('./trusted-types-guard.js');
+  const transportMod = __remoteReq('./remote-host-transport.js');
   const bridgeMod = __remoteReq('./remote-host-bridge.js');
 
   function bootRemoteWebHost(overrides) {
@@ -254,6 +256,7 @@ ${addonLiterals.join(',\n')}
     getRegisteredAddons,
     originGuard: originMod,
     trustedTypesGuard: ttMod,
+    remoteHostTransport: transportMod,
     remoteHostBridge: bridgeMod,
   });
 
@@ -571,7 +574,10 @@ function buildAddonUserscript({
     if (rawPerms.net && typeof rawPerms.net === 'object') {
       remotePermissions.net = {
         httpsHosts: Array.isArray(rawPerms.net.httpsHosts) ? rawPerms.net.httpsHosts.slice() : [],
-        localLoopback: [],
+        localLoopback:
+          finalTrustLevel === 'trusted' && Array.isArray(rawPerms.net.localLoopback)
+            ? rawPerms.net.localLoopback.slice()
+            : [],
         ...(rawPerms.net.userApprovedHttps === true ? { userApprovedHttps: true } : {}),
       };
     }

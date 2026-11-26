@@ -292,8 +292,32 @@ function createRemoteHostBridge({
   const activePortalClaims = new Set();
   const recordedErrors = [];
   const allowedSettings = new Map(); // pluginId -> { maxBytes, revision }
-  const allowedNet = new Map(); // pluginId -> { httpsHosts: string[] }
+  const allowedNet = new Map(); // pluginId -> { httpsHosts: string[], userApprovedHttps: boolean, localLoopback: Array<number|string> }
   const packedConfigScopes = new Map(); // `${pluginId}:${scopeId}` -> snapshot
+
+  function isRemoteTransportConnected() {
+    if (!remoteTransport) return false;
+    if (typeof remoteTransport.isConnected === 'function') {
+      return Boolean(remoteTransport.isConnected());
+    }
+    return true;
+  }
+
+  function getRemoteBridgeStatus() {
+    if (remoteTransport && typeof remoteTransport.getStatus === 'function') {
+      return remoteTransport.getStatus();
+    }
+    return Object.freeze({
+      configured: Boolean(remoteTransport),
+      connected: isRemoteTransportConnected(),
+      baseUrl: null,
+      hostVersion: null,
+      buildSha8: null,
+      activePlugins: [],
+      lastCheckedAt: null,
+      lastError: null,
+    });
+  }
 
   if (netBindings && typeof netBindings === 'object') {
     const entries = netBindings instanceof Map ? Array.from(netBindings.entries()) : Object.entries(netBindings);
@@ -302,8 +326,9 @@ function createRemoteHostBridge({
       if (typeof pid === 'string' && PLUGIN_ID_RE.test(pid) && spec && typeof spec === 'object') {
         const hosts = Array.isArray(spec.httpsHosts) ? spec.httpsHosts.slice() : [];
         const userApprovedHttps = spec.userApprovedHttps === true;
-        if (hosts.length > 0 || userApprovedHttps) {
-          allowedNet.set(pid, { httpsHosts: hosts, userApprovedHttps });
+        const localLoopback = Array.isArray(spec.localLoopback) ? spec.localLoopback.slice() : [];
+        if (hosts.length > 0 || userApprovedHttps || localLoopback.length > 0) {
+          allowedNet.set(pid, { httpsHosts: hosts, userApprovedHttps, localLoopback });
         }
       }
     }
@@ -496,6 +521,19 @@ function createRemoteHostBridge({
 
   async function hydrateSettings(pluginId) {
     if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) return null;
+    if (remoteTransport && typeof remoteTransport.readSettings === 'function' && isRemoteTransportConnected()) {
+      try {
+        const remoteRes = await remoteTransport.readSettings(pluginId);
+        if (remoteRes && remoteRes.ok === true && remoteRes.snapshot && typeof remoteRes.snapshot === 'object') {
+          if (remoteRes.snapshot.status === 'ok' && remoteRes.snapshot.data) {
+            try {
+              store.setItem(storageKeyFor(pluginId), JSON.stringify(remoteRes.snapshot));
+            } catch (_cacheErr) {}
+          }
+          return remoteRes.snapshot;
+        }
+      } catch (_remoteErr) {}
+    }
     if (store && typeof store.hydrateKey === 'function') {
       await store.hydrateKey(storageKeyFor(pluginId));
     }
@@ -602,11 +640,14 @@ function createRemoteHostBridge({
       return Promise.resolve({ ok: false, reason: parsed.reason, snapshot: null });
     }
 
-    if (remoteTransport && typeof remoteTransport.saveSettings === 'function') {
+    if (remoteTransport && typeof remoteTransport.saveSettings === 'function' && isRemoteTransportConnected()) {
       return Promise.resolve()
         .then(() => remoteTransport.saveSettings(pluginId, rawJson))
         .then((res) => {
           if (res && res.ok === true && res.snapshot && typeof res.snapshot === 'object') {
+            try {
+              store.setItem(storageKeyFor(pluginId), JSON.stringify(res.snapshot));
+            } catch (_cacheErr) {}
             if (typeof onSettingsSaved === 'function') {
               onSettingsSaved(pluginId, res.snapshot);
             }
@@ -667,13 +708,14 @@ function createRemoteHostBridge({
       ok: true,
       docGenId: Number(docGenId) || 1,
       profileId: String(profileId || 'remote-web'),
-      mode: remoteTransport ? 'remote-sync' : 'browser-local',
+      mode: isRemoteTransportConnected() ? 'remote-sync' : 'browser-local',
       storageKind,
+      remoteBridge: getRemoteBridgeStatus(),
     });
   }
 
   function readConfigScope(pluginId, scopeId) {
-    if (remoteTransport && typeof remoteTransport.readConfigScope === 'function') {
+    if (remoteTransport && typeof remoteTransport.readConfigScope === 'function' && isRemoteTransportConnected()) {
       return Promise.resolve()
         .then(() => remoteTransport.readConfigScope(pluginId, scopeId))
         .catch((err) => {
@@ -717,7 +759,7 @@ function createRemoteHostBridge({
   }
 
   function writeConfigScope(pluginId, scopeId, rawJson, opts = {}) {
-    if (remoteTransport && typeof remoteTransport.writeConfigScope === 'function') {
+    if (remoteTransport && typeof remoteTransport.writeConfigScope === 'function' && isRemoteTransportConnected()) {
       return Promise.resolve()
         .then(() => remoteTransport.writeConfigScope(pluginId, scopeId, rawJson, opts))
         .catch((err) => {
@@ -743,7 +785,8 @@ function createRemoteHostBridge({
     if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) return false;
     const httpsHosts = Array.isArray(spec && spec.httpsHosts) ? spec.httpsHosts.slice() : [];
     const userApprovedHttps = Boolean(spec && spec.userApprovedHttps === true);
-    allowedNet.set(pluginId, { httpsHosts, userApprovedHttps });
+    const localLoopback = Array.isArray(spec && spec.localLoopback) ? spec.localLoopback.slice() : [];
+    allowedNet.set(pluginId, { httpsHosts, userApprovedHttps, localLoopback });
     return true;
   }
 
@@ -776,6 +819,16 @@ function createRemoteHostBridge({
     return null;
   }
 
+  function isLoopbackUrl(rawUrl) {
+    try {
+      const parsed = new URL(String(rawUrl || ''));
+      const h = String(parsed.hostname || '').toLowerCase();
+      return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]';
+    } catch (_err) {
+      return false;
+    }
+  }
+
   function netFetch(pluginId, rawUrl, init = {}) {
     if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
       return Promise.resolve({ ok: false, reason: 'ERR_INVALID_PLUGIN_ID' });
@@ -784,6 +837,20 @@ function createRemoteHostBridge({
     if (!binding) {
       return Promise.resolve({ ok: false, reason: 'ERR_NET_NOT_DECLARED' });
     }
+
+    const declaredLoopback = Array.isArray(binding.localLoopback) ? binding.localLoopback : [];
+    const targetsLoopback = isLoopbackUrl(rawUrl);
+
+    if (targetsLoopback) {
+      if (remoteTransport && typeof remoteTransport.netFetch === 'function' && declaredLoopback.length > 0) {
+        if (!isRemoteTransportConnected()) {
+          return Promise.resolve({ ok: false, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' });
+        }
+        return Promise.resolve(remoteTransport.netFetch(pluginId, rawUrl, init));
+      }
+      return Promise.resolve({ ok: false, reason: 'ERR_NET_LOOPBACK_NOT_SUPPORTED' });
+    }
+
     const effectiveHttpsHosts = getEffectiveHttpsHosts(pluginId, binding);
     if (effectiveHttpsHosts.length === 0) {
       return Promise.resolve({
@@ -791,7 +858,6 @@ function createRemoteHostBridge({
         reason: binding.userApprovedHttps ? 'ERR_NET_USER_HTTPS_HOST_NOT_APPROVED' : 'ERR_NET_NOT_DECLARED',
       });
     }
-    // Remote Web strictly forbids localLoopback (`allowLoopback: false`)
     const plan = evaluateNetRequest(rawUrl, init, {
       httpsHosts: effectiveHttpsHosts,
       localLoopback: [],
@@ -802,6 +868,9 @@ function createRemoteHostBridge({
       return Promise.resolve({ ok: false, reason: plan.reason });
     }
     const xhrFn = detectGmXhr();
+    if (!xhrFn && remoteTransport && typeof remoteTransport.netFetch === 'function' && isRemoteTransportConnected()) {
+      return Promise.resolve(remoteTransport.netFetch(pluginId, rawUrl, init));
+    }
     if (!xhrFn) {
       return Promise.resolve({ ok: false, reason: 'ERR_REMOTE_NET_TRANSPORT_UNAVAILABLE' });
     }
@@ -869,6 +938,7 @@ function createRemoteHostBridge({
     ping,
     readConfigScope,
     writeConfigScope,
+    getRemoteBridgeStatus,
     netFetch,
   });
 
@@ -887,13 +957,15 @@ function createRemoteHostBridge({
     listUserAllowedHttpsHosts,
     addUserAllowedHttpsHost,
     removeUserAllowedHttpsHost,
+    getRemoteBridgeStatus,
     getErrors: () => recordedErrors.slice(),
     getPortalClaims: () => Array.from(activePortalClaims),
     getStatus: () => ({
       docGenId: port.docGenId,
       profileId: port.profileId,
-      mode: remoteTransport ? 'remote-sync' : 'browser-local',
+      mode: isRemoteTransportConnected() ? 'remote-sync' : 'browser-local',
       storageKind,
+      remoteBridge: getRemoteBridgeStatus(),
       boundSettingsPlugins: Array.from(allowedSettings.keys()),
       portalClaimCount: activePortalClaims.size,
       errorCount: recordedErrors.length,

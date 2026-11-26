@@ -254,11 +254,13 @@ function createTestHost({
   viewport = { width: 1280, height: 800 },
   locale = 'en',
   themeMode = 'dark',
+  remoteBridgeConnected = false,
   netHandler = null,
   configScopes = {},
   initialSettings = {},
 } = {}) {
   const effectiveSurface = surface === 'remote-web' ? 'remote-web' : 'desktop';
+  const hasLiveRemoteBridge = effectiveSurface === 'remote-web' && remoteBridgeConnected === true;
   const { doc, win } = createMockDocumentAndWindow({ viewport, locale, themeMode });
   const kernel = createRendererKernel(doc, win);
   const hostToken = 'sdk-test-host-token-0123456789abcdef';
@@ -288,6 +290,20 @@ function createTestHost({
       scopeStore.set(scopeId, { data, sha256: 'updated-sha' });
       return Promise.resolve({ ok: true, currentSha256: 'updated-sha', snapshot: { data } });
     },
+    ...(hasLiveRemoteBridge
+      ? {
+          getRemoteBridgeStatus: () => ({
+            configured: true,
+            connected: true,
+            baseUrl: 'http://127.0.0.1:19384',
+            hostVersion: '3.1.0',
+            buildSha8: 'test',
+            activePlugins: [],
+            lastCheckedAt: new Date().toISOString(),
+            lastError: null,
+          }),
+        }
+      : {}),
     netFetch: (pluginId, url, init) => {
       if (typeof netHandler === 'function') {
         return Promise.resolve(netHandler(pluginId, url, init));
@@ -319,8 +335,8 @@ function createTestHost({
       sourceSchemaVersion: manifest.schemaVersion || 3,
       trustLevel: isTrusted ? 'trusted' : 'restricted',
       hasSettingsBridge: Boolean(manifest.settingsBridge && isTrusted),
-      hasConfigBridge: Boolean(effectiveSurface === 'desktop' && isTrusted && cbScopes.length > 0),
-      configScopes: effectiveSurface === 'desktop' && isTrusted ? cbScopes : [],
+      hasConfigBridge: Boolean((effectiveSurface === 'desktop' || hasLiveRemoteBridge) && isTrusted && cbScopes.length > 0),
+      configScopes: (effectiveSurface === 'desktop' || hasLiveRemoteBridge) && isTrusted ? cbScopes : [],
       permissions: manifest.permissions || null,
       uiSlots: manifest.uiSlots || [],
       isolation: manifest.isolation || {},

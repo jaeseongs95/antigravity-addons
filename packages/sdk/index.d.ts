@@ -168,6 +168,7 @@ export interface AddonContextV3 {
     readonly layoutMode: LayoutMode;
     readonly capabilities: {
       readonly hasLocalLoopback: boolean;
+      readonly hasRemoteHostBridge?: boolean;
       readonly hasNetHttps: boolean;
       readonly hasConfigBridge: boolean;
       readonly hasSettingsBridge: boolean;
@@ -307,6 +308,7 @@ export interface TestHostOptions {
   viewport?: { width: number; height: number };
   locale?: string;
   themeMode?: 'dark' | 'light';
+  remoteBridgeConnected?: boolean;
   netHandler?: (pluginId: string, url: string, init?: Record<string, unknown>) => Promise<NetFetchResponse> | NetFetchResponse;
   configScopes?: Record<string, { data: Record<string, unknown>; sha256?: string }>;
   initialSettings?: Record<string, Record<string, unknown>>;

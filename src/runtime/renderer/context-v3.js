@@ -140,14 +140,29 @@ function createAddonContextV3({
     (_ArrayIsArray(netHttpsHosts) && netHttpsHosts.length > 0) ||
       (surface === 'remote-web' && netUserApprovedHttps)
   );
-  const hasLocalLoopback = !!(
-    surface === 'desktop' &&
-      effectiveTrustLevel === 'trusted' &&
+  const supportsRemoteHostBridge = !!(
+    surface === 'remote-web' && hostBridge && typeof hostBridge.getRemoteBridgeStatus === 'function'
+  );
+  const isRemoteHostBridgeConnected = () => {
+    if (!supportsRemoteHostBridge) return false;
+    try {
+      const st = hostBridge.getRemoteBridgeStatus();
+      return !!(st && st.connected === true);
+    } catch (_err) {
+      return false;
+    }
+  };
+  const hasDeclaredTrustedLoopback = !!(
+    effectiveTrustLevel === 'trusted' &&
       _ArrayIsArray(netLocalLoopback) &&
       netLocalLoopback.length > 0
   );
+  const hasDesktopLoopback = !!(surface === 'desktop' && hasDeclaredTrustedLoopback);
+  const hasRemoteLoopbackViaBridge = !!(supportsRemoteHostBridge && hasDeclaredTrustedLoopback);
   const hasNetCapability = !!(
-    (hasNetHttps || hasLocalLoopback) && hostBridge && typeof hostBridge.netFetch === 'function'
+    (hasNetHttps || hasDesktopLoopback || hasRemoteLoopbackViaBridge) &&
+      hostBridge &&
+      typeof hostBridge.netFetch === 'function'
   );
   const hasDocumentTransform = !!(
     effectiveTrustLevel === 'trusted' &&
@@ -428,7 +443,12 @@ function createAddonContextV3({
       return detectLayoutMode(win);
     },
     capabilities: _ObjectFreeze({
-      hasLocalLoopback,
+      get hasLocalLoopback() {
+        return hasDesktopLoopback || (hasRemoteLoopbackViaBridge && isRemoteHostBridgeConnected());
+      },
+      get hasRemoteHostBridge() {
+        return isRemoteHostBridgeConnected();
+      },
       hasNetHttps,
       hasConfigBridge: !!hasConfigBridge,
       hasSettingsBridge: !!hasSettingsBridge,

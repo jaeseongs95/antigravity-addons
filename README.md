@@ -6,7 +6,18 @@
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
 > *(Formerly `antigravity-native-addon-host` — existing `addon-host` CLI command, `ADDON_HOST_LOADER_V2` marker, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Single, vendor-independent API-First native desktop & universal remote web addon host framework (`v3.0.1`) with 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + Desktop-only `localLoopback`), separate `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+**Single, vendor-independent API-First native desktop & universal remote web addon host framework (`v3.1.0`) with Host-Managed Unified Remote Bridge (`ag-bridge-v1:` 1-line Pairing Code + 1-click in-app Remote Bundle rebuild), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + trusted `localLoopback`), separate `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+
+## Key Updates in v3.1.0 (Host-Managed Unified Remote Bridge Framework & `userApprovedHttps` Fix)
+
+- **Native Host-Managed Unified Remote Bridge (`src/runtime/main/remote-bridge-server.js` + `src/adapters/remote-web/remote-host-transport.js`)**:
+  - Centralizes Remote Web <-> Desktop communication in the Native Host so individual plugins never have to ship per-plugin Remote URL/Token inputs or bespoke remote servers.
+  - Disabled by default (`enabled: false`), configured from Desktop **Settings -> Addon Manager** with a CSPRNG 256-bit Bearer token in reserved `remote-bridge.json` (`0o600`), strict exact-`Origin` CORS, constant-time auth, live SHA-256 trust verification per request, and a 1-line Pairing Code (`ag-bridge-v1:...`).
+  - Remote Web Drawer adds a dedicated **Host Bridge** tab (index 3) that pairs once and transparently routes `ctx.settingsBridge`, `ctx.configBridge`, and `ctx.net.fetch` (including trusted `localLoopback` sidecars), broadcasting `host:remote-bridge-changed`.
+- **1-Click In-App Remote Bundle Rebuild**:
+  - Desktop **Settings -> Addon Manager** now includes a 1-click **`Rebuild Bundle Now` (`지금 원격 번들 빌드`)** button executing the host CLI directly via `execFile` (`shell: false`).
+- **Fix: Preserve `permissions.net.userApprovedHttps: true`**:
+  - Fixed `src/core/manifest-normalizer.js` (`normalizePermissionsV3`) dropping `userApprovedHttps: true` during v3 manifest normalization.
 
 ## Key Updates in v3.0.1 (v3 Ecosystem Parity & Polish)
 
