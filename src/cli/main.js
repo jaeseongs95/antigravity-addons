@@ -341,7 +341,7 @@ function createCliApp({
         relaunch: args.includes('--relaunch'),
         forceMacAutoRepatch: args.includes('--force-macos'),
         parentPid: parentPidRaw ? Number.parseInt(parentPidRaw, 10) : null,
-        prevAsarSha: readFlagVal('--prev-asar-sha'),
+        prevBundleSha: readFlagVal('--prev-bundle-sha'),
         ackFilePath: readFlagVal('--ack-file'),
         waitTimeoutMs: waitTimeoutRaw ? Number.parseInt(waitTimeoutRaw, 10) : undefined,
       });

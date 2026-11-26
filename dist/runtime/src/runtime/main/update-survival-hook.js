@@ -27,7 +27,8 @@ const HOST_CLI_META_FILENAME = 'host-cli.json';
 
 function safeRealpath(p) {
   try {
-    return fs.realpathSync(p);
+    const fn = typeof fs.realpathSync.native === 'function' ? fs.realpathSync.native : fs.realpathSync;
+    return fn(p);
   } catch (_err) {
     return path.resolve(p);
   }
@@ -38,19 +39,24 @@ function normalizePathForCompare(p, platform) {
   return platform === 'win32' ? res.toLowerCase() : res;
 }
 
+function isRelInside(rel) {
+  return (
+    rel === '' ||
+    (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !rel.startsWith('../') && !path.isAbsolute(rel))
+  );
+}
+
 function isInsideDir(candidate, baseDir, platform) {
   if (!candidate || !baseDir) return false;
   const c1 = normalizePathForCompare(candidate, platform);
   const b1 = normalizePathForCompare(baseDir, platform);
-  const r1 = path.relative(b1, c1);
-  if (r1 === '' || (!r1.startsWith('..') && !path.isAbsolute(r1))) return true;
+  if (isRelInside(path.relative(b1, c1))) return true;
   const c2 = normalizePathForCompare(safeRealpath(candidate), platform);
   const b2 = normalizePathForCompare(safeRealpath(baseDir), platform);
-  const r2 = path.relative(b2, c2);
-  return r2 === '' || (!r2.startsWith('..') && !path.isAbsolute(r2));
+  return isRelInside(path.relative(b2, c2));
 }
 
-function isValidExternalNodeBinary(nodePath, { appExecutablePath, asarPath, platform }) {
+function isValidExternalNodeBinary(nodePath, { appExecutablePath, asarPath, platform, electronExecPath = null }) {
   if (typeof nodePath !== 'string' || !nodePath.trim() || !path.isAbsolute(nodePath)) {
     return false;
   }
@@ -73,6 +79,19 @@ function isValidExternalNodeBinary(nodePath, { appExecutablePath, asarPath, plat
     forbidden.push(resDir);
     const parent = path.dirname(resDir);
     if (parent && parent !== resDir) forbidden.push(parent);
+  }
+  const runtimeExec =
+    typeof electronExecPath === 'string' && electronExecPath.trim()
+      ? electronExecPath.trim()
+      : typeof process !== 'undefined' &&
+          process.versions &&
+          process.versions.electron &&
+          typeof process.execPath === 'string' &&
+          process.execPath.trim()
+        ? process.execPath.trim()
+        : null;
+  if (runtimeExec) {
+    forbidden.push(path.dirname(path.resolve(runtimeExec)));
   }
   for (let i = 0; i < forbidden.length; i += 1) {
     if (isInsideDir(nodePath, forbidden[i], platform)) return false;
@@ -108,9 +127,12 @@ function sleepSyncBounded(ms) {
   }
 }
 
-function waitForAckFileSync(ackFilePath, timeoutMs, sleepFn = sleepSyncBounded) {
+function waitForAckFileSync(ackFilePath, timeoutMs, sleepFn = sleepSyncBounded, isAbortedFn = null) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
+    if (typeof isAbortedFn === 'function' && isAbortedFn()) {
+      return false;
+    }
     try {
       if (fs.existsSync(ackFilePath)) {
         const content = fs.readFileSync(ackFilePath, 'utf8');
@@ -124,6 +146,17 @@ function waitForAckFileSync(ackFilePath, timeoutMs, sleepFn = sleepSyncBounded) 
     sleepFn(Math.min(10, remaining));
   }
   return false;
+}
+
+function matchesUpdaterCacheKey(cacheKey, updaterModule, platform) {
+  if (typeof cacheKey !== 'string' || !cacheKey || typeof updaterModule !== 'string' || !updaterModule) {
+    return false;
+  }
+  const normKey = (platform === 'win32' ? cacheKey.toLowerCase() : cacheKey).replace(/\\/g, '/');
+  const normMod = (platform === 'win32' ? updaterModule.toLowerCase() : updaterModule).replace(/\\/g, '/');
+  if (normKey === normMod) return true;
+  const marker = `/node_modules/${normMod}`;
+  return normKey.includes(`${marker}/`) || normKey.endsWith(marker) || normKey.endsWith(`${marker}.js`);
 }
 
 function createUpdateSurvivalHook({
@@ -216,8 +249,10 @@ function createUpdateSurvivalHook({
       String(config.waitTimeoutMs),
     ];
     if (resolved.prevAsarSha) {
-      args.push('--prev-asar-sha', resolved.prevAsarSha);
+      args.push('--prev-bundle-sha', resolved.prevAsarSha);
     }
+
+    const cancelFilePath = `${ackFilePath}.cancel`;
 
     try {
       const child = spawnFn(resolved.nodeExecPath, args, {
@@ -226,19 +261,51 @@ function createUpdateSurvivalHook({
         shell: false,
         windowsHide: true,
       });
+      let spawnErr = null;
+      if (child && typeof child.on === 'function') {
+        child.on('error', (err) => {
+          spawnErr = err || new Error('SPAWN_ERROR');
+        });
+      }
       if (child && typeof child.unref === 'function') {
         child.unref();
       }
-      const acked = waitForAckFileSync(ackFilePath, config.ackTimeoutMs, sleepSyncFn);
-      try {
-        if (fs.existsSync(ackFilePath)) fs.unlinkSync(ackFilePath);
-      } catch (_rmErr) {}
+      const acked = waitForAckFileSync(ackFilePath, config.ackTimeoutMs, sleepSyncFn, () => Boolean(spawnErr));
+
+      if (spawnErr) {
+        try {
+          fs.writeFileSync(cancelFilePath, 'CANCEL\n', 'utf8');
+        } catch (_cErr) {}
+        try {
+          if (fs.existsSync(ackFilePath)) fs.unlinkSync(ackFilePath);
+        } catch (_rmErr) {}
+        const reason = spawnErr && spawnErr.message ? spawnErr.message : String(spawnErr);
+        lastHandoff = { ok: false, failOpen: true, reason: `ERR_RECONCILE_SPAWN_FAILED:${reason}` };
+        recordDiag('warn', 'UPDATE_SURVIVAL_SPAWN_FAIL_OPEN', reason);
+        return false;
+      }
 
       if (!acked) {
+        // Explicit cancel handshake before fail-open so a slow helper NEVER races NSIS or double-relaunches.
+        try {
+          fs.writeFileSync(cancelFilePath, 'CANCEL\n', 'utf8');
+        } catch (_cErr) {}
+        try {
+          if (child && typeof child.kill === 'function') {
+            child.kill();
+          }
+        } catch (_killErr) {}
+        try {
+          if (fs.existsSync(ackFilePath)) fs.unlinkSync(ackFilePath);
+        } catch (_rmErr) {}
         lastHandoff = { ok: false, failOpen: true, reason: 'ERR_RECONCILE_ACK_TIMEOUT' };
         recordDiag('warn', 'UPDATE_SURVIVAL_ACK_TIMEOUT_FAIL_OPEN', `timeoutMs=${config.ackTimeoutMs}`);
         return false;
       }
+
+      try {
+        if (fs.existsSync(ackFilePath)) fs.unlinkSync(ackFilePath);
+      } catch (_rmErr) {}
 
       lastHandoff = {
         ok: true,
@@ -312,6 +379,22 @@ function createUpdateSurvivalHook({
       return res;
     };
     moduleApi._load = hookLoad;
+
+    // F1: Also wrap already-cached updater modules loaded before initMain() ran.
+    if (moduleApi._cache && typeof moduleApi._cache === 'object') {
+      const cacheKeys = Object.keys(moduleApi._cache);
+      for (let i = 0; i < cacheKeys.length; i += 1) {
+        const key = cacheKeys[i];
+        if (!matchesUpdaterCacheKey(key, config.updaterModule, platform)) continue;
+        try {
+          const cachedMod = moduleApi._cache[key];
+          if (cachedMod && cachedMod.exports) {
+            wrapUpdaterExport(cachedMod.exports);
+          }
+        } catch (_cacheWrapErr) {}
+      }
+    }
+
     installed = true;
     recordDiag('info', 'UPDATE_SURVIVAL_HOOK_INSTALLED', `module=${config.updaterModule} method=${config.method}`);
     return true;

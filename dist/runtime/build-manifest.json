@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "f571f1a0",
-  "buildSha256": "f571f1a0cd54fdee8e381e6d477dd67d9bd953742eac419c81cda2a26288c9ca",
+  "buildSha8": "648964ce",
+  "buildSha256": "648964ce1b0eb4402db4d86bcae65f17452d6ae99d92846649059c1e85b64db9",
   "fileCount": 33,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
@@ -34,7 +34,7 @@
     "src/runtime/main/renderer-injector.js": "2a228f0a68e7cfec40a4d3b0e4023a0ccb91415f2b10c8464e60e9bc131bf5fe",
     "src/runtime/main/settings-bridge.js": "3d259e387f87107d6b860ae6d39a0eeddc313946dd232c9ceb83370879fa81a3",
     "src/runtime/main/trust-verifier.js": "cd2857094274b7b861b096376eb2222a29748d4c20923e6f727ade6212971c30",
-    "src/runtime/main/update-survival-hook.js": "635464986b983e15ae1f84aeb17f537deedcc25998994a7994cfae7a3336d3d5",
+    "src/runtime/main/update-survival-hook.js": "35f350087fba30c3df2f68df339876e25a5349d2427c82222d7bc0dd432d9135",
     "src/runtime/shared/constants.js": "f4240b7601ee38485baeec57f43b91a3d72c7729fc27624ea005840909de1e6c",
     "src/runtime/shared/safe-json.js": "7c7924f2964d20fb1060bc83e6149dd7a4db81d04f31a182630e8e6ecf3d7095"
   }
