@@ -227,11 +227,14 @@ module.exports = {
  *   and rejecting functions / circular references / excessive nesting depth.
  */
 
-// NEW-BLK-01: Capture JS primordials at module load so shared World 998 prototype tampering cannot bypass policy checks.
+// NEW-BLK-01 / R3-BLK-01..04: Capture JS primordials at module load so shared World 998 prototype tampering cannot bypass policy checks.
+const _Error = Error;
+const _String = String;
 const _ObjectFreeze = Object.freeze;
 const _ObjectKeys = Object.keys;
 const _ObjectCreate = Object.create;
 const _ObjectDefineProperty = Object.defineProperty;
+const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ArrayIsArray = Array.isArray;
 const _NumberIsFinite = Number.isFinite;
 const _Date = Date;
@@ -243,7 +246,8 @@ const _WeakSet = WeakSet;
 const _WeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
 const _WeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
 const _WeakSetDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
-const _RegExpTest = Function.prototype.call.bind(RegExp.prototype.test);
+// R3-BLK-04: Capture RegExp.prototype.exec directly (RegExp.prototype.test delegates dynamically to this.exec).
+const _RegExpExec = Function.prototype.call.bind(RegExp.prototype.exec);
 const _StringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
 
 const WELL_KNOWN_HOST_SERVICES = _ObjectFreeze(['host.statusbar']);
@@ -261,11 +265,31 @@ function defineSafeDataProp(target, key, value) {
   _ObjectDefineProperty(target, key, desc);
 }
 
-function validateServiceName(pluginId, serviceName, { allowWellKnownHostServices = false } = {}) {
+function pushSafe(arr, value) {
+  defineSafeDataProp(arr, arr.length, value);
+}
+
+function getOwn(obj, key) {
+  if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+  return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
+}
+
+function isNativeDate(val) {
+  try {
+    _DateGetTime(val);
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+function validateServiceName(pluginId, serviceName, opts) {
+  // R3-BLK-03: Never read inherited Object.prototype.allowWellKnownHostServices
+  const allowWellKnownHostServices = !!getOwn(opts, 'allowWellKnownHostServices');
   if (typeof pluginId !== 'string' || !pluginId) {
     return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
   }
-  if (typeof serviceName !== 'string' || !_RegExpTest(SERVICE_NAME_RE, serviceName)) {
+  if (typeof serviceName !== 'string' || _RegExpExec(SERVICE_NAME_RE, serviceName) === null) {
     return { ok: false, reason: 'ERR_INVALID_SERVICE_NAME' };
   }
   if (_StringStartsWith(serviceName, `${pluginId}.`)) {
@@ -284,7 +308,9 @@ function isCallerAllowed(providerPluginId, callerPluginId, allowedCallers) {
     return false; // Default-deny
   }
   for (let i = 0; i < allowedCallers.length; i += 1) {
-    if (allowedCallers[i] === '*' || allowedCallers[i] === callerPluginId) {
+    if (!_ObjectHasOwn(allowedCallers, i)) continue;
+    const entry = allowedCallers[i];
+    if (entry === '*' || entry === callerPluginId) {
       return true;
     }
   }
@@ -296,7 +322,7 @@ function sanitizeBusPayload(value, maxDepth = MAX_PAYLOAD_DEPTH) {
 
   function clone(val, depth) {
     if (depth > maxDepth) {
-      throw new Error('ERR_BUS_PAYLOAD_TOO_DEEP');
+      throw new _Error('ERR_BUS_PAYLOAD_TOO_DEEP');
     }
     if (val === null || val === undefined || typeof val === 'boolean' || typeof val === 'string') {
       return val;
@@ -305,26 +331,28 @@ function sanitizeBusPayload(value, maxDepth = MAX_PAYLOAD_DEPTH) {
       return _NumberIsFinite(val) ? val : null;
     }
     if (typeof val === 'function' || typeof val === 'symbol' || typeof val === 'bigint') {
-      throw new Error('ERR_BUS_PAYLOAD_NON_SERIALIZABLE');
+      throw new _Error('ERR_BUS_PAYLOAD_NON_SERIALIZABLE');
     }
     if (typeof val === 'object') {
       if (_WeakSetHas(seen, val)) {
-        throw new Error('ERR_BUS_PAYLOAD_CIRCULAR');
+        throw new _Error('ERR_BUS_PAYLOAD_CIRCULAR');
       }
       // Reject DOM nodes or host objects cleanly
       if (typeof val.nodeType === 'number' && typeof val.nodeName === 'string') {
-        throw new Error('ERR_BUS_PAYLOAD_DOM_NODE_FORBIDDEN');
+        throw new _Error('ERR_BUS_PAYLOAD_DOM_NODE_FORBIDDEN');
       }
       _WeakSetAdd(seen, val);
       try {
         if (_ArrayIsArray(val)) {
           const arr = [];
           for (let i = 0; i < val.length; i += 1) {
-            defineSafeDataProp(arr, i, clone(val[i], depth + 1));
+            const elem = _ObjectHasOwn(val, i) ? val[i] : undefined;
+            defineSafeDataProp(arr, i, clone(elem, depth + 1));
           }
           return arr;
         }
-        if (val instanceof _Date) {
+        // R3-NB-03: Use internal [[DateValue]] brand check via captured Date.prototype.getTime (immune to Date[Symbol.hasInstance])
+        if (isNativeDate(val)) {
           return new _Date(_DateGetTime(val));
         }
         const out = {};
@@ -359,46 +387,54 @@ function validateServicePermissions(pluginId, servicesPerm) {
   const provide = [];
   const seenProvide = new _Set();
 
-  if (_ArrayIsArray(servicesPerm.provide)) {
-    for (let i = 0; i < servicesPerm.provide.length; i += 1) {
-      const entry = servicesPerm.provide[i];
+  const rawProvide = getOwn(servicesPerm, 'provide');
+  if (_ArrayIsArray(rawProvide)) {
+    for (let i = 0; i < rawProvide.length; i += 1) {
+      const entry = _ObjectHasOwn(rawProvide, i) ? rawProvide[i] : undefined;
       if (!entry || typeof entry !== 'object') {
-        errors[errors.length] = `permissions.services.provide[${i}] must be an object`;
+        pushSafe(errors, `permissions.services.provide[${i}] must be an object`);
         continue;
       }
-      const check = validateServiceName(pluginId, entry.name, { allowWellKnownHostServices: true });
+      const entryName = getOwn(entry, 'name');
+      const nameOpts = _ObjectCreate(null);
+      nameOpts.allowWellKnownHostServices = true;
+      const check = validateServiceName(pluginId, entryName, nameOpts);
       if (!check.ok) {
-        errors[errors.length] = `permissions.services.provide[${i}].name "${String(entry.name)}": ${check.reason}`;
+        pushSafe(errors, `permissions.services.provide[${i}].name "${_String(entryName)}": ${check.reason}`);
         continue;
       }
-      if (_SetHas(seenProvide, entry.name)) {
-        errors[errors.length] = `Duplicate provided service "${entry.name}"`;
+      if (_SetHas(seenProvide, entryName)) {
+        pushSafe(errors, `Duplicate provided service "${entryName}"`);
         continue;
       }
-      _SetAdd(seenProvide, entry.name);
+      _SetAdd(seenProvide, entryName);
       const callersCopy = [];
-      if (_ArrayIsArray(entry.allowedCallers)) {
-        for (let j = 0; j < entry.allowedCallers.length; j += 1) {
-          callersCopy[callersCopy.length] = entry.allowedCallers[j];
+      const rawCallers = getOwn(entry, 'allowedCallers');
+      if (_ArrayIsArray(rawCallers)) {
+        for (let j = 0; j < rawCallers.length; j += 1) {
+          if (_ObjectHasOwn(rawCallers, j)) {
+            pushSafe(callersCopy, rawCallers[j]);
+          }
         }
       }
-      provide[provide.length] = {
-        name: entry.name,
+      pushSafe(provide, {
+        name: entryName,
         allowedCallers: callersCopy,
-      };
+      });
     }
   }
 
   const consume = [];
   const seenConsume = new _Set();
-  if (_ArrayIsArray(servicesPerm.consume)) {
-    for (let i = 0; i < servicesPerm.consume.length; i += 1) {
-      const name = servicesPerm.consume[i];
-      if (typeof name !== 'string' || !_RegExpTest(SERVICE_NAME_RE, name)) {
-        errors[errors.length] = `Invalid consumed service name "${String(name)}"`;
+  const rawConsume = getOwn(servicesPerm, 'consume');
+  if (_ArrayIsArray(rawConsume)) {
+    for (let i = 0; i < rawConsume.length; i += 1) {
+      const name = _ObjectHasOwn(rawConsume, i) ? rawConsume[i] : undefined;
+      if (typeof name !== 'string' || _RegExpExec(SERVICE_NAME_RE, name) === null) {
+        pushSafe(errors, `Invalid consumed service name "${_String(name)}"`);
       } else if (!_SetHas(seenConsume, name)) {
         _SetAdd(seenConsume, name);
-        consume[consume.length] = name;
+        pushSafe(consume, name);
       }
     }
   }
@@ -5046,11 +5082,15 @@ const {
   sanitizeBusPayload,
 } = require('../../core/service-bus-policy');
 
-// NEW-BLK-01: Capture JS primordials at module load so shared World 998 prototype tampering cannot hijack host.statusbar or ACLs.
+// NEW-BLK-01 / R3-BLK-01..03: Capture JS primordials at module load so shared World 998 prototype tampering cannot hijack host.statusbar, ACLs, or bus payloads.
 const _Error = Error;
+const _String = String;
+const _ObjectCreate = Object.create;
+const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
 const _ObjectKeys = Object.keys;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+const _ObjectGetPrototypeOf = Object.getPrototypeOf;
 const _ArrayIsArray = Array.isArray;
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
@@ -5063,18 +5103,40 @@ const _SetHas = Function.prototype.call.bind(Set.prototype.has);
 const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
 const _StringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
 const _ReflectApply = Reflect.apply;
+const _PromisePrototype = Promise.prototype;
+const _PromiseThen = Function.prototype.call.bind(Promise.prototype.then);
+
+function defineSafeDataProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.configurable = true;
+  desc.writable = true;
+  _ObjectDefineProperty(target, key, desc);
+}
+
+function pushSafe(arr, value) {
+  defineSafeDataProp(arr, arr.length, value);
+}
+
+function getOwn(obj, key) {
+  if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+  return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
+}
 
 function copyArrayPlain(src) {
   const out = [];
   if (!_ArrayIsArray(src)) return out;
   for (let i = 0; i < src.length; i += 1) {
-    out[out.length] = src[i];
+    if (_ObjectHasOwn(src, i)) {
+      pushSafe(out, src[i]);
+    }
   }
   return out;
 }
 
 function createServiceBus({ onServiceRegistryChange = null } = {}) {
-  const services = new _Map(); // serviceName -> { providerPluginId, name, allowedCallers, impl }
+  const services = new _Map(); // serviceName -> null-proto { providerPluginId, name, allowedCallers, impl }
 
   function notifyChange(serviceName, action) {
     if (typeof onServiceRegistryChange === 'function') {
@@ -5084,21 +5146,20 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     }
   }
 
-  function provide(pluginMeta, serviceName, impl, opts = {}) {
-    const pluginId = pluginMeta && pluginMeta.pluginId;
-    const trustLevel = (pluginMeta && pluginMeta.trustLevel) || 'restricted';
-    const isV3 = !!(pluginMeta && (pluginMeta.sourceSchemaVersion === 3 || pluginMeta.apiVersion === 3));
-    const declaredProvide =
-      pluginMeta &&
-      pluginMeta.permissions &&
-      pluginMeta.permissions.services &&
-      _ArrayIsArray(pluginMeta.permissions.services.provide)
-        ? pluginMeta.permissions.services.provide
-        : [];
+  function provide(pluginMeta, serviceName, impl, opts) {
+    // R3-BLK-03: Read every metadata/permission/opts property via own-property lookup only.
+    const pluginId = getOwn(pluginMeta, 'pluginId');
+    const trustLevel = getOwn(pluginMeta, 'trustLevel') || 'restricted';
+    const isV3 = !!(getOwn(pluginMeta, 'sourceSchemaVersion') === 3 || getOwn(pluginMeta, 'apiVersion') === 3);
+    const perms = getOwn(pluginMeta, 'permissions');
+    const svcPerms = getOwn(perms, 'services');
+    const rawProvide = getOwn(svcPerms, 'provide');
+    const declaredProvide = _ArrayIsArray(rawProvide) ? rawProvide : [];
     let declaredEntry = null;
     for (let i = 0; i < declaredProvide.length; i += 1) {
+      if (!_ObjectHasOwn(declaredProvide, i)) continue;
       const p = declaredProvide[i];
-      if (p && p.name === serviceName) {
+      if (p && typeof p === 'object' && getOwn(p, 'name') === serviceName) {
         declaredEntry = p;
         break;
       }
@@ -5112,7 +5173,9 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     }
     const allowWellKnown = isHostWellKnown && trustLevel === 'trusted' && !!declaredEntry;
 
-    const nameCheck = validateServiceName(pluginId, serviceName, { allowWellKnownHostServices: allowWellKnown });
+    const nameOpts = _ObjectCreate(null);
+    nameOpts.allowWellKnownHostServices = allowWellKnown;
+    const nameCheck = validateServiceName(pluginId, serviceName, nameOpts);
     if (!nameCheck.ok) {
       throw new _Error(`${nameCheck.reason}:${serviceName}`);
     }
@@ -5128,11 +5191,12 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     }
 
     // Runtime opts.allowedCallers may only narrow (never widen) manifest-declared allowedCallers
-    const manifestCallers =
-      declaredEntry && _ArrayIsArray(declaredEntry.allowedCallers) ? copyArrayPlain(declaredEntry.allowedCallers) : [];
+    const rawManifestCallers = getOwn(declaredEntry, 'allowedCallers');
+    const manifestCallers = _ArrayIsArray(rawManifestCallers) ? copyArrayPlain(rawManifestCallers) : [];
+    const rawOptCallers = getOwn(opts, 'allowedCallers');
     let allowedCallers;
     if (declaredEntry) {
-      if (_ArrayIsArray(opts && opts.allowedCallers)) {
+      if (_ArrayIsArray(rawOptCallers)) {
         let hasWildcard = false;
         const allowedSet = new _Set();
         for (let i = 0; i < manifestCallers.length; i += 1) {
@@ -5140,27 +5204,28 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
           _SetAdd(allowedSet, manifestCallers[i]);
         }
         if (hasWildcard) {
-          allowedCallers = copyArrayPlain(opts.allowedCallers);
+          allowedCallers = copyArrayPlain(rawOptCallers);
         } else {
           allowedCallers = [];
-          for (let i = 0; i < opts.allowedCallers.length; i += 1) {
-            const c = opts.allowedCallers[i];
-            if (_SetHas(allowedSet, c)) allowedCallers[allowedCallers.length] = c;
+          for (let i = 0; i < rawOptCallers.length; i += 1) {
+            if (!_ObjectHasOwn(rawOptCallers, i)) continue;
+            const c = rawOptCallers[i];
+            if (_SetHas(allowedSet, c)) pushSafe(allowedCallers, c);
           }
         }
       } else {
         allowedCallers = manifestCallers;
       }
     } else {
-      allowedCallers = _ArrayIsArray(opts && opts.allowedCallers) ? copyArrayPlain(opts.allowedCallers) : [];
+      allowedCallers = _ArrayIsArray(rawOptCallers) ? copyArrayPlain(rawOptCallers) : [];
     }
 
-    _MapSet(services, serviceName, {
-      providerPluginId: pluginId,
-      name: serviceName,
-      allowedCallers,
-      impl,
-    });
+    const record = _ObjectCreate(null);
+    record.providerPluginId = pluginId;
+    record.name = serviceName;
+    record.allowedCallers = _ObjectFreeze(allowedCallers);
+    record.impl = impl;
+    _MapSet(services, serviceName, _ObjectFreeze(record));
     notifyChange(serviceName, 'provide');
 
     return _ObjectFreeze({
@@ -5189,14 +5254,17 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
         const methods = [];
         for (let i = 0; i < keys.length; i += 1) {
           if (typeof rec.impl[keys[i]] === 'function') {
-            methods[methods.length] = keys[i];
+            pushSafe(methods, keys[i]);
           }
         }
-        out[out.length] = _ObjectFreeze({
-          name: rec.name,
-          providerPluginId: rec.providerPluginId,
-          methods: _ObjectFreeze(methods),
-        });
+        pushSafe(
+          out,
+          _ObjectFreeze({
+            name: rec.name,
+            providerPluginId: rec.providerPluginId,
+            methods: _ObjectFreeze(methods),
+          })
+        );
       }
     });
     return _ObjectFreeze(out);
@@ -5211,19 +5279,22 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
       throw new _Error(`ERR_SERVICE_CALLER_FORBIDDEN:${callerPluginId}:${serviceName}`);
     }
     if (typeof methodName !== 'string' || !methodName || methodName === '__proto__' || methodName === 'constructor') {
-      throw new _Error(`ERR_SERVICE_METHOD_INVALID:${String(methodName)}`);
+      throw new _Error(`ERR_SERVICE_METHOD_INVALID:${_String(methodName)}`);
     }
     const fn = _ObjectHasOwn(rec.impl, methodName) ? rec.impl[methodName] : null;
     if (typeof fn !== 'function') {
       throw new _Error(`ERR_SERVICE_METHOD_NOT_FOUND:${serviceName}.${methodName}`);
     }
+    // R3-BLK-01: Populate cleanArgs via defineSafeDataProp so Array.prototype[0] setters cannot steal/tamper arguments.
     const cleanArgs = [];
     for (let i = 3; i < arguments.length; i += 1) {
-      cleanArgs[cleanArgs.length] = sanitizeBusPayload(arguments[i]);
+      pushSafe(cleanArgs, sanitizeBusPayload(arguments[i]));
     }
     const ret = _ReflectApply(fn, undefined, cleanArgs);
-    if (ret && typeof ret.then === 'function') {
-      return ret.then((resolved) => sanitizeBusPayload(resolved));
+    // R3-BLK-03: Only treat genuine native Promises as async via captured Promise.prototype.then;
+    // never read inherited Object.prototype.then on plain return values.
+    if (ret !== null && typeof ret === 'object' && _ObjectGetPrototypeOf(ret) === _PromisePrototype) {
+      return _PromiseThen(ret, (resolved) => sanitizeBusPayload(resolved));
     }
     return sanitizeBusPayload(ret);
   }
@@ -5236,7 +5307,7 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     const toRemove = [];
     _MapForEach(services, (rec, name) => {
       if (rec.providerPluginId === pluginId) {
-        toRemove[toRemove.length] = name;
+        pushSafe(toRemove, name);
       }
     });
     for (let i = 0; i < toRemove.length; i += 1) {
@@ -5630,8 +5701,16 @@ const FALLBACK_BAR_CSS = `
 }
 `;
 
-// NEW-BLK-01: Capture JS primordials at module load so World 998 Map/Object prototype tampering cannot hijack statusbar delegation.
+// NEW-BLK-01 / R3-BLK-01..02 / R3-NB-03: Capture JS primordials at module load so World 998 prototype tampering cannot hijack statusbar items or delegation.
+const _Error = Error;
+const _String = String;
+const _Number = Number;
+const _NumberIsFinite = Number.isFinite;
+const _StringTrim = Function.prototype.call.bind(String.prototype.trim);
+const _ObjectCreate = Object.create;
+const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
+const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
 const _MapSet = Function.prototype.call.bind(Map.prototype.set);
@@ -5639,6 +5718,24 @@ const _MapHas = Function.prototype.call.bind(Map.prototype.has);
 const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
 const _MapClear = Function.prototype.call.bind(Map.prototype.clear);
 const _MapForEach = Function.prototype.call.bind(Map.prototype.forEach);
+
+function defineSafeDataProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.configurable = true;
+  desc.writable = true;
+  _ObjectDefineProperty(target, key, desc);
+}
+
+function pushSafe(arr, value) {
+  defineSafeDataProp(arr, arr.length, value);
+}
+
+function getOwn(obj, key) {
+  if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+  return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
+}
 
 function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
   const itemsByKey = new _Map(); // `${pluginId}:${itemId}` -> itemRecord
@@ -5720,12 +5817,21 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
 
     const sorted = [];
     _MapForEach(itemsByKey, (rec) => {
-      sorted[sorted.length] = rec;
+      pushSafe(sorted, rec);
     });
-    sorted.sort((a, b) => {
-      if (a.priority !== b.priority) return a.priority - b.priority;
-      return a.key < b.key ? -1 : 1;
-    });
+    // R3-BLK-02: Local insertion sort using defineSafeDataProp — never invokes Array.prototype.sort or Array.prototype[idx] setters.
+    for (let i = 1; i < sorted.length; i += 1) {
+      const cur = sorted[i];
+      let j = i - 1;
+      while (j >= 0) {
+        const prev = sorted[j];
+        const cmp = prev.priority !== cur.priority ? prev.priority - cur.priority : prev.key < cur.key ? -1 : 1;
+        if (cmp <= 0) break;
+        defineSafeDataProp(sorted, j + 1, prev);
+        j -= 1;
+      }
+      defineSafeDataProp(sorted, j + 1, cur);
+    }
     if (sorted.length === 0) {
       if (fallbackBarEl) {
         while (fallbackBarEl.firstChild) fallbackBarEl.removeChild(fallbackBarEl.firstChild);
@@ -5802,24 +5908,32 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     renderFallbackItems();
   }
 
-  function registerStatusItem(pluginId, spec = {}) {
-    if (!spec || typeof spec !== 'object' || typeof spec.id !== 'string' || !spec.id.trim()) {
-      throw new Error('ERR_INVALID_STATUS_ITEM_ID');
+  function registerStatusItem(pluginId, spec) {
+    const rawId = getOwn(spec, 'id');
+    if (!spec || typeof spec !== 'object' || typeof rawId !== 'string' || !_StringTrim(rawId)) {
+      throw new _Error('ERR_INVALID_STATUS_ITEM_ID');
     }
-    const id = spec.id.trim();
+    const id = _StringTrim(rawId);
     const key = `${pluginId}:${id}`;
-    const record = {
-      key,
-      pluginId,
-      id,
-      label: String(spec.label || id),
-      icon: typeof spec.icon === 'string' ? spec.icon : '',
-      tooltip: typeof spec.tooltip === 'string' ? spec.tooltip : '',
-      badge: spec.badge !== undefined && spec.badge !== null ? String(spec.badge) : '',
-      align: spec.align === 'left' ? 'left' : 'right',
-      priority: Number.isFinite(Number(spec.priority)) ? Number(spec.priority) : 100,
-      onClick: typeof spec.onClick === 'function' ? spec.onClick : null,
-    };
+    const rawLabel = getOwn(spec, 'label');
+    const rawIcon = getOwn(spec, 'icon');
+    const rawTooltip = getOwn(spec, 'tooltip');
+    const rawBadge = getOwn(spec, 'badge');
+    const rawAlign = getOwn(spec, 'align');
+    const rawPriority = getOwn(spec, 'priority');
+    const rawOnClick = getOwn(spec, 'onClick');
+    const parsedPriority = _Number(rawPriority);
+    const record = _ObjectCreate(null);
+    record.key = key;
+    record.pluginId = pluginId;
+    record.id = id;
+    record.label = _String(rawLabel || id);
+    record.icon = typeof rawIcon === 'string' ? rawIcon : '';
+    record.tooltip = typeof rawTooltip === 'string' ? rawTooltip : '';
+    record.badge = rawBadge !== undefined && rawBadge !== null ? _String(rawBadge) : '';
+    record.align = rawAlign === 'left' ? 'left' : 'right';
+    record.priority = rawPriority !== undefined && _NumberIsFinite(parsedPriority) ? parsedPriority : 100;
+    record.onClick = typeof rawOnClick === 'function' ? rawOnClick : null;
     _MapSet(itemsByKey, key, record);
 
     const svc = getDelegatedService();
@@ -5848,14 +5962,19 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
 
     return _ObjectFreeze({
       id,
-      update(patch = {}) {
+      update(patch) {
         if (!_MapHas(itemsByKey, key) || !patch || typeof patch !== 'object') return;
-        if (patch.label !== undefined) record.label = String(patch.label);
-        if (patch.icon !== undefined) record.icon = String(patch.icon || '');
-        if (patch.tooltip !== undefined) record.tooltip = String(patch.tooltip || '');
-        if (patch.badge !== undefined) record.badge = patch.badge === null ? '' : String(patch.badge);
-        if (patch.priority !== undefined && Number.isFinite(Number(patch.priority))) {
-          record.priority = Number(patch.priority);
+        const pLabel = getOwn(patch, 'label');
+        const pIcon = getOwn(patch, 'icon');
+        const pTooltip = getOwn(patch, 'tooltip');
+        const pBadge = getOwn(patch, 'badge');
+        const pPriority = getOwn(patch, 'priority');
+        if (pLabel !== undefined) record.label = _String(pLabel);
+        if (pIcon !== undefined) record.icon = _String(pIcon || '');
+        if (pTooltip !== undefined) record.tooltip = _String(pTooltip || '');
+        if (pBadge !== undefined) record.badge = pBadge === null ? '' : _String(pBadge);
+        if (pPriority !== undefined && _NumberIsFinite(_Number(pPriority))) {
+          record.priority = _Number(pPriority);
         }
         const activeSvc = getDelegatedService();
         if (activeSvc && typeof activeSvc.updateItem === 'function') {
@@ -5877,9 +5996,10 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
         _MapDelete(itemsByKey, key);
         const del = _MapGet(delegatedByKey, key);
         _MapDelete(delegatedByKey, key);
-        if (del && typeof del.dispose === 'function') {
+        const disposeFn = getOwn(del, 'dispose');
+        if (typeof disposeFn === 'function') {
           try {
-            del.dispose();
+            disposeFn();
           } catch (_e) {}
         } else {
           const activeSvc = getDelegatedService();
@@ -5897,17 +6017,20 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   function listStatusItems() {
     const out = [];
     _MapForEach(itemsByKey, (r) => {
-      out[out.length] = _ObjectFreeze({
-        pluginId: r.pluginId,
-        id: r.id,
-        label: r.label,
-        icon: r.icon,
-        tooltip: r.tooltip,
-        badge: r.badge,
-        align: r.align,
-        priority: r.priority,
-        delegated: _MapHas(delegatedByKey, r.key),
-      });
+      pushSafe(
+        out,
+        _ObjectFreeze({
+          pluginId: r.pluginId,
+          id: r.id,
+          label: r.label,
+          icon: r.icon,
+          tooltip: r.tooltip,
+          badge: r.badge,
+          align: r.align,
+          priority: r.priority,
+          delegated: _MapHas(delegatedByKey, r.key),
+        })
+      );
     });
     return out;
   }
@@ -5924,16 +6047,17 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   function disposePlugin(pluginId) {
     const toRemove = [];
     _MapForEach(itemsByKey, (rec, key) => {
-      if (rec.pluginId === pluginId) toRemove[toRemove.length] = key;
+      if (rec.pluginId === pluginId) pushSafe(toRemove, key);
     });
     for (let i = 0; i < toRemove.length; i += 1) {
       const key = toRemove[i];
       _MapDelete(itemsByKey, key);
       const del = _MapGet(delegatedByKey, key);
       _MapDelete(delegatedByKey, key);
-      if (del && typeof del.dispose === 'function') {
+      const disposeFn = getOwn(del, 'dispose');
+      if (typeof disposeFn === 'function') {
         try {
-          del.dispose();
+          disposeFn();
         } catch (_e) {}
       }
     }
@@ -6154,6 +6278,15 @@ function defineSafeReadOnlyProp(target, key, value) {
   desc.enumerable = true;
   desc.writable = false;
   desc.configurable = false;
+  _ObjectDefineProperty(target, key, desc);
+}
+
+function defineSafeDataProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.writable = true;
+  desc.configurable = true;
   _ObjectDefineProperty(target, key, desc);
 }
 
@@ -6612,9 +6745,15 @@ function createAddonContextV3({
       assertActive();
       return serviceBus.list(pluginId);
     },
-    call(serviceName, methodName, ...args) {
+    // R3-BLK-01: Avoid `...args` spread (which invokes Array.prototype[Symbol.iterator]) and element assignment setters.
+    call() {
       assertActive();
-      return serviceBus.call(pluginId, serviceName, methodName, ...args);
+      const callArgs = [];
+      defineSafeDataProp(callArgs, 0, pluginId);
+      for (let i = 0; i < arguments.length; i += 1) {
+        defineSafeDataProp(callArgs, i + 1, arguments[i]);
+      }
+      return _ReflectApply(serviceBus.call, undefined, callArgs);
     },
   });
 

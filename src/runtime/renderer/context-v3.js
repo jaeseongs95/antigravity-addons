@@ -36,6 +36,15 @@ function defineSafeReadOnlyProp(target, key, value) {
   _ObjectDefineProperty(target, key, desc);
 }
 
+function defineSafeDataProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.writable = true;
+  desc.configurable = true;
+  _ObjectDefineProperty(target, key, desc);
+}
+
 // NB-01: Module-scoped LIFO stack for v3 overlays so a single Escape closes only the top-most overlay.
 const v3EscapeStack = [];
 let v3OverlaySeq = 0;
@@ -491,9 +500,15 @@ function createAddonContextV3({
       assertActive();
       return serviceBus.list(pluginId);
     },
-    call(serviceName, methodName, ...args) {
+    // R3-BLK-01: Avoid `...args` spread (which invokes Array.prototype[Symbol.iterator]) and element assignment setters.
+    call() {
       assertActive();
-      return serviceBus.call(pluginId, serviceName, methodName, ...args);
+      const callArgs = [];
+      defineSafeDataProp(callArgs, 0, pluginId);
+      for (let i = 0; i < arguments.length; i += 1) {
+        defineSafeDataProp(callArgs, i + 1, arguments[i]);
+      }
+      return _ReflectApply(serviceBus.call, undefined, callArgs);
     },
   });
 

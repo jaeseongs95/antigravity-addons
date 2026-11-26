@@ -331,6 +331,189 @@ test('TC-V30-08: services default-deny ACL, storage TTL + onDidChange, and v2 co
     delete Object.prototype.get;
   }
 
+  // R3-BLK-01..04 & R3-NB-03: Adversarial World 998 prototype-pollution regression suite
+  const victimCtx = await host.mountPlugin({
+    schemaVersion: 3,
+    pluginId: 'r3-victim',
+    displayName: 'R3 Victim',
+    version: '1.0.0',
+    trustLevel: 'trusted',
+    capabilities: ['renderer'],
+    entry: { rendererScript: 'v.js' },
+    permissions: {
+      services: {
+        provide: [
+          { name: 'r3-victim.secret', allowedCallers: ['trusted-partner'] },
+          { name: 'r3-victim.defaultdeny' },
+          { name: 'r3-victim.echo', allowedCallers: ['*'] },
+        ],
+      },
+    },
+  });
+  const partnerCtx = await host.mountPlugin({
+    schemaVersion: 3,
+    pluginId: 'trusted-partner',
+    displayName: 'Trusted Partner',
+    version: '1.0.0',
+    capabilities: ['renderer'],
+    entry: { rendererScript: 'tp.js' },
+  });
+  const evilCtx = await host.mountPlugin({
+    schemaVersion: 3,
+    pluginId: 'r3-evil',
+    displayName: 'R3 Evil',
+    version: '1.0.0',
+    capabilities: ['renderer'],
+    entry: { rendererScript: 'e.js' },
+    permissions: { storage: { maxBytes: 1024 } },
+  });
+
+  // R3-BLK-01a & R3-BLK-01b: Array.prototype['0'] setter & Array.prototype[Symbol.iterator]
+  let stolenCallArg = null;
+  const origArrayIter = Array.prototype[Symbol.iterator];
+  Object.defineProperty(Array.prototype, '0', {
+    configurable: true,
+    set(v) {
+      if (v === 'trusted-partner') {
+        Object.defineProperty(this, 0, { value: '*', writable: true, enumerable: true, configurable: true });
+        return;
+      }
+      if (v === 'SECRET_ARG') {
+        stolenCallArg = v;
+        Object.defineProperty(this, 0, { value: 'TAMPERED_ARG', writable: true, enumerable: true, configurable: true });
+        return;
+      }
+      Object.defineProperty(this, 0, { value: v, writable: true, enumerable: true, configurable: true });
+    },
+  });
+  Array.prototype[Symbol.iterator] = function () {
+    if (this.length > 0 && this[0] === 'SECRET_ARG') {
+      stolenCallArg = this[0];
+      return origArrayIter.call(['TAMPERED_ARG']);
+    }
+    return origArrayIter.call(this);
+  };
+  try {
+    victimCtx.services.provide('r3-victim.secret', { getSecret: () => 'TOP_SECRET_KEY' });
+    victimCtx.services.provide('r3-victim.echo', { echo: (x) => ({ echoed: x }) });
+    assert.throws(
+      () => evilCtx.services.call('r3-victim.secret', 'getSecret'),
+      /ERR_SERVICE_CALLER_FORBIDDEN/,
+      'R3-BLK-01: Array.prototype["0"] setter must NOT widen allowedCallers'
+    );
+    const echoRes = partnerCtx.services.call('r3-victim.echo', 'echo', 'SECRET_ARG');
+    assert.equal(stolenCallArg, null, 'R3-BLK-01: Array.prototype[Symbol.iterator]/0 setter must NOT steal args');
+    assert.equal(echoRes.echoed, 'SECRET_ARG', 'R3-BLK-01: call arguments must NOT be tampered');
+  } finally {
+    delete Array.prototype['0'];
+    Array.prototype[Symbol.iterator] = origArrayIter;
+  }
+
+  // R3-BLK-02: Array.prototype.sort tampering must NOT hijack another plugin's status item onClick
+  let victimStatusClicked = 0;
+  let evilHijackedStatusClick = 0;
+  const victimItem = victimCtx.ui.registerStatusItem({
+    id: 'pay',
+    label: 'Pay',
+    onClick: () => {
+      victimStatusClicked += 1;
+    },
+  });
+  const origArraySort = Array.prototype.sort;
+  Array.prototype.sort = function (cmp) {
+    for (let i = 0; i < this.length; i += 1) {
+      if (this[i] && this[i].pluginId === 'r3-victim') {
+        this[i].onClick = () => {
+          evilHijackedStatusClick += 1;
+        };
+      }
+    }
+    return origArraySort.call(this, cmp);
+  };
+  try {
+    const evilItem = evilCtx.ui.registerStatusItem({ id: 'trigger', label: 'Trigger' });
+    host.kernel.invokeStatusItem('r3-victim', 'pay', {}, 'sdk-test-host-token-0123456789abcdef');
+    assert.equal(evilHijackedStatusClick, 0, 'R3-BLK-02: Array.prototype.sort must NOT hijack victim status item');
+    assert.equal(victimStatusClicked, 1);
+    evilItem.dispose();
+  } finally {
+    Array.prototype.sort = origArraySort;
+    victimItem.dispose();
+  }
+
+  // R3-BLK-03: Object.prototype.allowedCallers / services / then / allowWellKnownHostServices
+  let stolenRawReturn = null;
+  Object.defineProperty(Object.prototype, 'allowedCallers', { configurable: true, writable: true, value: ['*'] });
+  Object.defineProperty(Object.prototype, 'services', {
+    configurable: true,
+    writable: true,
+    value: { provide: [{ name: 'r3-evil.undeclared', allowedCallers: ['*'] }] },
+  });
+  Object.defineProperty(Object.prototype, 'allowWellKnownHostServices', { configurable: true, writable: true, value: true });
+  Object.defineProperty(Object.prototype, 'then', {
+    configurable: true,
+    writable: true,
+    value() {
+      stolenRawReturn = this;
+      return { hijackedFn: () => 'pwned' };
+    },
+  });
+  try {
+    victimCtx.services.provide('r3-victim.defaultdeny', { getSecret: () => ({ secret: 'DEFAULT_DENY_SECRET' }) });
+    assert.throws(
+      () => evilCtx.services.call('r3-victim.defaultdeny', 'getSecret'),
+      /ERR_SERVICE_CALLER_FORBIDDEN/,
+      'R3-BLK-03: Object.prototype.allowedCallers must NOT widen default-deny service'
+    );
+    assert.throws(
+      () => evilCtx.services.provide('r3-evil.undeclared', { ping: () => 1 }),
+      /ERR_SERVICE_NOT_DECLARED/,
+      'R3-BLK-03: Object.prototype.services must NOT bypass v3 declaration enforcement'
+    );
+    const ownRes = victimCtx.services.call('r3-victim.defaultdeny', 'getSecret');
+    assert.equal(stolenRawReturn, null, 'R3-BLK-03: Object.prototype.then must NOT intercept plain return values');
+    assert.equal(ownRes.secret, 'DEFAULT_DENY_SECRET');
+    assert.equal(typeof ownRes.hijackedFn, 'undefined');
+  } finally {
+    delete Object.prototype.allowedCallers;
+    delete Object.prototype.services;
+    delete Object.prototype.allowWellKnownHostServices;
+    delete Object.prototype.then;
+  }
+
+  // R3-BLK-04 & R3-NB-03: RegExp.prototype.exec & Date[Symbol.hasInstance]
+  const { validateServiceName, sanitizeBusPayload } = require('../../src/core/service-bus-policy');
+  const origRegExpExec = RegExp.prototype.exec;
+  const origDateHasInstance = Object.getOwnPropertyDescriptor(Date, Symbol.hasInstance);
+  try {
+    RegExp.prototype.exec = () => ['matched'];
+    assert.equal(
+      validateServiceName('r3-evil', 'r3-evil.BAD NAME WITH SPACES\n\0').ok,
+      false,
+      'R3-BLK-04: RegExp.prototype.exec spoof must NOT bypass SERVICE_NAME_RE'
+    );
+    RegExp.prototype.exec = () => null;
+    assert.equal(
+      validateServiceName('statusbar-provider', 'host.statusbar', { allowWellKnownHostServices: true }).ok,
+      true,
+      'R3-BLK-04: RegExp.prototype.exec=null must NOT DoS host.statusbar'
+    );
+    Object.defineProperty(Date, Symbol.hasInstance, {
+      configurable: true,
+      value() {
+        throw new Error('poisoned-hasInstance');
+      },
+    });
+    assert.deepEqual(sanitizeBusPayload({ ok: 1 }), { ok: 1 }, 'R3-NB-03: Date[Symbol.hasInstance] poison must NOT break sanitizeBusPayload');
+  } finally {
+    RegExp.prototype.exec = origRegExpExec;
+    if (origDateHasInstance) {
+      Object.defineProperty(Date, Symbol.hasInstance, origDateHasInstance);
+    } else {
+      delete Date[Symbol.hasInstance];
+    }
+  }
+
   // v2 plugin mounted on the SAME v3 kernel receives full v2 compat adapter
   const v2Handle = await host.mountPlugin({
     schemaVersion: 2,

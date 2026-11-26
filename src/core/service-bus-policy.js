@@ -11,11 +11,14 @@
  *   and rejecting functions / circular references / excessive nesting depth.
  */
 
-// NEW-BLK-01: Capture JS primordials at module load so shared World 998 prototype tampering cannot bypass policy checks.
+// NEW-BLK-01 / R3-BLK-01..04: Capture JS primordials at module load so shared World 998 prototype tampering cannot bypass policy checks.
+const _Error = Error;
+const _String = String;
 const _ObjectFreeze = Object.freeze;
 const _ObjectKeys = Object.keys;
 const _ObjectCreate = Object.create;
 const _ObjectDefineProperty = Object.defineProperty;
+const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ArrayIsArray = Array.isArray;
 const _NumberIsFinite = Number.isFinite;
 const _Date = Date;
@@ -27,7 +30,8 @@ const _WeakSet = WeakSet;
 const _WeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
 const _WeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
 const _WeakSetDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
-const _RegExpTest = Function.prototype.call.bind(RegExp.prototype.test);
+// R3-BLK-04: Capture RegExp.prototype.exec directly (RegExp.prototype.test delegates dynamically to this.exec).
+const _RegExpExec = Function.prototype.call.bind(RegExp.prototype.exec);
 const _StringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
 
 const WELL_KNOWN_HOST_SERVICES = _ObjectFreeze(['host.statusbar']);
@@ -45,11 +49,31 @@ function defineSafeDataProp(target, key, value) {
   _ObjectDefineProperty(target, key, desc);
 }
 
-function validateServiceName(pluginId, serviceName, { allowWellKnownHostServices = false } = {}) {
+function pushSafe(arr, value) {
+  defineSafeDataProp(arr, arr.length, value);
+}
+
+function getOwn(obj, key) {
+  if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+  return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
+}
+
+function isNativeDate(val) {
+  try {
+    _DateGetTime(val);
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+function validateServiceName(pluginId, serviceName, opts) {
+  // R3-BLK-03: Never read inherited Object.prototype.allowWellKnownHostServices
+  const allowWellKnownHostServices = !!getOwn(opts, 'allowWellKnownHostServices');
   if (typeof pluginId !== 'string' || !pluginId) {
     return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
   }
-  if (typeof serviceName !== 'string' || !_RegExpTest(SERVICE_NAME_RE, serviceName)) {
+  if (typeof serviceName !== 'string' || _RegExpExec(SERVICE_NAME_RE, serviceName) === null) {
     return { ok: false, reason: 'ERR_INVALID_SERVICE_NAME' };
   }
   if (_StringStartsWith(serviceName, `${pluginId}.`)) {
@@ -68,7 +92,9 @@ function isCallerAllowed(providerPluginId, callerPluginId, allowedCallers) {
     return false; // Default-deny
   }
   for (let i = 0; i < allowedCallers.length; i += 1) {
-    if (allowedCallers[i] === '*' || allowedCallers[i] === callerPluginId) {
+    if (!_ObjectHasOwn(allowedCallers, i)) continue;
+    const entry = allowedCallers[i];
+    if (entry === '*' || entry === callerPluginId) {
       return true;
     }
   }
@@ -80,7 +106,7 @@ function sanitizeBusPayload(value, maxDepth = MAX_PAYLOAD_DEPTH) {
 
   function clone(val, depth) {
     if (depth > maxDepth) {
-      throw new Error('ERR_BUS_PAYLOAD_TOO_DEEP');
+      throw new _Error('ERR_BUS_PAYLOAD_TOO_DEEP');
     }
     if (val === null || val === undefined || typeof val === 'boolean' || typeof val === 'string') {
       return val;
@@ -89,26 +115,28 @@ function sanitizeBusPayload(value, maxDepth = MAX_PAYLOAD_DEPTH) {
       return _NumberIsFinite(val) ? val : null;
     }
     if (typeof val === 'function' || typeof val === 'symbol' || typeof val === 'bigint') {
-      throw new Error('ERR_BUS_PAYLOAD_NON_SERIALIZABLE');
+      throw new _Error('ERR_BUS_PAYLOAD_NON_SERIALIZABLE');
     }
     if (typeof val === 'object') {
       if (_WeakSetHas(seen, val)) {
-        throw new Error('ERR_BUS_PAYLOAD_CIRCULAR');
+        throw new _Error('ERR_BUS_PAYLOAD_CIRCULAR');
       }
       // Reject DOM nodes or host objects cleanly
       if (typeof val.nodeType === 'number' && typeof val.nodeName === 'string') {
-        throw new Error('ERR_BUS_PAYLOAD_DOM_NODE_FORBIDDEN');
+        throw new _Error('ERR_BUS_PAYLOAD_DOM_NODE_FORBIDDEN');
       }
       _WeakSetAdd(seen, val);
       try {
         if (_ArrayIsArray(val)) {
           const arr = [];
           for (let i = 0; i < val.length; i += 1) {
-            defineSafeDataProp(arr, i, clone(val[i], depth + 1));
+            const elem = _ObjectHasOwn(val, i) ? val[i] : undefined;
+            defineSafeDataProp(arr, i, clone(elem, depth + 1));
           }
           return arr;
         }
-        if (val instanceof _Date) {
+        // R3-NB-03: Use internal [[DateValue]] brand check via captured Date.prototype.getTime (immune to Date[Symbol.hasInstance])
+        if (isNativeDate(val)) {
           return new _Date(_DateGetTime(val));
         }
         const out = {};
@@ -143,46 +171,54 @@ function validateServicePermissions(pluginId, servicesPerm) {
   const provide = [];
   const seenProvide = new _Set();
 
-  if (_ArrayIsArray(servicesPerm.provide)) {
-    for (let i = 0; i < servicesPerm.provide.length; i += 1) {
-      const entry = servicesPerm.provide[i];
+  const rawProvide = getOwn(servicesPerm, 'provide');
+  if (_ArrayIsArray(rawProvide)) {
+    for (let i = 0; i < rawProvide.length; i += 1) {
+      const entry = _ObjectHasOwn(rawProvide, i) ? rawProvide[i] : undefined;
       if (!entry || typeof entry !== 'object') {
-        errors[errors.length] = `permissions.services.provide[${i}] must be an object`;
+        pushSafe(errors, `permissions.services.provide[${i}] must be an object`);
         continue;
       }
-      const check = validateServiceName(pluginId, entry.name, { allowWellKnownHostServices: true });
+      const entryName = getOwn(entry, 'name');
+      const nameOpts = _ObjectCreate(null);
+      nameOpts.allowWellKnownHostServices = true;
+      const check = validateServiceName(pluginId, entryName, nameOpts);
       if (!check.ok) {
-        errors[errors.length] = `permissions.services.provide[${i}].name "${String(entry.name)}": ${check.reason}`;
+        pushSafe(errors, `permissions.services.provide[${i}].name "${_String(entryName)}": ${check.reason}`);
         continue;
       }
-      if (_SetHas(seenProvide, entry.name)) {
-        errors[errors.length] = `Duplicate provided service "${entry.name}"`;
+      if (_SetHas(seenProvide, entryName)) {
+        pushSafe(errors, `Duplicate provided service "${entryName}"`);
         continue;
       }
-      _SetAdd(seenProvide, entry.name);
+      _SetAdd(seenProvide, entryName);
       const callersCopy = [];
-      if (_ArrayIsArray(entry.allowedCallers)) {
-        for (let j = 0; j < entry.allowedCallers.length; j += 1) {
-          callersCopy[callersCopy.length] = entry.allowedCallers[j];
+      const rawCallers = getOwn(entry, 'allowedCallers');
+      if (_ArrayIsArray(rawCallers)) {
+        for (let j = 0; j < rawCallers.length; j += 1) {
+          if (_ObjectHasOwn(rawCallers, j)) {
+            pushSafe(callersCopy, rawCallers[j]);
+          }
         }
       }
-      provide[provide.length] = {
-        name: entry.name,
+      pushSafe(provide, {
+        name: entryName,
         allowedCallers: callersCopy,
-      };
+      });
     }
   }
 
   const consume = [];
   const seenConsume = new _Set();
-  if (_ArrayIsArray(servicesPerm.consume)) {
-    for (let i = 0; i < servicesPerm.consume.length; i += 1) {
-      const name = servicesPerm.consume[i];
-      if (typeof name !== 'string' || !_RegExpTest(SERVICE_NAME_RE, name)) {
-        errors[errors.length] = `Invalid consumed service name "${String(name)}"`;
+  const rawConsume = getOwn(servicesPerm, 'consume');
+  if (_ArrayIsArray(rawConsume)) {
+    for (let i = 0; i < rawConsume.length; i += 1) {
+      const name = _ObjectHasOwn(rawConsume, i) ? rawConsume[i] : undefined;
+      if (typeof name !== 'string' || _RegExpExec(SERVICE_NAME_RE, name) === null) {
+        pushSafe(errors, `Invalid consumed service name "${_String(name)}"`);
       } else if (!_SetHas(seenConsume, name)) {
         _SetAdd(seenConsume, name);
-        consume[consume.length] = name;
+        pushSafe(consume, name);
       }
     }
   }

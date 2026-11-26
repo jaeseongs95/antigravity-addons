@@ -15,11 +15,15 @@ const {
   sanitizeBusPayload,
 } = require('../../core/service-bus-policy');
 
-// NEW-BLK-01: Capture JS primordials at module load so shared World 998 prototype tampering cannot hijack host.statusbar or ACLs.
+// NEW-BLK-01 / R3-BLK-01..03: Capture JS primordials at module load so shared World 998 prototype tampering cannot hijack host.statusbar, ACLs, or bus payloads.
 const _Error = Error;
+const _String = String;
+const _ObjectCreate = Object.create;
+const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
 const _ObjectKeys = Object.keys;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+const _ObjectGetPrototypeOf = Object.getPrototypeOf;
 const _ArrayIsArray = Array.isArray;
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
@@ -32,18 +36,40 @@ const _SetHas = Function.prototype.call.bind(Set.prototype.has);
 const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
 const _StringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
 const _ReflectApply = Reflect.apply;
+const _PromisePrototype = Promise.prototype;
+const _PromiseThen = Function.prototype.call.bind(Promise.prototype.then);
+
+function defineSafeDataProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.configurable = true;
+  desc.writable = true;
+  _ObjectDefineProperty(target, key, desc);
+}
+
+function pushSafe(arr, value) {
+  defineSafeDataProp(arr, arr.length, value);
+}
+
+function getOwn(obj, key) {
+  if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+  return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
+}
 
 function copyArrayPlain(src) {
   const out = [];
   if (!_ArrayIsArray(src)) return out;
   for (let i = 0; i < src.length; i += 1) {
-    out[out.length] = src[i];
+    if (_ObjectHasOwn(src, i)) {
+      pushSafe(out, src[i]);
+    }
   }
   return out;
 }
 
 function createServiceBus({ onServiceRegistryChange = null } = {}) {
-  const services = new _Map(); // serviceName -> { providerPluginId, name, allowedCallers, impl }
+  const services = new _Map(); // serviceName -> null-proto { providerPluginId, name, allowedCallers, impl }
 
   function notifyChange(serviceName, action) {
     if (typeof onServiceRegistryChange === 'function') {
@@ -53,21 +79,20 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     }
   }
 
-  function provide(pluginMeta, serviceName, impl, opts = {}) {
-    const pluginId = pluginMeta && pluginMeta.pluginId;
-    const trustLevel = (pluginMeta && pluginMeta.trustLevel) || 'restricted';
-    const isV3 = !!(pluginMeta && (pluginMeta.sourceSchemaVersion === 3 || pluginMeta.apiVersion === 3));
-    const declaredProvide =
-      pluginMeta &&
-      pluginMeta.permissions &&
-      pluginMeta.permissions.services &&
-      _ArrayIsArray(pluginMeta.permissions.services.provide)
-        ? pluginMeta.permissions.services.provide
-        : [];
+  function provide(pluginMeta, serviceName, impl, opts) {
+    // R3-BLK-03: Read every metadata/permission/opts property via own-property lookup only.
+    const pluginId = getOwn(pluginMeta, 'pluginId');
+    const trustLevel = getOwn(pluginMeta, 'trustLevel') || 'restricted';
+    const isV3 = !!(getOwn(pluginMeta, 'sourceSchemaVersion') === 3 || getOwn(pluginMeta, 'apiVersion') === 3);
+    const perms = getOwn(pluginMeta, 'permissions');
+    const svcPerms = getOwn(perms, 'services');
+    const rawProvide = getOwn(svcPerms, 'provide');
+    const declaredProvide = _ArrayIsArray(rawProvide) ? rawProvide : [];
     let declaredEntry = null;
     for (let i = 0; i < declaredProvide.length; i += 1) {
+      if (!_ObjectHasOwn(declaredProvide, i)) continue;
       const p = declaredProvide[i];
-      if (p && p.name === serviceName) {
+      if (p && typeof p === 'object' && getOwn(p, 'name') === serviceName) {
         declaredEntry = p;
         break;
       }
@@ -81,7 +106,9 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     }
     const allowWellKnown = isHostWellKnown && trustLevel === 'trusted' && !!declaredEntry;
 
-    const nameCheck = validateServiceName(pluginId, serviceName, { allowWellKnownHostServices: allowWellKnown });
+    const nameOpts = _ObjectCreate(null);
+    nameOpts.allowWellKnownHostServices = allowWellKnown;
+    const nameCheck = validateServiceName(pluginId, serviceName, nameOpts);
     if (!nameCheck.ok) {
       throw new _Error(`${nameCheck.reason}:${serviceName}`);
     }
@@ -97,11 +124,12 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     }
 
     // Runtime opts.allowedCallers may only narrow (never widen) manifest-declared allowedCallers
-    const manifestCallers =
-      declaredEntry && _ArrayIsArray(declaredEntry.allowedCallers) ? copyArrayPlain(declaredEntry.allowedCallers) : [];
+    const rawManifestCallers = getOwn(declaredEntry, 'allowedCallers');
+    const manifestCallers = _ArrayIsArray(rawManifestCallers) ? copyArrayPlain(rawManifestCallers) : [];
+    const rawOptCallers = getOwn(opts, 'allowedCallers');
     let allowedCallers;
     if (declaredEntry) {
-      if (_ArrayIsArray(opts && opts.allowedCallers)) {
+      if (_ArrayIsArray(rawOptCallers)) {
         let hasWildcard = false;
         const allowedSet = new _Set();
         for (let i = 0; i < manifestCallers.length; i += 1) {
@@ -109,27 +137,28 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
           _SetAdd(allowedSet, manifestCallers[i]);
         }
         if (hasWildcard) {
-          allowedCallers = copyArrayPlain(opts.allowedCallers);
+          allowedCallers = copyArrayPlain(rawOptCallers);
         } else {
           allowedCallers = [];
-          for (let i = 0; i < opts.allowedCallers.length; i += 1) {
-            const c = opts.allowedCallers[i];
-            if (_SetHas(allowedSet, c)) allowedCallers[allowedCallers.length] = c;
+          for (let i = 0; i < rawOptCallers.length; i += 1) {
+            if (!_ObjectHasOwn(rawOptCallers, i)) continue;
+            const c = rawOptCallers[i];
+            if (_SetHas(allowedSet, c)) pushSafe(allowedCallers, c);
           }
         }
       } else {
         allowedCallers = manifestCallers;
       }
     } else {
-      allowedCallers = _ArrayIsArray(opts && opts.allowedCallers) ? copyArrayPlain(opts.allowedCallers) : [];
+      allowedCallers = _ArrayIsArray(rawOptCallers) ? copyArrayPlain(rawOptCallers) : [];
     }
 
-    _MapSet(services, serviceName, {
-      providerPluginId: pluginId,
-      name: serviceName,
-      allowedCallers,
-      impl,
-    });
+    const record = _ObjectCreate(null);
+    record.providerPluginId = pluginId;
+    record.name = serviceName;
+    record.allowedCallers = _ObjectFreeze(allowedCallers);
+    record.impl = impl;
+    _MapSet(services, serviceName, _ObjectFreeze(record));
     notifyChange(serviceName, 'provide');
 
     return _ObjectFreeze({
@@ -158,14 +187,17 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
         const methods = [];
         for (let i = 0; i < keys.length; i += 1) {
           if (typeof rec.impl[keys[i]] === 'function') {
-            methods[methods.length] = keys[i];
+            pushSafe(methods, keys[i]);
           }
         }
-        out[out.length] = _ObjectFreeze({
-          name: rec.name,
-          providerPluginId: rec.providerPluginId,
-          methods: _ObjectFreeze(methods),
-        });
+        pushSafe(
+          out,
+          _ObjectFreeze({
+            name: rec.name,
+            providerPluginId: rec.providerPluginId,
+            methods: _ObjectFreeze(methods),
+          })
+        );
       }
     });
     return _ObjectFreeze(out);
@@ -180,19 +212,22 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
       throw new _Error(`ERR_SERVICE_CALLER_FORBIDDEN:${callerPluginId}:${serviceName}`);
     }
     if (typeof methodName !== 'string' || !methodName || methodName === '__proto__' || methodName === 'constructor') {
-      throw new _Error(`ERR_SERVICE_METHOD_INVALID:${String(methodName)}`);
+      throw new _Error(`ERR_SERVICE_METHOD_INVALID:${_String(methodName)}`);
     }
     const fn = _ObjectHasOwn(rec.impl, methodName) ? rec.impl[methodName] : null;
     if (typeof fn !== 'function') {
       throw new _Error(`ERR_SERVICE_METHOD_NOT_FOUND:${serviceName}.${methodName}`);
     }
+    // R3-BLK-01: Populate cleanArgs via defineSafeDataProp so Array.prototype[0] setters cannot steal/tamper arguments.
     const cleanArgs = [];
     for (let i = 3; i < arguments.length; i += 1) {
-      cleanArgs[cleanArgs.length] = sanitizeBusPayload(arguments[i]);
+      pushSafe(cleanArgs, sanitizeBusPayload(arguments[i]));
     }
     const ret = _ReflectApply(fn, undefined, cleanArgs);
-    if (ret && typeof ret.then === 'function') {
-      return ret.then((resolved) => sanitizeBusPayload(resolved));
+    // R3-BLK-03: Only treat genuine native Promises as async via captured Promise.prototype.then;
+    // never read inherited Object.prototype.then on plain return values.
+    if (ret !== null && typeof ret === 'object' && _ObjectGetPrototypeOf(ret) === _PromisePrototype) {
+      return _PromiseThen(ret, (resolved) => sanitizeBusPayload(resolved));
     }
     return sanitizeBusPayload(ret);
   }
@@ -205,7 +240,7 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     const toRemove = [];
     _MapForEach(services, (rec, name) => {
       if (rec.providerPluginId === pluginId) {
-        toRemove[toRemove.length] = name;
+        pushSafe(toRemove, name);
       }
     });
     for (let i = 0; i < toRemove.length; i += 1) {

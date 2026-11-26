@@ -53,8 +53,16 @@ const FALLBACK_BAR_CSS = `
 }
 `;
 
-// NEW-BLK-01: Capture JS primordials at module load so World 998 Map/Object prototype tampering cannot hijack statusbar delegation.
+// NEW-BLK-01 / R3-BLK-01..02 / R3-NB-03: Capture JS primordials at module load so World 998 prototype tampering cannot hijack statusbar items or delegation.
+const _Error = Error;
+const _String = String;
+const _Number = Number;
+const _NumberIsFinite = Number.isFinite;
+const _StringTrim = Function.prototype.call.bind(String.prototype.trim);
+const _ObjectCreate = Object.create;
+const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
+const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
 const _MapSet = Function.prototype.call.bind(Map.prototype.set);
@@ -62,6 +70,24 @@ const _MapHas = Function.prototype.call.bind(Map.prototype.has);
 const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
 const _MapClear = Function.prototype.call.bind(Map.prototype.clear);
 const _MapForEach = Function.prototype.call.bind(Map.prototype.forEach);
+
+function defineSafeDataProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.configurable = true;
+  desc.writable = true;
+  _ObjectDefineProperty(target, key, desc);
+}
+
+function pushSafe(arr, value) {
+  defineSafeDataProp(arr, arr.length, value);
+}
+
+function getOwn(obj, key) {
+  if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+  return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
+}
 
 function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
   const itemsByKey = new _Map(); // `${pluginId}:${itemId}` -> itemRecord
@@ -143,12 +169,21 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
 
     const sorted = [];
     _MapForEach(itemsByKey, (rec) => {
-      sorted[sorted.length] = rec;
+      pushSafe(sorted, rec);
     });
-    sorted.sort((a, b) => {
-      if (a.priority !== b.priority) return a.priority - b.priority;
-      return a.key < b.key ? -1 : 1;
-    });
+    // R3-BLK-02: Local insertion sort using defineSafeDataProp — never invokes Array.prototype.sort or Array.prototype[idx] setters.
+    for (let i = 1; i < sorted.length; i += 1) {
+      const cur = sorted[i];
+      let j = i - 1;
+      while (j >= 0) {
+        const prev = sorted[j];
+        const cmp = prev.priority !== cur.priority ? prev.priority - cur.priority : prev.key < cur.key ? -1 : 1;
+        if (cmp <= 0) break;
+        defineSafeDataProp(sorted, j + 1, prev);
+        j -= 1;
+      }
+      defineSafeDataProp(sorted, j + 1, cur);
+    }
     if (sorted.length === 0) {
       if (fallbackBarEl) {
         while (fallbackBarEl.firstChild) fallbackBarEl.removeChild(fallbackBarEl.firstChild);
@@ -225,24 +260,32 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     renderFallbackItems();
   }
 
-  function registerStatusItem(pluginId, spec = {}) {
-    if (!spec || typeof spec !== 'object' || typeof spec.id !== 'string' || !spec.id.trim()) {
-      throw new Error('ERR_INVALID_STATUS_ITEM_ID');
+  function registerStatusItem(pluginId, spec) {
+    const rawId = getOwn(spec, 'id');
+    if (!spec || typeof spec !== 'object' || typeof rawId !== 'string' || !_StringTrim(rawId)) {
+      throw new _Error('ERR_INVALID_STATUS_ITEM_ID');
     }
-    const id = spec.id.trim();
+    const id = _StringTrim(rawId);
     const key = `${pluginId}:${id}`;
-    const record = {
-      key,
-      pluginId,
-      id,
-      label: String(spec.label || id),
-      icon: typeof spec.icon === 'string' ? spec.icon : '',
-      tooltip: typeof spec.tooltip === 'string' ? spec.tooltip : '',
-      badge: spec.badge !== undefined && spec.badge !== null ? String(spec.badge) : '',
-      align: spec.align === 'left' ? 'left' : 'right',
-      priority: Number.isFinite(Number(spec.priority)) ? Number(spec.priority) : 100,
-      onClick: typeof spec.onClick === 'function' ? spec.onClick : null,
-    };
+    const rawLabel = getOwn(spec, 'label');
+    const rawIcon = getOwn(spec, 'icon');
+    const rawTooltip = getOwn(spec, 'tooltip');
+    const rawBadge = getOwn(spec, 'badge');
+    const rawAlign = getOwn(spec, 'align');
+    const rawPriority = getOwn(spec, 'priority');
+    const rawOnClick = getOwn(spec, 'onClick');
+    const parsedPriority = _Number(rawPriority);
+    const record = _ObjectCreate(null);
+    record.key = key;
+    record.pluginId = pluginId;
+    record.id = id;
+    record.label = _String(rawLabel || id);
+    record.icon = typeof rawIcon === 'string' ? rawIcon : '';
+    record.tooltip = typeof rawTooltip === 'string' ? rawTooltip : '';
+    record.badge = rawBadge !== undefined && rawBadge !== null ? _String(rawBadge) : '';
+    record.align = rawAlign === 'left' ? 'left' : 'right';
+    record.priority = rawPriority !== undefined && _NumberIsFinite(parsedPriority) ? parsedPriority : 100;
+    record.onClick = typeof rawOnClick === 'function' ? rawOnClick : null;
     _MapSet(itemsByKey, key, record);
 
     const svc = getDelegatedService();
@@ -271,14 +314,19 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
 
     return _ObjectFreeze({
       id,
-      update(patch = {}) {
+      update(patch) {
         if (!_MapHas(itemsByKey, key) || !patch || typeof patch !== 'object') return;
-        if (patch.label !== undefined) record.label = String(patch.label);
-        if (patch.icon !== undefined) record.icon = String(patch.icon || '');
-        if (patch.tooltip !== undefined) record.tooltip = String(patch.tooltip || '');
-        if (patch.badge !== undefined) record.badge = patch.badge === null ? '' : String(patch.badge);
-        if (patch.priority !== undefined && Number.isFinite(Number(patch.priority))) {
-          record.priority = Number(patch.priority);
+        const pLabel = getOwn(patch, 'label');
+        const pIcon = getOwn(patch, 'icon');
+        const pTooltip = getOwn(patch, 'tooltip');
+        const pBadge = getOwn(patch, 'badge');
+        const pPriority = getOwn(patch, 'priority');
+        if (pLabel !== undefined) record.label = _String(pLabel);
+        if (pIcon !== undefined) record.icon = _String(pIcon || '');
+        if (pTooltip !== undefined) record.tooltip = _String(pTooltip || '');
+        if (pBadge !== undefined) record.badge = pBadge === null ? '' : _String(pBadge);
+        if (pPriority !== undefined && _NumberIsFinite(_Number(pPriority))) {
+          record.priority = _Number(pPriority);
         }
         const activeSvc = getDelegatedService();
         if (activeSvc && typeof activeSvc.updateItem === 'function') {
@@ -300,9 +348,10 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
         _MapDelete(itemsByKey, key);
         const del = _MapGet(delegatedByKey, key);
         _MapDelete(delegatedByKey, key);
-        if (del && typeof del.dispose === 'function') {
+        const disposeFn = getOwn(del, 'dispose');
+        if (typeof disposeFn === 'function') {
           try {
-            del.dispose();
+            disposeFn();
           } catch (_e) {}
         } else {
           const activeSvc = getDelegatedService();
@@ -320,17 +369,20 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   function listStatusItems() {
     const out = [];
     _MapForEach(itemsByKey, (r) => {
-      out[out.length] = _ObjectFreeze({
-        pluginId: r.pluginId,
-        id: r.id,
-        label: r.label,
-        icon: r.icon,
-        tooltip: r.tooltip,
-        badge: r.badge,
-        align: r.align,
-        priority: r.priority,
-        delegated: _MapHas(delegatedByKey, r.key),
-      });
+      pushSafe(
+        out,
+        _ObjectFreeze({
+          pluginId: r.pluginId,
+          id: r.id,
+          label: r.label,
+          icon: r.icon,
+          tooltip: r.tooltip,
+          badge: r.badge,
+          align: r.align,
+          priority: r.priority,
+          delegated: _MapHas(delegatedByKey, r.key),
+        })
+      );
     });
     return out;
   }
@@ -347,16 +399,17 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   function disposePlugin(pluginId) {
     const toRemove = [];
     _MapForEach(itemsByKey, (rec, key) => {
-      if (rec.pluginId === pluginId) toRemove[toRemove.length] = key;
+      if (rec.pluginId === pluginId) pushSafe(toRemove, key);
     });
     for (let i = 0; i < toRemove.length; i += 1) {
       const key = toRemove[i];
       _MapDelete(itemsByKey, key);
       const del = _MapGet(delegatedByKey, key);
       _MapDelete(delegatedByKey, key);
-      if (del && typeof del.dispose === 'function') {
+      const disposeFn = getOwn(del, 'dispose');
+      if (typeof disposeFn === 'function') {
         try {
-          del.dispose();
+          disposeFn();
         } catch (_e) {}
       }
     }

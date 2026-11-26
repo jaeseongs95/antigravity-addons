@@ -164,6 +164,12 @@ test('TC-V30-10: Remote Web host bridge netFetch allows httpsHosts via GM_xmlhtt
   assert.equal(tooLarge.ok, false);
   assert.equal(tooLarge.reason, 'ERR_NET_RESPONSE_TOO_LARGE');
 
+  // NEW-NB-02 / R3-NB-02: Multi-byte UTF-8 response (500 UTF-16 code units = 1500 UTF-8 bytes) MUST trip 1024-byte cap
+  mockResp = { status: 200, statusText: 'OK', responseText: '한'.repeat(500) };
+  const tooLargeUtf8 = await bridge.port.netFetch('rw-addon', 'https://api.example.com/v1/utf8', { maxResponseBytes: 1024 });
+  assert.equal(tooLargeUtf8.ok, false);
+  assert.equal(tooLargeUtf8.reason, 'ERR_NET_RESPONSE_TOO_LARGE');
+
   const loopDenied = await bridge.port.netFetch('rw-addon', 'http://127.0.0.1:11434/api/tags');
   assert.equal(loopDenied.ok, false);
   assert.equal(loopDenied.reason, 'ERR_NET_LOOPBACK_NOT_SUPPORTED');
@@ -278,6 +284,53 @@ test('TC-V30-12: 1-Click Hub Safari routing guard & curated all-in-one closed Sh
     assert.equal(collected.addons[0].pluginMeta.apiVersion, 3);
     assert.deepEqual(collected.addons[0].pluginMeta.permissions.net.httpsHosts, ['api.example.com']);
     assert.deepEqual(collected.addons[0].pluginMeta.permissions.net.localLoopback, []);
+
+    // NEW-NB-01 / R3-NB-02: Electron addon store & collectExecutableAddons forward profile.forbiddenNetHosts
+    const { createElectronAddonStorePort } = require('../../src/adapters/electron/electron-addon-store-port');
+    const { collectExecutableAddons } = require('../../src/adapters/electron/host-loader-builder');
+    const { ANTIGRAVITY_HOST_PROFILE } = require('../../src/profiles/antigravity');
+    fs.mkdirSync(path.join(pluginsRoot, 'v3-forbidden-net'), { recursive: true });
+    fs.writeFileSync(path.join(pluginsRoot, 'v3-forbidden-net', 'index.js'), 'addonHost.ui.showToast("no");', 'utf8');
+    const forbiddenManifestObj = {
+      schemaVersion: 3,
+      pluginId: 'v3-forbidden-net',
+      displayName: 'Forbidden Net Host',
+      version: '1.0.0',
+      capabilities: ['renderer'],
+      entry: { rendererScript: 'index.js' },
+      permissions: { net: { httpsHosts: ['accounts.google.com'] } },
+    };
+    fs.writeFileSync(path.join(addonsDir, 'v3-forbidden-net.json'), JSON.stringify(forbiddenManifestObj), 'utf8');
+    const storeCtx = {
+      activeProfile: ANTIGRAVITY_HOST_PROFILE,
+      paths: {
+        ADDONS_DIR: addonsDir,
+        PLUGINS_ROOT_DIR: pluginsRoot,
+      },
+    };
+    const storePort = createElectronAddonStorePort();
+    const valRes = storePort.validateManifest(storeCtx, forbiddenManifestObj, { checkFilesExist: true });
+    assert.equal(valRes.ok, false, 'NEW-NB-01: storePort.validateManifest must reject profile-forbidden net host');
+    const planRes = storePort.planAddons(storeCtx);
+    assert.ok(
+      planRes.rejected.some((r) => r.pluginId === 'v3-forbidden-net'),
+      'NEW-NB-01: storePort.planAddons must reject profile-forbidden net host'
+    );
+    const execRes = collectExecutableAddons(storeCtx.paths, {
+      hostProfileId: ANTIGRAVITY_HOST_PROFILE.id,
+      compatibleHostProfiles: ANTIGRAVITY_HOST_PROFILE.compatibleHostProfiles,
+      supportedCapabilities: ANTIGRAVITY_HOST_PROFILE.supportedCapabilities,
+      forbiddenNetHosts: ANTIGRAVITY_HOST_PROFILE.forbiddenNetHosts,
+    });
+    assert.equal(
+      (execRes.active || []).some((a) => a.pluginId === 'v3-forbidden-net'),
+      false,
+      'NEW-NB-01: collectExecutableAddons must exclude profile-forbidden net host'
+    );
+    assert.ok(
+      (execRes.rejected || []).some((r) => r.pluginId === 'v3-forbidden-net'),
+      'NEW-NB-01: collectExecutableAddons must record forbidden net host in rejected'
+    );
   } finally {
     fs.rmSync(tmpPack, { recursive: true, force: true });
   }
