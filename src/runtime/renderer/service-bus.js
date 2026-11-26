@@ -76,6 +76,20 @@ function pinSafePromiseConstructor(p) {
   throw new _Error('ERR_SERVICE_PROMISE_UNSAFE');
 }
 
+function shadowThenableOnResolvedValue(val) {
+  // R5-BLK-01: Shadow non-enumerable own `then: undefined` on sanitized objects/arrays/Dates so ECMA-262
+  // Promise Resolve Functions & caller `await` never walk `Object.prototype.then`.
+  if (val !== null && typeof val === 'object' && !_ObjectHasOwn(val, 'then')) {
+    const desc = _ObjectCreate(null);
+    desc.value = undefined;
+    desc.writable = true;
+    desc.configurable = true;
+    desc.enumerable = false;
+    _ObjectDefineProperty(val, 'then', desc);
+  }
+  return val;
+}
+
 function hardenReturnedPromise(p) {
   pinSafePromiseConstructor(p);
   const thenDesc = _ObjectCreate(null);
@@ -86,6 +100,60 @@ function hardenReturnedPromise(p) {
   thenDesc.configurable = true;
   thenDesc.enumerable = false;
   _ObjectDefineProperty(p, 'then', thenDesc);
+
+  // R5-BLK-02: Pin own non-enumerable `catch` and `finally` so poisoned Promise.prototype.catch/finally cannot hijack chains.
+  const catchDesc = _ObjectCreate(null);
+  catchDesc.value = function safeCatch(onRejected) {
+    return hardenReturnedPromise(_PromiseThen(p, undefined, onRejected));
+  };
+  catchDesc.writable = true;
+  catchDesc.configurable = true;
+  catchDesc.enumerable = false;
+  _ObjectDefineProperty(p, 'catch', catchDesc);
+
+  const finallyDesc = _ObjectCreate(null);
+  finallyDesc.value = function safeFinally(onFinally) {
+    if (typeof onFinally !== 'function') {
+      return hardenReturnedPromise(_PromiseThen(p, onFinally, onFinally));
+    }
+    const settled = new _Promise((resolve, reject) => {
+      _PromiseThen(
+        p,
+        (val) => {
+          try {
+            const finRet = onFinally();
+            if (finRet !== null && typeof finRet === 'object' && _ObjectGetPrototypeOf(finRet) === _PromisePrototype) {
+              pinSafePromiseConstructor(finRet);
+              _PromiseThen(finRet, () => resolve(shadowThenableOnResolvedValue(val)), reject);
+            } else {
+              resolve(shadowThenableOnResolvedValue(val));
+            }
+          } catch (err) {
+            reject(err);
+          }
+        },
+        (reason) => {
+          try {
+            const finRet = onFinally();
+            if (finRet !== null && typeof finRet === 'object' && _ObjectGetPrototypeOf(finRet) === _PromisePrototype) {
+              pinSafePromiseConstructor(finRet);
+              _PromiseThen(finRet, () => reject(reason), reject);
+            } else {
+              reject(reason);
+            }
+          } catch (err) {
+            reject(err);
+          }
+        }
+      );
+    });
+    return hardenReturnedPromise(settled);
+  };
+  finallyDesc.writable = true;
+  finallyDesc.configurable = true;
+  finallyDesc.enumerable = false;
+  _ObjectDefineProperty(p, 'finally', finallyDesc);
+
   return p;
 }
 
@@ -284,7 +352,7 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
           ret,
           (resolved) => {
             try {
-              resolve(sanitizeBusPayload(resolved));
+              resolve(shadowThenableOnResolvedValue(sanitizeBusPayload(resolved)));
             } catch (err) {
               reject(err);
             }

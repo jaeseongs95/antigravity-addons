@@ -395,9 +395,9 @@ function createAddonContextV3({
   const meta = _ObjectFreeze({
     pluginId,
     displayName,
-    version: pluginMeta.version || '0.0.0',
+    version: getOwn(pluginMeta, 'version') || '0.0.0',
     trustLevel: effectiveTrustLevel,
-    sourceSchemaVersion: pluginMeta.sourceSchemaVersion || 3,
+    sourceSchemaVersion: getOwn(pluginMeta, 'sourceSchemaVersion') || 3,
   });
 
   // ISP + SOLID #0: Expose ONLY abstract capabilities and surface — NEVER raw hostProfileId

@@ -529,8 +529,13 @@ test('TC-V30-08: services default-deny ACL, storage TTL + onDidChange, and v2 co
       },
     },
   });
+  const preResolvedArrayPromise = Promise.resolve(['ARR-SECRET-1']);
+  const preResolvedDatePromise = Promise.resolve(new Date('2026-01-01T00:00:00.000Z'));
   asyncVaultCtx.services.provide('r4-async-victim.vault', {
     getSecret: async () => ({ apiKey: 'SK-LIVE-9999-SECRET' }),
+    getNullProtoSecret: () => Promise.resolve(Object.assign(Object.create(null), { apiKey: 'SK-NULL-PROTO-SECRET' })),
+    getArraySecret: () => preResolvedArrayPromise,
+    getDateSecret: () => preResolvedDatePromise,
     getFrozenSecret: () => Object.freeze(Promise.resolve({ apiKey: 'FROZEN-SECRET' })),
   });
 
@@ -607,6 +612,69 @@ test('TC-V30-08: services default-deny ACL, storage TTL + onDidChange, and v2 co
     if (origSpeciesDesc) Object.defineProperty(Promise, Symbol.species, origSpeciesDesc);
     if (origProtoCtorDesc) Object.defineProperty(Promise.prototype, 'constructor', origProtoCtorDesc);
     Promise.prototype.then = origProtoThen;
+  }
+
+  // R5-BLK-01 & R5-BLK-02: Async Object.prototype.then & Promise.prototype.catch/finally attacks
+  let stolenViaObjProtoThen = null;
+  let stolenViaCatchOrFinally = null;
+  let finallyRan = 0;
+  const origProtoCatch = Promise.prototype.catch;
+  const origProtoFinally = Promise.prototype.finally;
+  Object.defineProperty(Object.prototype, 'then', {
+    configurable: true,
+    writable: true,
+    value(resolve) {
+      stolenViaObjProtoThen = this;
+      const forged = Object.create(null);
+      forged.apiKey = 'FORGED_VIA_OBJ_PROTO_THEN';
+      forged.evilFn = () => 'pwned';
+      resolve(forged);
+    },
+  });
+  Promise.prototype.catch = function () {
+    this.then((v) => {
+      stolenViaCatchOrFinally = v;
+    });
+    return OrigPromise.resolve({ apiKey: 'FORGED_VIA_CATCH' });
+  };
+  Promise.prototype.finally = function () {
+    this.then((v) => {
+      stolenViaCatchOrFinally = v;
+    });
+    return OrigPromise.resolve({ apiKey: 'FORGED_VIA_FINALLY' });
+  };
+  try {
+    const r5Obj = await partnerCtx.services.call('r4-async-victim.vault', 'getNullProtoSecret');
+    assert.equal(stolenViaObjProtoThen, null, 'R5-BLK-01: Object.prototype.then must NOT exfiltrate async object payload');
+    assert.equal(r5Obj.apiKey, 'SK-NULL-PROTO-SECRET');
+    assert.equal(typeof r5Obj.evilFn, 'undefined');
+    assert.deepEqual(Object.keys(r5Obj), ['apiKey']);
+
+    const r5Arr = await partnerCtx.services.call('r4-async-victim.vault', 'getArraySecret');
+    assert.equal(stolenViaObjProtoThen, null, 'R5-BLK-01: Object.prototype.then must NOT exfiltrate async Array payload');
+    assert.deepEqual(r5Arr, ['ARR-SECRET-1']);
+
+    const r5Date = await partnerCtx.services.call('r4-async-victim.vault', 'getDateSecret');
+    assert.equal(stolenViaObjProtoThen, null, 'R5-BLK-01: Object.prototype.then must NOT exfiltrate async Date payload');
+    assert.equal(r5Date instanceof Date, true);
+    assert.equal(r5Date.toISOString(), '2026-01-01T00:00:00.000Z');
+
+    const r5CatchRes = await partnerCtx.services.call('r4-async-victim.vault', 'getNullProtoSecret').catch(() => null);
+    assert.equal(stolenViaCatchOrFinally, null, 'R5-BLK-02: Promise.prototype.catch must NOT hijack returned Promise');
+    assert.equal(r5CatchRes.apiKey, 'SK-NULL-PROTO-SECRET');
+
+    const r5FinallyRes = await partnerCtx.services
+      .call('r4-async-victim.vault', 'getNullProtoSecret')
+      .finally(() => {
+        finallyRan += 1;
+      });
+    assert.equal(stolenViaCatchOrFinally, null, 'R5-BLK-02: Promise.prototype.finally must NOT hijack returned Promise');
+    assert.equal(finallyRan, 1);
+    assert.equal(r5FinallyRes.apiKey, 'SK-NULL-PROTO-SECRET');
+  } finally {
+    delete Object.prototype.then;
+    Promise.prototype.catch = origProtoCatch;
+    Promise.prototype.finally = origProtoFinally;
   }
 
   // R4-NB-01: Inherited Object.prototype.updateItem/removeItem must NOT intercept status item updates/dispose
