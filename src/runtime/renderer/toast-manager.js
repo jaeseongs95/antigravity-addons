@@ -12,6 +12,10 @@
 const { buildOverlayChrome } = require('./ui-schema-renderer');
 
 const TOAST_CSS = `
+@keyframes ag-toast-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 .ag-toast-host {
   position: fixed;
   right: 16px;
@@ -20,42 +24,139 @@ const TOAST_CSS = `
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 240px;
   max-width: min(360px, calc(100vw - 32px));
   pointer-events: none;
   font-family: var(--ag-font, system-ui, -apple-system, sans-serif);
+  -webkit-font-smoothing: antialiased;
 }
 .ag-toast {
   pointer-events: auto;
   background: var(--ag-surface, #161b24);
-  color: var(--ag-text, #f0f6fc);
-  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.16));
-  border-radius: 10px;
+  color: var(--ag-text, #f1f5f9);
+  border: 1px solid var(--ag-border-strong, rgba(255, 255, 255, 0.14));
+  border-radius: 11px;
   padding: 10px 12px;
-  box-shadow: var(--ag-shadow, 0 12px 32px rgba(0, 0, 0, 0.52));
+  box-shadow: var(--ag-shadow, 0 16px 36px rgba(0, 0, 0, 0.52));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
+  animation: ag-toast-in 160ms ease-out;
 }
 .ag-toast[data-variant="success"] { border-left: 3px solid var(--ag-success, #4ade80); }
 .ag-toast[data-variant="warning"] { border-left: 3px solid var(--ag-warning, #fbbf24); }
-.ag-toast[data-variant="error"] { border-left: 3px solid var(--ag-danger, #f87171); }
+.ag-toast[data-variant="error"] { border-left: 3px solid var(--ag-danger, #ef4444); }
 .ag-toast[data-variant="info"] { border-left: 3px solid var(--ag-accent, #38bdf8); }
-.ag-toast-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.ag-toast-title { font-weight: 700; font-size: 12px; }
-.ag-toast-badge { font-size: 10px; color: var(--ag-accent, #38bdf8); }
-.ag-toast-msg { font-size: 12px; color: var(--ag-text, #f0f6fc); }
-.ag-toast-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+.ag-toast-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ag-toast-head-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ag-toast-head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.ag-toast-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--ag-accent, #38bdf8);
+}
+.ag-toast[data-variant="success"] .ag-toast-dot { background: var(--ag-success, #4ade80); }
+.ag-toast[data-variant="warning"] .ag-toast-dot { background: var(--ag-warning, #fbbf24); }
+.ag-toast[data-variant="error"] .ag-toast-dot { background: var(--ag-danger, #ef4444); }
+.ag-toast-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--ag-text, #f1f5f9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ag-toast-badge {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--ag-text-muted, #94a3b8);
+  background: rgba(148, 163, 184, 0.12);
+  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.09));
+  border-radius: 999px;
+  padding: 1px 6px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ag-toast-close {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--ag-text-muted, #94a3b8);
+  border-radius: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.ag-toast-close:hover {
+  background: var(--ag-surface-hover, rgba(255, 255, 255, 0.09));
+  color: var(--ag-text, #f1f5f9);
+}
+.ag-toast-close:focus-visible {
+  outline: 2px solid var(--ag-primary, #2563eb);
+  outline-offset: 1px;
+}
+.ag-toast-msg {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ag-text, #f1f5f9);
+  padding-left: 13px;
+}
+.ag-toast-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 3px; }
 .ag-toast-btn {
   appearance: none;
-  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.18));
-  background: transparent;
-  color: var(--ag-text, #f0f6fc);
-  border-radius: 6px;
-  padding: 3px 8px;
-  font-size: 11px;
+  border: 1px solid var(--ag-border-strong, rgba(255, 255, 255, 0.16));
+  background: var(--ag-surface-elevated, rgba(255, 255, 255, 0.06));
+  color: var(--ag-text, #f1f5f9);
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
   cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.ag-toast-btn:hover {
+  background: var(--ag-surface-hover, rgba(255, 255, 255, 0.11));
+}
+@media (prefers-reduced-motion: reduce) {
+  .ag-toast { animation: none; }
+  .ag-toast-close, .ag-toast-btn { transition: none; }
 }
 `;
+
+const VARIANT_LABELS = Object.freeze({
+  info: Object.freeze({ ko: '안내', en: 'Info' }),
+  success: Object.freeze({ ko: '완료', en: 'Success' }),
+  warning: Object.freeze({ ko: '주의', en: 'Warning' }),
+  error: Object.freeze({ ko: '오류', en: 'Error' }),
+});
 
 function createToastAndDialogManager(
   doc,
@@ -119,23 +220,27 @@ function createToastAndDialogManager(
     card.setAttribute('data-addon-host-owner', pluginMeta.pluginId);
     card.setAttribute('data-toast-id', id);
 
+    const resolveDefaultToastTitle = (v) => {
+      const dict = VARIANT_LABELS[v] || VARIANT_LABELS.info;
+      if (themeAndI18n && typeof themeAndI18n.t === 'function') {
+        return themeAndI18n.t(dict.en, dict);
+      }
+      return dict.en;
+    };
+
     const top = doc.createElement('div');
     top.className = 'ag-toast-top';
+
+    const headLeft = doc.createElement('div');
+    headLeft.className = 'ag-toast-head-left';
+    const dotEl = doc.createElement('span');
+    dotEl.className = 'ag-toast-dot';
+    dotEl.setAttribute('aria-hidden', 'true');
     const titleEl = doc.createElement('span');
     titleEl.className = 'ag-toast-title';
-    titleEl.textContent = String(spec.title || variant.toUpperCase());
-    const badgeEl = doc.createElement('span');
-    badgeEl.className = 'ag-toast-badge';
-    badgeEl.setAttribute('data-addon-host-attribution', '1');
-    badgeEl.textContent = `Addon: ${String(pluginMeta.displayName || pluginMeta.pluginId)}`;
-    top.appendChild(titleEl);
-    top.appendChild(badgeEl);
-    card.appendChild(top);
-
-    const msgEl = doc.createElement('div');
-    msgEl.className = 'ag-toast-msg';
-    msgEl.textContent = String(spec.message || '');
-    card.appendChild(msgEl);
+    titleEl.textContent = String(spec.title || resolveDefaultToastTitle(variant));
+    headLeft.appendChild(dotEl);
+    headLeft.appendChild(titleEl);
 
     let timer = null;
     let dismissed = false;
@@ -153,9 +258,36 @@ function createToastAndDialogManager(
       if (set) set.delete(handle);
     };
 
-    const actionsRow = doc.createElement('div');
-    actionsRow.className = 'ag-toast-actions';
+    const headRight = doc.createElement('div');
+    headRight.className = 'ag-toast-head-right';
+    const badgeEl = doc.createElement('span');
+    badgeEl.className = 'ag-toast-badge';
+    badgeEl.setAttribute('data-addon-host-attribution', '1');
+    badgeEl.textContent = `Addon: ${String(pluginMeta.displayName || pluginMeta.pluginId)}`;
+    const closeBtn = doc.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'ag-toast-close';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
+      dismiss();
+    });
+    headRight.appendChild(badgeEl);
+    headRight.appendChild(closeBtn);
+
+    top.appendChild(headLeft);
+    top.appendChild(headRight);
+    card.appendChild(top);
+
+    const msgEl = doc.createElement('div');
+    msgEl.className = 'ag-toast-msg';
+    msgEl.textContent = String(spec.message || '');
+    card.appendChild(msgEl);
+
     if (spec.action && typeof spec.action.label === 'string' && typeof spec.action.onClick === 'function') {
+      const actionsRow = doc.createElement('div');
+      actionsRow.className = 'ag-toast-actions';
       const actBtn = doc.createElement('button');
       actBtn.type = 'button';
       actBtn.className = 'ag-toast-btn';
@@ -168,17 +300,8 @@ function createToastAndDialogManager(
         dismiss();
       });
       actionsRow.appendChild(actBtn);
+      card.appendChild(actionsRow);
     }
-    const closeBtn = doc.createElement('button');
-    closeBtn.type = 'button';
-    closeBtn.className = 'ag-toast-btn';
-    closeBtn.textContent = 'Dismiss';
-    closeBtn.addEventListener('click', (ev) => {
-      if (ev && ev.isTrusted === false) return;
-      dismiss();
-    });
-    actionsRow.appendChild(closeBtn);
-    card.appendChild(actionsRow);
 
     list.appendChild(card);
 

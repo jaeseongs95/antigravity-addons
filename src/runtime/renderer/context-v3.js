@@ -59,6 +59,40 @@ function getOwn(obj, key) {
 const v3EscapeStack = [];
 let v3OverlaySeq = 0;
 
+const MODAL_BACKDROP_STYLE_ATTR = 'data-addon-host-v3-backdrop';
+const MODAL_BACKDROP_CSS = `
+dialog[data-addon-host-v3-overlay="modal"]::backdrop,
+dialog[data-addon-host-modal-dialog="1"]::backdrop {
+  background: rgba(5, 8, 15, 0.56);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+`;
+const modalBackdropDocs = typeof WeakSet === 'function' ? new WeakSet() : null;
+
+function ensureModalBackdropStyle(doc) {
+  if (!doc || typeof doc.createElement !== 'function') return;
+  try {
+    if (modalBackdropDocs && modalBackdropDocs.has(doc)) return;
+    const targetParent = doc.head || doc.documentElement || doc.body;
+    const existing =
+      (targetParent && typeof targetParent.querySelector === 'function'
+        ? targetParent.querySelector(`[${MODAL_BACKDROP_STYLE_ATTR}="1"]`)
+        : null) ||
+      (typeof doc.querySelector === 'function' ? doc.querySelector(`[${MODAL_BACKDROP_STYLE_ATTR}="1"]`) : null);
+    if (existing) {
+      if (modalBackdropDocs) modalBackdropDocs.add(doc);
+      return;
+    }
+    if (!targetParent || typeof targetParent.appendChild !== 'function') return;
+    const styleEl = doc.createElement('style');
+    styleEl.setAttribute(MODAL_BACKDROP_STYLE_ATTR, '1');
+    styleEl.textContent = MODAL_BACKDROP_CSS;
+    targetParent.appendChild(styleEl);
+    if (modalBackdropDocs) modalBackdropDocs.add(doc);
+  } catch (_e) {}
+}
+
 function removeFromEscapeStack(fn) {
   let idx = -1;
   for (let i = 0; i < v3EscapeStack.length; i += 1) {
@@ -205,6 +239,7 @@ function createAddonContextV3({
     const prevFocus = doc && doc.activeElement ? doc.activeElement : null;
     const el = doc.createElement(isModal ? 'dialog' : 'div');
     if (isModal) {
+      ensureModalBackdropStyle(doc);
       el.setAttribute('data-addon-host-modal-dialog', '1');
       el.setAttribute('aria-modal', 'true');
     } else {
@@ -223,6 +258,7 @@ function createAddonContextV3({
     if (el.style) {
       el.style.padding = '0';
       el.style.border = 'none';
+      el.style.borderRadius = 'var(--ag-radius, 12px)';
       el.style.background = 'transparent';
       el.style.overflow = 'hidden';
       el.style.boxSizing = 'border-box';
