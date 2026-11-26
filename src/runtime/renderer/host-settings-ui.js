@@ -16,6 +16,7 @@ const PLUGIN_NAV_ATTR = 'data-addon-host-plugin-settings-nav';
 const PANE_ATTR = 'data-addon-host-admin-pane';
 const IGNORE_ATTR = 'data-addon-host-ignore';
 const NO_TRANSLATE_ATTR = 'data-addon-host-no-translate';
+const LANG_STORAGE_KEY = 'addon-host:settings-ui-lang';
 
 const DEFAULT_SETTINGS_UI_CONFIG = Object.freeze({
   navId: 'addon-manager',
@@ -97,6 +98,9 @@ const COPY = Object.freeze({
     saveError: 'Failed to save Remote Web preference.',
     loading: 'Loading addon status...',
     remotePrefsSaved: 'Saved Remote Web preference.',
+    langSwitchAria: 'Addon Manager language',
+    langKo: '한국어',
+    langEn: 'EN',
   }),
   ko: Object.freeze({
     title: '애드온 관리',
@@ -158,6 +162,9 @@ const COPY = Object.freeze({
     saveError: '원격 웹 표시 설정 저장에 실패했습니다.',
     loading: '애드온 상태를 불러오는 중...',
     remotePrefsSaved: '원격 웹 표시 설정을 저장했습니다.',
+    langSwitchAria: '애드온 관리 언어',
+    langKo: '한국어',
+    langEn: 'EN',
   }),
 });
 
@@ -305,6 +312,45 @@ const PANEL_CSS = `
   background: var(--chip-bg);
   color: var(--chip-fg);
   border: 1px solid var(--card-border);
+}
+
+.ah-lang-switch {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  gap: 2px;
+}
+
+.ah-lang-btn {
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 4px 8px;
+  cursor: pointer;
+  line-height: 1.2;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.ah-lang-btn:hover {
+  color: var(--text-primary);
+}
+
+.ah-lang-btn[aria-pressed="true"] {
+  background: var(--accent-strong);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.ah-lang-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 .ah-btn {
@@ -724,6 +770,7 @@ const PANEL_CSS = `
 
 @media (prefers-reduced-motion: reduce) {
   .ah-btn,
+  .ah-lang-btn,
   .ah-addon-card,
   .ah-switch,
   .ah-switch-thumb {
@@ -739,12 +786,51 @@ function normalizeText(value) {
     .toLowerCase();
 }
 
-function detectLanguage(doc, listParent) {
+function normalizeLang(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim().toLowerCase();
+  if (v === 'ko' || v.startsWith('ko-')) return 'ko';
+  if (v === 'en' || v.startsWith('en-')) return 'en';
+  return null;
+}
+
+function readStoredLanguage(win) {
   try {
-    const sample = listParent && listParent.textContent ? String(listParent.textContent) : '';
-    if (/[\uAC00-\uD7A3]/.test(sample)) return 'ko';
-    const docLang = doc && doc.documentElement && doc.documentElement.lang ? String(doc.documentElement.lang).toLowerCase() : '';
-    if (docLang.startsWith('ko')) return 'ko';
+    const storage = win && win.localStorage;
+    if (storage && typeof storage.getItem === 'function') {
+      return normalizeLang(storage.getItem(LANG_STORAGE_KEY));
+    }
+  } catch (_err) {}
+  return null;
+}
+
+function writeStoredLanguage(win, lang) {
+  try {
+    const storage = win && win.localStorage;
+    if (storage && typeof storage.setItem === 'function') {
+      storage.setItem(LANG_STORAGE_KEY, lang);
+      return true;
+    }
+  } catch (_err) {}
+  return false;
+}
+
+function resolveLanguage(win, doc, overrideLang) {
+  const explicit = normalizeLang(overrideLang);
+  if (explicit) return explicit;
+  const stored = readStoredLanguage(win);
+  if (stored) return stored;
+  try {
+    const docLang =
+      doc && doc.documentElement && doc.documentElement.lang
+        ? normalizeLang(String(doc.documentElement.lang))
+        : null;
+    if (docLang) return docLang;
+    const nav = win && win.navigator;
+    const navLang = nav
+      ? normalizeLang(nav.language || (Array.isArray(nav.languages) ? nav.languages[0] : ''))
+      : null;
+    if (navLang) return navLang;
   } catch (_err) {}
   return 'en';
 }
@@ -881,6 +967,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
   let mountedContentPane = null;
   let mountedReferenceItem = null;
   let mountedLang = null;
+  let userLangOverride = readStoredLanguage(win);
   let navElement = null;
   let navInactiveColor = '';
   let pluginNavElements = [];
@@ -906,6 +993,25 @@ function createHostSettingsUi(doc, win, opts = {}) {
       if (typeof labels.en === 'string' && labels.en.trim()) return labels.en.trim();
     }
     return lang === 'ko' ? DEFAULT_SETTINGS_UI_CONFIG.navLabel.ko : DEFAULT_SETTINGS_UI_CONFIG.navLabel.en;
+  }
+
+  function getLanguage() {
+    return resolveLanguage(win, doc, userLangOverride);
+  }
+
+  function setLanguage(nextLang) {
+    const norm = normalizeLang(nextLang);
+    if (!norm) return getLanguage();
+    userLangOverride = norm;
+    writeStoredLanguage(win, norm);
+    mountedLang = norm;
+    if (navElement && navElement.isConnected) {
+      replaceLeafText(navElement, getNavLabel(norm), doc);
+    }
+    if (!disposed && isOpen) {
+      renderPanel();
+    }
+    return norm;
   }
 
   function matchAnchorGroupIndex(text) {
@@ -1354,7 +1460,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
   function renderPanel() {
     if (!shadowRoot) return;
-    const lang = detectLanguage(doc, mountedListParent);
+    const lang = getLanguage();
     const t = COPY[lang] || COPY.en;
 
     while (shadowRoot.firstChild) {
@@ -1384,6 +1490,27 @@ function createHostSettingsUi(doc, win, opts = {}) {
         actions.appendChild(createEl('span', 'ah-meta-pill', `${t.buildLabel} ${lastState.host.buildSha8}`));
       }
     }
+    const langGroup = createEl('div', 'ah-lang-switch');
+    langGroup.setAttribute('role', 'group');
+    langGroup.setAttribute('aria-label', t.langSwitchAria);
+    langGroup.setAttribute('data-ah-control', 'language-switch');
+    const langDefs = [
+      { code: 'ko', label: t.langKo },
+      { code: 'en', label: t.langEn },
+    ];
+    for (let i = 0; i < langDefs.length; i += 1) {
+      const def = langDefs[i];
+      const lBtn = createEl('button', 'ah-lang-btn', def.label);
+      lBtn.setAttribute('type', 'button');
+      lBtn.setAttribute('data-ah-lang', def.code);
+      lBtn.setAttribute('aria-pressed', lang === def.code ? 'true' : 'false');
+      lBtn.addEventListener('click', () => {
+        setLanguage(def.code);
+      });
+      langGroup.appendChild(lBtn);
+    }
+    actions.appendChild(langGroup);
+
     const refreshBtn = createEl('button', 'ah-btn', isLoading ? t.refreshing : t.refresh);
     refreshBtn.setAttribute('type', 'button');
     refreshBtn.disabled = isLoading;
@@ -1720,7 +1847,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     if (disposed || !hostBridge || typeof hostBridge.getHostAdminState !== 'function') {
       return { ok: false, reason: 'ERR_HOST_ADMIN_UNAVAILABLE' };
     }
-    const lang = detectLanguage(doc, mountedListParent);
+    const lang = getLanguage();
     const t = COPY[lang] || COPY.en;
     isLoading = true;
     lastError = null;
@@ -1946,7 +2073,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     if (disposed || !doc) return false;
 
     if (navElement && navElement.isConnected && mountedListParent && mountedListParent.isConnected) {
-      const liveLang = detectLanguage(doc, mountedListParent);
+      const liveLang = getLanguage();
       if (liveLang !== mountedLang) {
         mountedLang = liveLang;
         replaceLeafText(navElement, getNavLabel(liveLang), doc);
@@ -1981,12 +2108,12 @@ function createHostSettingsUi(doc, win, opts = {}) {
       mountedOuterSidebar = outerSidebar || listParent;
       mountedContentPane = contentPane;
       mountedReferenceItem = referenceItem || null;
-      mountedLang = detectLanguage(doc, listParent);
+      mountedLang = getLanguage();
       syncPluginNavItems();
       return true;
     }
 
-    const lang = detectLanguage(doc, listParent);
+    const lang = getLanguage();
     try {
       if (referenceItem && win && typeof win.getComputedStyle === 'function') {
         navInactiveColor = String(win.getComputedStyle(referenceItem).color || '');
@@ -2134,6 +2261,8 @@ function createHostSettingsUi(doc, win, opts = {}) {
     closePanel,
     refresh,
     dispose,
+    getLanguage,
+    setLanguage,
     isMounted: () => Boolean(navElement && navElement.isConnected),
     isOpen: () => isOpen,
     getElements: () => ({
@@ -2149,6 +2278,7 @@ module.exports = {
   NAV_ATTR,
   PLUGIN_NAV_ATTR,
   PANE_ATTR,
+  LANG_STORAGE_KEY,
   DEFAULT_SETTINGS_UI_CONFIG,
   createHostSettingsUi,
 };

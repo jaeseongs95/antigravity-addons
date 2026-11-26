@@ -181,12 +181,56 @@ function createHostRuntimeController(cfg, deps = {}) {
     recordDiag,
   });
 
+  function extractDynamicLoopbackPortsFromSettingsData(data) {
+    const out = [];
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return out;
+    const seen = new Set();
+    const pushPort = (rawPort) => {
+      const n = Number(rawPort);
+      if (Number.isInteger(n) && n >= 1024 && n <= 65535 && !seen.has(n)) {
+        seen.add(n);
+        out.push(n);
+      }
+    };
+    const pushLoopbackUrlPort = (rawUrl) => {
+      if (typeof rawUrl !== 'string' || !rawUrl.trim()) return;
+      try {
+        const u = new URL(rawUrl.trim());
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+        const h = String(u.hostname || '').toLowerCase();
+        if (h !== '127.0.0.1' && h !== 'localhost' && h !== '[::1]' && h !== '::1') return;
+        if (u.port) pushPort(u.port);
+      } catch (_err) {}
+    };
+    pushPort(data.sidecarPort);
+    pushPort(data.loopbackPort);
+    pushPort(data.port);
+    pushLoopbackUrlPort(data.baseUrl);
+    pushLoopbackUrlPort(data.sidecarUrl);
+    if (data.sidecar && typeof data.sidecar === 'object' && !Array.isArray(data.sidecar)) {
+      pushPort(data.sidecar.port);
+      pushLoopbackUrlPort(data.sidecar.baseUrl);
+    }
+    return out;
+  }
+
   const netFetchBroker = createNetFetchBroker({
     forbiddenHosts: Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : [],
     namedLoopbackTargets:
       profile.namedLoopbackTargets && typeof profile.namedLoopbackTargets === 'object'
         ? profile.namedLoopbackTargets
         : {},
+    resolveDynamicLoopbackPorts: (binding) => {
+      if (!binding || !binding.allowLoopback || typeof binding.pluginId !== 'string') return [];
+      const declared = Array.isArray(binding.localLoopback) ? binding.localLoopback : [];
+      if (!declared.some((entry) => typeof entry === 'string')) return [];
+      const snap =
+        settingsBridge && typeof settingsBridge.getLastSnapshot === 'function'
+          ? settingsBridge.getLastSnapshot(binding.pluginId)
+          : null;
+      if (!snap || snap.status !== 'ok' || !snap.data) return [];
+      return extractDynamicLoopbackPortsFromSettingsData(snap.data);
+    },
     lookupFn: deps.netLookupFn || null,
     httpModule: deps.httpModule,
     httpsModule: deps.httpsModule,

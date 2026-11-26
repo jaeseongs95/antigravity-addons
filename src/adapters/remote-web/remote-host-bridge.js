@@ -17,12 +17,13 @@
  * callers or kernel code.
  */
 
-const { evaluateNetRequest } = require('../../core/net-policy');
+const { evaluateNetRequest, isPublicFqdnHost, normalizeHostName } = require('../../core/net-policy');
 
 const DEFAULT_MAX_SETTINGS_BYTES = 65536;
 const MIN_SETTINGS_BYTES = 1024;
 const MAX_SETTINGS_BYTES = 262144;
 const MAX_RECORDED_ERRORS = 200;
+const MAX_USER_ALLOWED_HTTPS_HOSTS = 16;
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
 
@@ -298,8 +299,12 @@ function createRemoteHostBridge({
     const entries = netBindings instanceof Map ? Array.from(netBindings.entries()) : Object.entries(netBindings);
     for (let i = 0; i < entries.length; i += 1) {
       const [pid, spec] = entries[i];
-      if (typeof pid === 'string' && PLUGIN_ID_RE.test(pid) && spec && Array.isArray(spec.httpsHosts)) {
-        allowedNet.set(pid, { httpsHosts: spec.httpsHosts.slice() });
+      if (typeof pid === 'string' && PLUGIN_ID_RE.test(pid) && spec && typeof spec === 'object') {
+        const hosts = Array.isArray(spec.httpsHosts) ? spec.httpsHosts.slice() : [];
+        const userApprovedHttps = spec.userApprovedHttps === true;
+        if (hosts.length > 0 || userApprovedHttps) {
+          allowedNet.set(pid, { httpsHosts: hosts, userApprovedHttps });
+        }
       }
     }
   }
@@ -332,6 +337,149 @@ function createRemoteHostBridge({
 
   function storageKeyFor(pluginId) {
     return `${storageNamespace}:settings:${pluginId}`;
+  }
+
+  function userHttpsHostsStorageKey() {
+    return `${storageNamespace}:__host__:user-allowed-https-hosts`;
+  }
+
+  function getForbiddenHostsList() {
+    return Array.isArray(forbiddenNetHosts) ? forbiddenNetHosts : [];
+  }
+
+  function parseUserAllowedHttpsHostInput(rawInput) {
+    if (typeof rawInput !== 'string' || !rawInput.trim()) {
+      return { ok: false, reason: 'ERR_NET_INVALID_URL' };
+    }
+    const trimmed = rawInput.trim();
+    let candidateHost = '';
+    if (trimmed.includes('://')) {
+      let parsed;
+      try {
+        parsed = new URL(trimmed);
+      } catch (_err) {
+        return { ok: false, reason: 'ERR_NET_INVALID_URL' };
+      }
+      if (parsed.protocol !== 'https:') {
+        return { ok: false, reason: 'ERR_NET_HTTPS_REQUIRED' };
+      }
+      if (parsed.username || parsed.password) {
+        return { ok: false, reason: 'ERR_NET_CREDENTIALS_IN_URL_FORBIDDEN' };
+      }
+      const port = parsed.port ? Number(parsed.port) : 443;
+      if (!Number.isInteger(port) || port !== 443) {
+        return { ok: false, reason: 'ERR_NET_NON_STANDARD_HTTPS_PORT_FORBIDDEN' };
+      }
+      candidateHost = normalizeHostName(parsed.hostname);
+    } else {
+      if (/\s/.test(trimmed) || trimmed.includes('/') || trimmed.includes(':') || trimmed.includes('@') || trimmed.includes('*')) {
+        return { ok: false, reason: 'ERR_NET_HOST_FORBIDDEN' };
+      }
+      candidateHost = normalizeHostName(trimmed);
+    }
+    if (!isPublicFqdnHost(candidateHost, { forbiddenHosts: getForbiddenHostsList() })) {
+      return { ok: false, reason: `ERR_NET_HOST_FORBIDDEN:${candidateHost || trimmed}` };
+    }
+    return { ok: true, host: candidateHost };
+  }
+
+  function loadAllUserAllowedHttpsHostsMap() {
+    const out = Object.create(null);
+    try {
+      const raw = store.getItem(userHttpsHostsStorageKey());
+      if (!raw) return out;
+      const parsed = parseSafeJsonObject(raw);
+      if (!parsed.ok || !parsed.data) return out;
+      const forbidden = getForbiddenHostsList();
+      const keys = Object.keys(parsed.data);
+      for (let i = 0; i < keys.length; i += 1) {
+        const pid = keys[i];
+        if (!PLUGIN_ID_RE.test(pid)) continue;
+        const list = parsed.data[pid];
+        if (!Array.isArray(list)) continue;
+        const seen = new Set();
+        const clean = [];
+        for (let j = 0; j < list.length && clean.length < MAX_USER_ALLOWED_HTTPS_HOSTS; j += 1) {
+          const h = normalizeHostName(list[j]);
+          if (h && !seen.has(h) && isPublicFqdnHost(h, { forbiddenHosts: forbidden })) {
+            seen.add(h);
+            clean.push(h);
+          }
+        }
+        if (clean.length > 0) {
+          out[pid] = clean.sort();
+        }
+      }
+    } catch (_err) {}
+    return out;
+  }
+
+  function persistAllUserAllowedHttpsHostsMap(mapObj) {
+    try {
+      store.setItem(userHttpsHostsStorageKey(), JSON.stringify(mapObj));
+      return true;
+    } catch (err) {
+      recordErrorInternal('remote-host-bridge', `user_https_hosts_save_failed: ${err && err.message ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  async function hydrateUserAllowedHttpsHosts() {
+    if (store && typeof store.hydrateKey === 'function') {
+      try {
+        await store.hydrateKey(userHttpsHostsStorageKey());
+      } catch (_err) {}
+    }
+    return loadAllUserAllowedHttpsHostsMap();
+  }
+
+  function listUserAllowedHttpsHosts(pluginId) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) return [];
+    const mapObj = loadAllUserAllowedHttpsHostsMap();
+    return Array.isArray(mapObj[pluginId]) ? mapObj[pluginId].slice() : [];
+  }
+
+  function addUserAllowedHttpsHost(pluginId, rawHostOrUrl) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+      return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID', hosts: [] };
+    }
+    const check = parseUserAllowedHttpsHostInput(rawHostOrUrl);
+    if (!check.ok) {
+      return { ok: false, reason: check.reason, hosts: listUserAllowedHttpsHosts(pluginId) };
+    }
+    const mapObj = loadAllUserAllowedHttpsHostsMap();
+    const current = Array.isArray(mapObj[pluginId]) ? mapObj[pluginId].slice() : [];
+    if (!current.includes(check.host)) {
+      if (current.length >= MAX_USER_ALLOWED_HTTPS_HOSTS) {
+        return { ok: false, reason: 'ERR_NET_USER_HTTPS_HOST_LIMIT_EXCEEDED', hosts: current };
+      }
+      current.push(check.host);
+      current.sort();
+    }
+    mapObj[pluginId] = current;
+    if (!persistAllUserAllowedHttpsHostsMap(mapObj)) {
+      return { ok: false, reason: 'ERR_SETTINGS_STORAGE_WRITE_FAILED', hosts: listUserAllowedHttpsHosts(pluginId) };
+    }
+    return { ok: true, host: check.host, hosts: current.slice() };
+  }
+
+  function removeUserAllowedHttpsHost(pluginId, rawHost) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+      return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID', hosts: [] };
+    }
+    const norm = normalizeHostName(rawHost);
+    const mapObj = loadAllUserAllowedHttpsHostsMap();
+    const current = Array.isArray(mapObj[pluginId]) ? mapObj[pluginId] : [];
+    const next = current.filter((h) => h !== norm);
+    if (next.length > 0) {
+      mapObj[pluginId] = next;
+    } else {
+      delete mapObj[pluginId];
+    }
+    if (!persistAllUserAllowedHttpsHostsMap(mapObj)) {
+      return { ok: false, reason: 'ERR_SETTINGS_STORAGE_WRITE_FAILED', hosts: current.slice() };
+    }
+    return { ok: true, hosts: next.slice() };
   }
 
   function bindSettingsPlugin(pluginId, spec = {}) {
@@ -594,8 +742,28 @@ function createRemoteHostBridge({
   function bindNetPlugin(pluginId, spec = {}) {
     if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) return false;
     const httpsHosts = Array.isArray(spec && spec.httpsHosts) ? spec.httpsHosts.slice() : [];
-    allowedNet.set(pluginId, { httpsHosts });
+    const userApprovedHttps = Boolean(spec && spec.userApprovedHttps === true);
+    allowedNet.set(pluginId, { httpsHosts, userApprovedHttps });
     return true;
+  }
+
+  function getEffectiveHttpsHosts(pluginId, binding) {
+    const merged = [];
+    const seen = new Set();
+    const pushHost = (h) => {
+      const norm = normalizeHostName(h);
+      if (norm && !seen.has(norm)) {
+        seen.add(norm);
+        merged.push(norm);
+      }
+    };
+    const staticList = Array.isArray(binding.httpsHosts) ? binding.httpsHosts : [];
+    for (let i = 0; i < staticList.length; i += 1) pushHost(staticList[i]);
+    if (binding.userApprovedHttps) {
+      const userList = listUserAllowedHttpsHosts(pluginId);
+      for (let i = 0; i < userList.length; i += 1) pushHost(userList[i]);
+    }
+    return merged;
   }
 
   function detectGmXhr() {
@@ -613,14 +781,21 @@ function createRemoteHostBridge({
       return Promise.resolve({ ok: false, reason: 'ERR_INVALID_PLUGIN_ID' });
     }
     const binding = allowedNet.get(pluginId);
-    if (!binding || binding.httpsHosts.length === 0) {
+    if (!binding) {
       return Promise.resolve({ ok: false, reason: 'ERR_NET_NOT_DECLARED' });
+    }
+    const effectiveHttpsHosts = getEffectiveHttpsHosts(pluginId, binding);
+    if (effectiveHttpsHosts.length === 0) {
+      return Promise.resolve({
+        ok: false,
+        reason: binding.userApprovedHttps ? 'ERR_NET_USER_HTTPS_HOST_NOT_APPROVED' : 'ERR_NET_NOT_DECLARED',
+      });
     }
     // Remote Web strictly forbids localLoopback (`allowLoopback: false`)
     const plan = evaluateNetRequest(rawUrl, init, {
-      httpsHosts: binding.httpsHosts,
+      httpsHosts: effectiveHttpsHosts,
       localLoopback: [],
-      forbiddenHosts: Array.isArray(forbiddenNetHosts) ? forbiddenNetHosts : [],
+      forbiddenHosts: getForbiddenHostsList(),
       allowLoopback: false,
     });
     if (!plan.ok) {
@@ -644,9 +819,9 @@ function createRemoteHostBridge({
             const finalUrl = resp && typeof resp.finalUrl === 'string' && resp.finalUrl ? resp.finalUrl : plan.url;
             if (finalUrl !== plan.url) {
               const finalCheck = evaluateNetRequest(finalUrl, { method: 'GET' }, {
-                httpsHosts: binding.httpsHosts,
+                httpsHosts: effectiveHttpsHosts,
                 localLoopback: [],
-                forbiddenHosts: Array.isArray(forbiddenNetHosts) ? forbiddenNetHosts : [],
+                forbiddenHosts: getForbiddenHostsList(),
                 allowLoopback: false,
               });
               if (!finalCheck.ok) {
@@ -708,6 +883,10 @@ function createRemoteHostBridge({
     bindNetPlugin,
     hydrateSettings,
     loadPersistedSettings,
+    hydrateUserAllowedHttpsHosts,
+    listUserAllowedHttpsHosts,
+    addUserAllowedHttpsHost,
+    removeUserAllowedHttpsHost,
     getErrors: () => recordedErrors.slice(),
     getPortalClaims: () => Array.from(activePortalClaims),
     getStatus: () => ({

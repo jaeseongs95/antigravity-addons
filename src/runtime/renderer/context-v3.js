@@ -132,10 +132,14 @@ function createAddonContextV3({
 
   const netHttpsHosts = getOwn(netPerm, 'httpsHosts');
   const netLocalLoopback = getOwn(netPerm, 'localLoopback');
+  const netUserApprovedHttps = getOwn(netPerm, 'userApprovedHttps') === true;
   const domAnchors = getOwn(domPerm, 'anchors');
   const uiSlots = getOwn(pluginMeta, 'uiSlots');
 
-  const hasNetHttps = !!(_ArrayIsArray(netHttpsHosts) && netHttpsHosts.length > 0);
+  const hasNetHttps = !!(
+    (_ArrayIsArray(netHttpsHosts) && netHttpsHosts.length > 0) ||
+      (surface === 'remote-web' && netUserApprovedHttps)
+  );
   const hasLocalLoopback = !!(
     surface === 'desktop' &&
       effectiveTrustLevel === 'trusted' &&

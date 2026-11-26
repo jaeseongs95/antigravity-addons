@@ -398,6 +398,66 @@ const DRAWER_CSS = `
   flex: 1 1 auto;
   min-width: 110px;
 }
+.rah-net-box {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rah-net-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #9fb3c8;
+}
+.rah-net-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.rah-net-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: rgba(121, 192, 255, 0.14);
+  border: 1px solid rgba(121, 192, 255, 0.3);
+  color: #e6edf3;
+}
+.rah-net-chip-del {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: #f85149;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+.rah-net-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.rah-net-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(13, 17, 23, 0.8);
+  color: #e6edf3;
+  font-size: 11.5px;
+}
+.rah-net-err {
+  font-size: 11px;
+  color: #f85149;
+}
 .rah-open-pill {
   font-size: 11px;
   color: #79c0ff;
@@ -608,7 +668,7 @@ function syncDrawerShellSummary(shadowRoot) {
   }
 }
 
-function renderAddonCardList(doc, container, addons, hostActions, onInvokeHostAction, onAfterAction) {
+function renderAddonCardList(doc, container, addons, hostActions, onInvokeHostAction, onAfterAction, netConsent = null) {
   clearChildrenSafe(container);
   const actionsByPlugin = new Map();
   for (let i = 0; i < hostActions.length; i += 1) {
@@ -665,6 +725,92 @@ function renderAddonCardList(doc, container, addons, hostActions, onInvokeHostAc
       }
       card.appendChild(actionList);
     }
+
+    if (
+      item.userApprovedHttps === true &&
+      netConsent &&
+      typeof netConsent.listHosts === 'function' &&
+      typeof netConsent.addHost === 'function' &&
+      typeof netConsent.removeHost === 'function'
+    ) {
+      const netBox = createElementSafe(doc, 'div', {
+        class: 'rah-net-box',
+        'data-rah-net-consent-plugin': item.pluginId,
+      });
+      netBox.appendChild(createElementSafe(doc, 'div', { class: 'rah-net-title' }, 'Allowed HTTPS Hosts (User Consent)'));
+      const approvedHosts = netConsent.listHosts(item.pluginId);
+      if (approvedHosts.length > 0) {
+        const chips = createElementSafe(doc, 'div', { class: 'rah-net-chips' });
+        for (let hIdx = 0; hIdx < approvedHosts.length; hIdx += 1) {
+          const hostName = approvedHosts[hIdx];
+          const chip = createElementSafe(doc, 'span', { class: 'rah-net-chip', 'data-rah-net-host': hostName });
+          chip.appendChild(createElementSafe(doc, 'span', null, hostName));
+          const delBtn = createElementSafe(
+            doc,
+            'button',
+            {
+              type: 'button',
+              class: 'rah-net-chip-del',
+              'aria-label': `Revoke ${hostName}`,
+              'data-rah-net-remove-host': hostName,
+            },
+            '×'
+          );
+          delBtn.addEventListener('click', (ev) => {
+            if (ev && ev.isTrusted === false) return;
+            netConsent.removeHost(item.pluginId, hostName);
+            if (typeof onAfterAction === 'function') onAfterAction();
+          });
+          chip.appendChild(delBtn);
+          chips.appendChild(chip);
+        }
+        netBox.appendChild(chips);
+      } else {
+        netBox.appendChild(
+          createElementSafe(doc, 'div', { class: 'rah-meta' }, 'No user-approved HTTPS hosts yet (default-deny).')
+        );
+      }
+
+      const formRow = createElementSafe(doc, 'div', { class: 'rah-net-form' });
+      const hostInput = createElementSafe(doc, 'input', {
+        type: 'url',
+        class: 'rah-net-input',
+        placeholder: 'https://sidecar.example.com',
+        'aria-label': `HTTPS host for ${item.displayName}`,
+        'data-rah-net-input': item.pluginId,
+      });
+      const addBtn = createElementSafe(
+        doc,
+        'button',
+        {
+          type: 'button',
+          class: 'rah-btn',
+          'data-rah-net-add': item.pluginId,
+        },
+        'Approve'
+      );
+      const errLine = createElementSafe(doc, 'div', { class: 'rah-net-err', hidden: 'true' });
+      addBtn.addEventListener('click', (ev) => {
+        if (ev && ev.isTrusted === false) return;
+        const val = typeof hostInput.value === 'string' ? hostInput.value.trim() : '';
+        const res = netConsent.addHost(item.pluginId, val);
+        if (res && res.ok) {
+          hostInput.value = '';
+          errLine.setAttribute('hidden', 'true');
+          setTextSafe(errLine, '');
+          if (typeof onAfterAction === 'function') onAfterAction();
+        } else {
+          errLine.removeAttribute('hidden');
+          setTextSafe(errLine, (res && res.reason) || 'ERR_NET_HOST_FORBIDDEN');
+        }
+      });
+      formRow.appendChild(hostInput);
+      formRow.appendChild(addBtn);
+      netBox.appendChild(formRow);
+      netBox.appendChild(errLine);
+      card.appendChild(netBox);
+    }
+
     container.appendChild(card);
   }
 }
@@ -717,7 +863,16 @@ function renderErrorCardList(doc, container, errors) {
   }
 }
 
-function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab = null, onInvokeHostAction = null, shadowMode = 'open' }) {
+function createHostDrawerUi({
+  doc,
+  win,
+  profile,
+  getState,
+  onSelectSettingsTab = null,
+  onInvokeHostAction = null,
+  netConsent = null,
+  shadowMode = 'open',
+}) {
   const noTranslateAttrs = Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [];
   const { hostEl, shadowRoot } = createShadowContainer(doc, DRAWER_HOST_ID, {
     mode: shadowMode === 'closed' ? 'closed' : 'open',
@@ -900,7 +1055,8 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
       state.addons,
       Array.isArray(state.hostActions) ? state.hostActions : [],
       onInvokeHostAction,
-      render
+      render,
+      netConsent
     );
     renderSettingsTabCardList(
       doc,
@@ -939,6 +1095,7 @@ function attachPeerDrawerContributor({
   getState,
   onSelectSettingsTab = null,
   onInvokeHostAction = null,
+  netConsent = null,
 }) {
   if (!shadowRoot) return null;
   const addonsPeerHost = findFirstInSubtree(
@@ -1000,7 +1157,8 @@ function attachPeerDrawerContributor({
       state.addons,
       Array.isArray(state.hostActions) ? state.hostActions : [],
       onInvokeHostAction,
-      render
+      render,
+      netConsent
     );
     renderSettingsTabCardList(
       doc,
@@ -1234,6 +1392,11 @@ async function bootRemoteWebHost({
       }
       return activeKernel.invokeHostAction(pluginId, actionId, [], hostToken);
     },
+    netConsent: {
+      listHosts: (pluginId) => bridge.listUserAllowedHttpsHosts(pluginId),
+      addHost: (pluginId, rawHostOrUrl) => bridge.addUserAllowedHttpsHost(pluginId, rawHostOrUrl),
+      removeHost: (pluginId, rawHost) => bridge.removeUserAllowedHttpsHost(pluginId, rawHost),
+    },
   };
 
   if (mountDrawer !== false) {
@@ -1271,12 +1434,18 @@ async function bootRemoteWebHost({
     mountedPluginIds.add(pluginId);
     claimMountedPlugin(docEl, pluginId);
 
+    const netPerm =
+      meta.permissions && meta.permissions.net && typeof meta.permissions.net === 'object' ? meta.permissions.net : null;
+    const staticHttpsHosts = netPerm && Array.isArray(netPerm.httpsHosts) ? netPerm.httpsHosts : [];
+    const allowUserHttps = Boolean(netPerm && netPerm.userApprovedHttps === true);
+
     const record = {
       pluginId,
       displayName: meta.displayName || pluginId,
       version: meta.version || '0.0.0',
       trustLevel: meta.trustLevel || 'restricted',
       skippedCapabilities: Array.isArray(meta.skippedCapabilities) ? meta.skippedCapabilities.slice() : [],
+      userApprovedHttps: allowUserHttps,
       status: 'pending',
       error: null,
     };
@@ -1293,13 +1462,11 @@ async function bootRemoteWebHost({
         initialSettings = persisted;
       }
     }
-    if (
-      meta.permissions &&
-      meta.permissions.net &&
-      Array.isArray(meta.permissions.net.httpsHosts) &&
-      meta.permissions.net.httpsHosts.length > 0
-    ) {
-      bridge.bindNetPlugin(pluginId, { httpsHosts: meta.permissions.net.httpsHosts });
+    if (staticHttpsHosts.length > 0 || allowUserHttps) {
+      if (allowUserHttps && typeof bridge.hydrateUserAllowedHttpsHosts === 'function') {
+        await bridge.hydrateUserAllowedHttpsHosts();
+      }
+      bridge.bindNetPlugin(pluginId, { httpsHosts: staticHttpsHosts, userApprovedHttps: allowUserHttps });
     }
 
     let stageRes;
@@ -1389,6 +1556,22 @@ async function bootRemoteWebHost({
         return { ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' };
       }
       return activeKernel.invokeHostAction(pluginId, actionId, args, hostToken);
+    },
+    listUserAllowedHttpsHosts(pluginId) {
+      if (disposed) return [];
+      return bridge.listUserAllowedHttpsHosts(pluginId);
+    },
+    addUserAllowedHttpsHost(pluginId, rawHostOrUrl) {
+      if (disposed) return { ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED', hosts: [] };
+      const res = bridge.addUserAllowedHttpsHost(pluginId, rawHostOrUrl);
+      if (res && res.ok && drawerUi) drawerUi.render();
+      return res;
+    },
+    removeUserAllowedHttpsHost(pluginId, rawHost) {
+      if (disposed) return { ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED', hosts: [] };
+      const res = bridge.removeUserAllowedHttpsHost(pluginId, rawHost);
+      if (res && res.ok && drawerUi) drawerUi.render();
+      return res;
     },
     get disposed() {
       return disposed;

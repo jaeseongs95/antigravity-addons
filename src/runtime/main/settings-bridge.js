@@ -648,6 +648,13 @@ function createSettingsBridge({
     ensureWatcher();
   }
 
+  function getLastSnapshot(pluginId) {
+    if (disposed || typeof pluginId !== 'string' || !pluginId) return null;
+    const entry = bindings.get(pluginId);
+    if (!entry) return null;
+    return entry.lastSnapshot || null;
+  }
+
   function getStatus() {
     return {
       settingsDataDir: settingsDataDir || null,
@@ -677,6 +684,7 @@ function createSettingsBridge({
   return Object.freeze({
     readSnapshotForPlugin,
     writeSnapshotForPlugin,
+    getLastSnapshot,
     syncPlugins,
     refreshNow,
     getStatus,

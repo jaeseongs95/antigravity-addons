@@ -36,6 +36,7 @@ const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 function createNetFetchBroker({
   forbiddenHosts = [],
   namedLoopbackTargets = {},
+  resolveDynamicLoopbackPorts = null,
   lookupFn = null,
   httpModule = http,
   httpsModule = https,
@@ -46,7 +47,7 @@ function createNetFetchBroker({
       ? lookupFn
       : (hostname) => dns.promises.lookup(hostname, { all: true, verbatim: true });
 
-  async function executeSingleHop(plan, { body, timeoutMs, maxResponseBytes }) {
+  async function executeSingleHop(plan, { body, timeoutMs, maxResponseBytes, pluginId = null }) {
     let connectHost = plan.hostname;
     let family;
     let tlsServerName;
@@ -83,6 +84,12 @@ function createNetFetchBroker({
       reqHeaders.Host = plan.hostname;
     } else {
       reqHeaders.Host = `127.0.0.1:${plan.port}`;
+      // Host-controlled, non-spoofable loopback Origin + broker trust headers (plugin-supplied values stripped in net-policy)
+      reqHeaders.Origin = `${plan.protocol}//127.0.0.1:${plan.port}`;
+      reqHeaders['X-Addon-Host-Broker'] = '1';
+      if (typeof pluginId === 'string' && pluginId.trim()) {
+        reqHeaders['X-Addon-Host-Plugin'] = pluginId.trim();
+      }
     }
 
     const canSendBody = plan.method !== 'GET' && plan.method !== 'HEAD';
@@ -192,10 +199,23 @@ function createNetFetchBroker({
       )
     );
 
+    let dynamicLoopbackPorts = [];
+    if (pluginBinding.allowLoopback && typeof resolveDynamicLoopbackPorts === 'function') {
+      try {
+        const resolvedPorts = resolveDynamicLoopbackPorts(pluginBinding);
+        if (Array.isArray(resolvedPorts)) {
+          dynamicLoopbackPorts = resolvedPorts;
+        }
+      } catch (_dynErr) {
+        dynamicLoopbackPorts = [];
+      }
+    }
+
     const policy = {
       httpsHosts: Array.isArray(pluginBinding.httpsHosts) ? pluginBinding.httpsHosts : [],
       localLoopback: Array.isArray(pluginBinding.localLoopback) ? pluginBinding.localLoopback : [],
       namedLoopbackPorts: namedLoopbackTargets,
+      dynamicLoopbackPorts,
       forbiddenHosts,
       allowLoopback: Boolean(pluginBinding.allowLoopback),
     };
@@ -216,6 +236,7 @@ function createNetFetchBroker({
         body: currentBody,
         timeoutMs,
         maxResponseBytes,
+        pluginId: typeof pluginBinding.pluginId === 'string' ? pluginBinding.pluginId : null,
       });
       if (!hop.ok) {
         return hop;

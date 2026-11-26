@@ -277,6 +277,7 @@ export interface AddonManifestV3 {
     };
     net?: {
       httpsHosts?: string[];
+      userApprovedHttps?: boolean;
       localLoopback?: Array<number | string>;
     };
     dom?: {

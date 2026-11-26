@@ -572,6 +572,7 @@ function buildAddonUserscript({
       remotePermissions.net = {
         httpsHosts: Array.isArray(rawPerms.net.httpsHosts) ? rawPerms.net.httpsHosts.slice() : [],
         localLoopback: [],
+        ...(rawPerms.net.userApprovedHttps === true ? { userApprovedHttps: true } : {}),
       };
     }
     if (rawPerms.dom && typeof rawPerms.dom === 'object') {
