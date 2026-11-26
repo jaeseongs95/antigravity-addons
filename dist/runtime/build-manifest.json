@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "da5b89f9",
-  "buildSha256": "da5b89f9e4d3b06b06c3130cc9205664310f57bdbd9ec2b42c4010323c4c3789",
+  "buildSha8": "fbded357",
+  "buildSha256": "fbded357e704573335668709ce166ea766d4d583ab256f9e26b29c4f6f3ecbbf",
   "fileCount": 39,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
     "preload/preload-bridge.cjs": "1526551dbfec97600523417726a05d2b253c0300ea3509ddf13b166d5340209f",
-    "renderer/kernel-bundle.cjs": "3345230ece4854a7eb3c7d806e6d775d763b617cb57faf20c231f3d3260f0c50",
+    "renderer/kernel-bundle.cjs": "7980c7b493c8e96ca1d07a017656e11aa4acc598b9620c32b4d47bb4e74270d1",
     "schemas/addon-manifest.v1.schema.json": "effb7a2775a2b753146bd272d4856bd6b8b0fee4fef4da6c4d2fed29638e679c",
     "schemas/addon-manifest.v2.schema.json": "152112923460a84e2121c6d96368c2ed44981324f51826f3ca9388d9e4240d46",
     "schemas/addon-manifest.v3.schema.json": "62860e6c65cdd316b115fdc2ea41ff378f7774089134eaa18db36ce1f6e57b39",
