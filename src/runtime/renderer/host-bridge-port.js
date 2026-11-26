@@ -29,6 +29,7 @@ const HOST_BRIDGE_PORT_OPTIONAL_METHODS = _ObjectFreeze([
   'writeConfigScope',
   'getHostAdminState',
   'setRemoteAddonPreference',
+  'netFetch',
 ]);
 
 function isValidHostBridgePort(candidate) {
@@ -63,6 +64,7 @@ function wrapHostBridgePort(candidate) {
   const fnGetHostAdminState = typeof candidate.getHostAdminState === 'function' ? candidate.getHostAdminState : null;
   const fnSetRemoteAddonPreference =
     typeof candidate.setRemoteAddonPreference === 'function' ? candidate.setRemoteAddonPreference : null;
+  const fnNetFetch = typeof candidate.netFetch === 'function' ? candidate.netFetch : null;
 
   const wrapped = {
     docGenId,
@@ -99,6 +101,11 @@ function wrapHostBridgePort(candidate) {
   if (fnSetRemoteAddonPreference) {
     wrapped.setRemoteAddonPreference = function setRemoteAddonPreference(pluginId, enabled) {
       return _ReflectApply(fnSetRemoteAddonPreference, candidate, [pluginId, enabled]);
+    };
+  }
+  if (fnNetFetch) {
+    wrapped.netFetch = function netFetch(pluginId, url, init) {
+      return _ReflectApply(fnNetFetch, candidate, [pluginId, url, init]);
     };
   }
 

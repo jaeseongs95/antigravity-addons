@@ -28,6 +28,7 @@ const IPC_CONFIG_READ = 'addon-host:v2:config-read';
 const IPC_CONFIG_WRITE = 'addon-host:v2:config-write';
 const IPC_HOST_ADMIN_STATE = 'addon-host:v2:host-admin-state';
 const IPC_HOST_ADMIN_SET_REMOTE_PREF = 'addon-host:v2:host-admin-set-remote-pref';
+const IPC_NET_FETCH = 'addon-host:v3:net-fetch';
 const IPC_REPORT_ERROR = 'addon-host:v2:report-error';
 const IPC_PING = 'addon-host:v2:ping';
 
@@ -110,6 +111,18 @@ try {
             docGenId,
             pluginId: String(pluginId || ''),
             enabled: Boolean(enabled),
+          });
+        },
+        netFetch(pluginId, url, init) {
+          const safeInit = init && typeof init === 'object' ? init : {};
+          return ipcRenderer.invoke(IPC_NET_FETCH, {
+            docGenId,
+            pluginId: String(pluginId || ''),
+            url: String(url || ''),
+            method: typeof safeInit.method === 'string' ? safeInit.method : 'GET',
+            headers: safeInit.headers && typeof safeInit.headers === 'object' ? safeInit.headers : {},
+            body: typeof safeInit.body === 'string' ? safeInit.body : null,
+            timeoutMs: Number.isFinite(Number(safeInit.timeoutMs)) ? Number(safeInit.timeoutMs) : undefined,
           });
         },
         reportError(pluginId, detail) {

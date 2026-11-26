@@ -171,16 +171,20 @@ ${source}
   }`;
 }
 
-function buildRemoteRuntimeBundleSource({ profile = ANTIGRAVITY_REMOTE_WEB_PROFILE, packedAddons = [] } = {}) {
+function buildRemoteRuntimeBundleSource({ profile = ANTIGRAVITY_REMOTE_WEB_PROFILE, packedAddons = [], drawerShadowMode = 'open' } = {}) {
   const browserProfile = toBrowserRemoteWebProfile(profile);
   const kernelSrc = toLf(buildRendererKernelBundleSource({ includeHostSettingsUi: false }));
   const remoteAdapterDir = path.join(REPO_ROOT, 'src', 'adapters', 'remote-web');
+  const netPolicyAbs = path.join(REPO_ROOT, 'src', 'core', 'net-policy.js');
 
-  const moduleEntries = REMOTE_BROWSER_MODULES.map((relId) => {
-    const abs = path.join(remoteAdapterDir, relId.slice(2));
-    const src = toLf(fs.readFileSync(abs, 'utf8'));
-    return `  ${JSON.stringify(relId)}: function(module, exports, require) {\n${src}\n  }`;
-  });
+  const moduleEntries = [
+    `  ${JSON.stringify('../../core/net-policy.js')}: function(module, exports, require) {\n${toLf(fs.readFileSync(netPolicyAbs, 'utf8'))}\n  }`,
+    ...REMOTE_BROWSER_MODULES.map((relId) => {
+      const abs = path.join(remoteAdapterDir, relId.slice(2));
+      const src = toLf(fs.readFileSync(abs, 'utf8'));
+      return `  ${JSON.stringify(relId)}: function(module, exports, require) {\n${src}\n  }`;
+    }),
+  ];
 
   const addonLiterals = (packedAddons || []).map(serializePackedAddonLiteral);
 
@@ -229,6 +233,7 @@ ${addonLiterals.join(',\n')}
       allowedOrigins: opts.allowedOrigins,
       allowLoopbackHttp: opts.allowLoopbackHttp,
       mountDrawer: opts.mountDrawer,
+      drawerShadowMode: opts.drawerShadowMode || ${JSON.stringify(drawerShadowMode === 'closed' ? 'closed' : 'open')},
       mountFallbackDock: opts.mountFallbackDock,
     });
   }
@@ -483,9 +488,10 @@ function buildAddonUserscript({
   const absManifest = path.resolve(manifestPath);
   const rawManifest = JSON.parse(fs.readFileSync(absManifest, 'utf8'));
   const validation = validateAddonManifest(rawManifest, {
-    hostProfile: profile.id,
+    hostProfileId: profile.id,
     compatibleHostProfiles: profile.compatibleHostProfiles,
-    hostCapabilities: profile.capabilities,
+    supportedCapabilities: profile.supportedCapabilities,
+    forbiddenNetHosts: Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : [],
     strictTrustPolicy: true,
     checkFilesExist: false,
   });
@@ -552,8 +558,32 @@ function buildAddonUserscript({
   // so unpinned modular userscripts cannot gain privileged renderer capabilities.
   const finalTrustLevel = effectiveTrustLevel === 'trusted' && trustPinned ? 'trusted' : 'restricted';
 
+  // BLK-06: Forward apiVersion & Remote-Web-sanitized permissions (strictly stripping localLoopback & desktop-only configBridge)
+  const rawPerms = manifest.permissions && typeof manifest.permissions === 'object' ? manifest.permissions : null;
+  let remotePermissions = null;
+  if (rawPerms) {
+    remotePermissions = {};
+    if (rawPerms.ui && typeof rawPerms.ui === 'object') remotePermissions.ui = rawPerms.ui;
+    if (rawPerms.storage && typeof rawPerms.storage === 'object') remotePermissions.storage = rawPerms.storage;
+    if (rawPerms.events && typeof rawPerms.events === 'object') remotePermissions.events = rawPerms.events;
+    if (rawPerms.services && typeof rawPerms.services === 'object') remotePermissions.services = rawPerms.services;
+    if (rawPerms.net && typeof rawPerms.net === 'object') {
+      remotePermissions.net = {
+        httpsHosts: Array.isArray(rawPerms.net.httpsHosts) ? rawPerms.net.httpsHosts.slice() : [],
+        localLoopback: [],
+      };
+    }
+    if (rawPerms.dom && typeof rawPerms.dom === 'object') {
+      remotePermissions.dom = {
+        anchors: Array.isArray(rawPerms.dom.anchors) ? rawPerms.dom.anchors.slice() : [],
+        documentTransform: Boolean(rawPerms.dom.documentTransform && finalTrustLevel === 'trusted'),
+      };
+    }
+  }
+
   const pluginMeta = {
-    schemaVersion: 2,
+    schemaVersion: manifest.schemaVersion || 2,
+    apiVersion: manifest.apiVersion || (manifest.sourceSchemaVersion === 3 || manifest.schemaVersion === 3 ? 3 : 2),
     sourceSchemaVersion: manifest.sourceSchemaVersion || manifest.schemaVersion || 2,
     pluginId: manifest.pluginId,
     displayName: manifest.displayName || manifest.pluginId,
@@ -567,6 +597,7 @@ function buildAddonUserscript({
     configScopes: [],
     uiSlots: Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [],
     isolation: manifest.isolation || {},
+    ...(remotePermissions ? { permissions: remotePermissions } : {}),
   };
   const settingsSpec =
     pluginMeta.hasSettingsBridge && manifest.settingsBridge && manifest.settingsBridge.fileName
@@ -896,7 +927,7 @@ function verifyRemoteBundleAst(code) {
           const arg = node.arguments[0];
           if (!arg || arg.type !== 'Literal' || typeof arg.value !== 'string') {
             violations.push('FORBIDDEN_DYNAMIC_REQUIRE');
-          } else if (!arg.value.startsWith('./')) {
+          } else if (!/^(?:\.\/[a-z0-9_-]+(?:\.js)?|\.\.\/\.\.\/core\/[a-z0-9_-]+(?:\.js)?)$/i.test(arg.value)) {
             violations.push(`FORBIDDEN_EXTERNAL_REQUIRE:${arg.value}`);
           }
         }
@@ -1391,6 +1422,7 @@ module.exports = {
   normalizeHostLibUrl,
   normalizeConnectHosts,
   buildRemoteRuntimeBundleSource,
+  buildAutoBootSnippet,
   buildHostLibrarySource,
   buildUserscriptMetaHeader,
   buildModularAddonUserscriptMetaHeader,

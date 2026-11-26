@@ -621,6 +621,7 @@ function createHostAdminService({
         hostProfileId: effectiveRemoteProfileId,
         compatibleHostProfiles: profile.id ? [profile.id] : null,
         supportedCapabilities: effectiveRemoteCapabilities,
+        forbiddenNetHosts: Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : null,
         hostVersion,
         strictTrustPolicy,
         fsPort,

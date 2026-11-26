@@ -67,6 +67,7 @@ function buildGeneratedValidators(targetGenDir) {
   const schemas = [
     { version: 1, file: path.join(REPO_ROOT, 'schemas', 'addon-manifest.v1.schema.json'), out: 'validate-v1.cjs' },
     { version: 2, file: path.join(REPO_ROOT, 'schemas', 'addon-manifest.v2.schema.json'), out: 'validate-v2.cjs' },
+    { version: 3, file: path.join(REPO_ROOT, 'schemas', 'addon-manifest.v3.schema.json'), out: 'validate-v3.cjs' },
   ];
 
   for (const spec of schemas) {
@@ -88,26 +89,40 @@ function buildGeneratedValidators(targetGenDir) {
  */
 function buildRendererKernelBundleSource({ includeHostSettingsUi = true } = {}) {
   const rendererDir = path.join(REPO_ROOT, 'src', 'runtime', 'renderer');
+  const coreDir = path.join(REPO_ROOT, 'src', 'core');
   const modules = [
-    './ignore-guard.js',
-    './style-manager.js',
-    './slot-manager.js',
-    './surface-geometry.js',
-    './modal-portal.js',
-    './region-observer.js',
-    './settings-tab-coordinator.js',
-    './host-bridge-port.js',
-    './host-settings-ui.js',
-    './kernel.js',
+    { id: '../../core/ui-schema-validator.js', abs: path.join(coreDir, 'ui-schema-validator.js') },
+    { id: '../../core/service-bus-policy.js', abs: path.join(coreDir, 'service-bus-policy.js') },
+    { id: '../../core/net-policy.js', abs: path.join(coreDir, 'net-policy.js') },
+    { id: './ignore-guard.js', abs: path.join(rendererDir, 'ignore-guard.js') },
+    { id: './style-manager.js', abs: path.join(rendererDir, 'style-manager.js') },
+    { id: './slot-manager.js', abs: path.join(rendererDir, 'slot-manager.js') },
+    { id: './surface-geometry.js', abs: path.join(rendererDir, 'surface-geometry.js') },
+    { id: './placement-engine.js', abs: path.join(rendererDir, 'placement-engine.js') },
+    { id: './modal-portal.js', abs: path.join(rendererDir, 'modal-portal.js') },
+    { id: './region-observer.js', abs: path.join(rendererDir, 'region-observer.js') },
+    { id: './settings-tab-coordinator.js', abs: path.join(rendererDir, 'settings-tab-coordinator.js') },
+    { id: './theme-i18n.js', abs: path.join(rendererDir, 'theme-i18n.js') },
+    { id: './ui-schema-renderer.js', abs: path.join(rendererDir, 'ui-schema-renderer.js') },
+    { id: './toast-manager.js', abs: path.join(rendererDir, 'toast-manager.js') },
+    { id: './service-bus.js', abs: path.join(rendererDir, 'service-bus.js') },
+    { id: './event-bus.js', abs: path.join(rendererDir, 'event-bus.js') },
+    { id: './storage-v3.js', abs: path.join(rendererDir, 'storage-v3.js') },
+    { id: './status-item-registry.js', abs: path.join(rendererDir, 'status-item-registry.js') },
+    { id: './settings-page-coordinator.js', abs: path.join(rendererDir, 'settings-page-coordinator.js') },
+    { id: './context-v3.js', abs: path.join(rendererDir, 'context-v3.js') },
+    { id: './v2-compat-adapter.js', abs: path.join(rendererDir, 'v2-compat-adapter.js') },
+    { id: './host-bridge-port.js', abs: path.join(rendererDir, 'host-bridge-port.js') },
+    { id: './host-settings-ui.js', abs: path.join(rendererDir, 'host-settings-ui.js') },
+    { id: './kernel.js', abs: path.join(rendererDir, 'kernel.js') },
   ];
 
-  const entries = modules.map((relId) => {
-    if (relId === './host-settings-ui.js' && includeHostSettingsUi === false) {
-      return `  ${JSON.stringify(relId)}: function(module, exports) {\n    exports.createHostSettingsUi = null;\n  }`;
+  const entries = modules.map((mod) => {
+    if (mod.id === './host-settings-ui.js' && includeHostSettingsUi === false) {
+      return `  ${JSON.stringify(mod.id)}: function(module, exports) {\n    exports.createHostSettingsUi = null;\n  }`;
     }
-    const abs = path.join(rendererDir, relId.slice(2));
-    const src = toLf(fs.readFileSync(abs, 'utf8'));
-    return `  ${JSON.stringify(relId)}: function(module, exports, require) {\n${src}\n  }`;
+    const src = toLf(fs.readFileSync(mod.abs, 'utf8'));
+    return `  ${JSON.stringify(mod.id)}: function(module, exports, require) {\n${src}\n  }`;
   });
 
   return `'use strict';
@@ -163,7 +178,7 @@ function buildDistRuntime(targetDistDir, sourceGenDir) {
   fs.mkdirSync(targetDistDir, { recursive: true });
 
   // 1. Copy schemas (needed by manifest-validator.js relative require '../../schemas/...')
-  for (const name of ['addon-manifest.v1.schema.json', 'addon-manifest.v2.schema.json']) {
+  for (const name of ['addon-manifest.v1.schema.json', 'addon-manifest.v2.schema.json', 'addon-manifest.v3.schema.json']) {
     writeFileLf(
       path.join(targetDistDir, 'schemas', name),
       fs.readFileSync(path.join(REPO_ROOT, 'schemas', name), 'utf8')

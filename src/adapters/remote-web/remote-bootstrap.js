@@ -133,6 +133,12 @@ function createSwappableBridgePort(kernelState) {
         ? p.writeConfigScope(pluginId, scopeId, rawJson, opts)
         : Promise.resolve({ ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
     },
+    netFetch(pluginId, url, init) {
+      const p = activePort();
+      return p && typeof p.netFetch === 'function'
+        ? p.netFetch(pluginId, url, init)
+        : Promise.resolve({ ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
   });
 }
 
@@ -711,10 +717,10 @@ function renderErrorCardList(doc, container, errors) {
   }
 }
 
-function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab = null, onInvokeHostAction = null }) {
+function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab = null, onInvokeHostAction = null, shadowMode = 'open' }) {
   const noTranslateAttrs = Array.isArray(profile.extraNoTranslateAttributes) ? profile.extraNoTranslateAttributes : [];
   const { hostEl, shadowRoot } = createShadowContainer(doc, DRAWER_HOST_ID, {
-    mode: 'open',
+    mode: shadowMode === 'closed' ? 'closed' : 'open',
     noTranslateAttrs,
     cssText: DRAWER_CSS,
   });
@@ -1049,6 +1055,7 @@ async function bootRemoteWebHost({
   allowedOrigins = null,
   allowLoopbackHttp = false,
   mountDrawer = true,
+  drawerShadowMode = 'open',
   mountFallbackDock = true,
 } = {}) {
   if (!profile || typeof profile !== 'object' || typeof profile.id !== 'string' || !profile.id.trim()) {
@@ -1145,6 +1152,7 @@ async function bootRemoteWebHost({
     storageNamespace: profile.storageNamespace || `remote-addon-host:${profile.id}`,
     storage,
     remoteTransport,
+    forbiddenNetHosts: Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : [],
     configScopeSnapshots,
     onSettingsSaved(pluginId, snapshot) {
       activeKernel.pushPluginSettings(pluginId, snapshot, hostToken);
@@ -1178,6 +1186,7 @@ async function bootRemoteWebHost({
     docGenId,
     hostToken,
     hostProfileId: profile.id,
+    surface: 'remote-web',
     hostBridge: existingKernelState ? undefined : createSwappableBridgePort(kernelState),
     uiAnchors: profile.uiAnchors || {},
     uiSurfaces: profile.uiSurfaces || {},
@@ -1242,6 +1251,7 @@ async function bootRemoteWebHost({
         doc,
         win,
         profile,
+        shadowMode: drawerShadowMode,
         ...drawerCallbacks,
       });
     }
@@ -1282,6 +1292,14 @@ async function bootRemoteWebHost({
       if (persisted) {
         initialSettings = persisted;
       }
+    }
+    if (
+      meta.permissions &&
+      meta.permissions.net &&
+      Array.isArray(meta.permissions.net.httpsHosts) &&
+      meta.permissions.net.httpsHosts.length > 0
+    ) {
+      bridge.bindNetPlugin(pluginId, { httpsHosts: meta.permissions.net.httpsHosts });
     }
 
     let stageRes;

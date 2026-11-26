@@ -31,8 +31,11 @@ function assertTrustPolicyPort(port) {
 function getPrivilegedRequirements(manifest) {
   const caps = new Set(Array.isArray(manifest && manifest.capabilities) ? manifest.capabilities : []);
   const slots = Array.isArray(manifest && manifest.uiSlots) ? manifest.uiSlots : [];
+  const perms = manifest && manifest.permissions && typeof manifest.permissions === 'object' ? manifest.permissions : null;
   const hasMainHook = caps.has('mainHook');
-  const hasDocumentTransform = slots.some((s) => s && s.slot === 'document-transform');
+  const hasDocumentTransform =
+    slots.some((s) => s && s.slot === 'document-transform') ||
+    Boolean(perms && perms.dom && perms.dom.documentTransform === true);
   const hasSettingsBridge = Boolean(
     manifest &&
       manifest.settingsBridge &&
@@ -40,23 +43,42 @@ function getPrivilegedRequirements(manifest) {
       typeof manifest.settingsBridge.fileName === 'string' &&
       manifest.settingsBridge.fileName.length > 0
   );
+  const effectiveConfigBridge =
+    (manifest && manifest.configBridge) || (perms && perms.configBridge) || null;
   const hasConfigBridge = Boolean(
-    manifest &&
-      manifest.configBridge &&
-      typeof manifest.configBridge === 'object' &&
-      Array.isArray(manifest.configBridge.scopes) &&
-      manifest.configBridge.scopes.length > 0
+    effectiveConfigBridge &&
+      typeof effectiveConfigBridge === 'object' &&
+      Array.isArray(effectiveConfigBridge.scopes) &&
+      effectiveConfigBridge.scopes.length > 0
+  );
+  const hasLocalLoopback = Boolean(
+    perms &&
+      perms.net &&
+      Array.isArray(perms.net.localLoopback) &&
+      perms.net.localLoopback.length > 0
+  );
+  const hasHostServiceProvide = Boolean(
+    perms &&
+      perms.services &&
+      Array.isArray(perms.services.provide) &&
+      perms.services.provide.some(
+        (entry) => entry && typeof entry.name === 'string' && entry.name.trim().startsWith('host.')
+      )
   );
   const required = [];
   if (hasMainHook) required.push('mainHook');
   if (hasDocumentTransform) required.push('document-transform');
   if (hasSettingsBridge) required.push('settingsBridge');
   if (hasConfigBridge) required.push('configBridge');
+  if (hasLocalLoopback) required.push('net.localLoopback');
+  if (hasHostServiceProvide) required.push('services.host');
   return {
     hasMainHook,
     hasDocumentTransform,
     hasSettingsBridge,
     hasConfigBridge,
+    hasLocalLoopback,
+    hasHostServiceProvide,
     requiresTrustApproval: required.length > 0 || (manifest && manifest.trustLevel === 'trusted'),
     privilegedCapabilities: required,
   };

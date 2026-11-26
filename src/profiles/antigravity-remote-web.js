@@ -167,7 +167,16 @@ const REMOTE_WEB_UI_GRID_MERGES = Object.freeze([
   Object.freeze({
     section: '[data-testid="customizations-installed-plugins"]',
     secondary: '[data-testid="cloud-app-cards"]',
+    wrapperSelector: 'div',
+    gridSelector: 'div.grid',
   }),
+]);
+
+const REMOTE_WEB_FORBIDDEN_NET_HOSTS = Object.freeze([
+  'antigravity.google.com',
+  'accounts.google.com',
+  'oauth2.googleapis.com',
+  'myaccount.google.com',
 ]);
 
 const ANTIGRAVITY_REMOTE_WEB_PROFILE = Object.freeze({
@@ -185,6 +194,7 @@ const ANTIGRAVITY_REMOTE_WEB_PROFILE = Object.freeze({
   uiAnchors: REMOTE_WEB_UI_ANCHORS,
   uiSurfaces: REMOTE_WEB_UI_SURFACES,
   uiGridMerges: REMOTE_WEB_UI_GRID_MERGES,
+  forbiddenNetHosts: REMOTE_WEB_FORBIDDEN_NET_HOSTS,
   resolvePaths: resolveAntigravityRemoteWebPaths,
   resolveConfigScopes: resolveAntigravityConfigScopes,
 });
@@ -217,6 +227,9 @@ function toBrowserRemoteWebProfile(profile = ANTIGRAVITY_REMOTE_WEB_PROFILE) {
     uiSurfaces: profile.uiSurfaces || {},
     uiGridMerges: Object.freeze(
       Array.isArray(profile.uiGridMerges) ? profile.uiGridMerges.slice() : []
+    ),
+    forbiddenNetHosts: Object.freeze(
+      Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts.slice() : REMOTE_WEB_FORBIDDEN_NET_HOSTS.slice()
     ),
   });
 }

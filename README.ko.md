@@ -6,7 +6,18 @@
 > **언어**: [English (README.md)](./README.md) | 한국어  
 > *(구 `antigravity-native-addon-host` — 기존 `addon-host` CLI 명령, `ADDON_HOST_LOADER_V2` 패치 마커 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**1클릭 공개 HTTPS 모듈형 `@require` Userscript 배포·다중 샌드박스 공존(`--build-addon-userscript`), 휴대용 Userscript·보조 MV3 번들링(`--build-remote`), 내장 설정 화면 `애드온 관리(Addon Manager)` UI, 무의존성(0-dep) 스테이징 런타임, Electron 45 샌드박스 프리로드 격리, Shadow DOM UI 격리, 화면별 콘텐츠 영역·중앙 좌표 API, SHA-256 신뢰 핀닝, 양방향 `settingsBridge` 및 선언형 Named-Scope `configBridge`를 제공하는 벤더 중립 데스크톱·원격 웹 애드온 호스트 프레임워크(`v2.8.0`, `AddonManifest.v2` 및 `v1` 하위 호환 지원)입니다.**
+**3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 데스크톱 `trusted` 전용 `localLoopback`), 별도 `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크(`v3.0.0`)입니다.**
+
+## v3.0.0 주요 업데이트 (API-First 3-Tier 프레임워크 · `@antigravity-addons/sdk` · 1-Click Hub)
+
+- **3-Tier ISP 분리 `AddonContextV3` 및 `v2` 하위 호환 어댑터** ([API_V3.ko.md](./docs/API_V3.ko.md)):
+  - **Tier 1 (Zero-DOM)**: `ui.showToast`, `ui.confirm`, `ui.prompt`, `ui.registerCommand`, `ui.registerStatusItem`(`host.statusbar` 서비스 위임 + 기본 폴백 바 + 클릭 modifier), `ui.registerSettingsPage`(Desktop + Remote Web 통합).
+  - **Tier 2 (호스트 배치 오버레이 + 선언형 JSON 스키마)**: `ui.openPopup`, `ui.openModal`, `ui.openPanel` (`PlacementSpec` 플립/시프트/리사이즈·스크롤 추적, 모바일 `<=640px` 바텀시트 자동 전환, Top Layer `<dialog>`/`popover`, 제거 불가 `Addon: <displayName>` 배지, 16종 폐쇄형 프리미티브, 정적 `visibleWhen`/`disabledWhen`, ID 기반 인플레이스 `handle.update(nextTree)`).
+  - **Tier 3 (통제된 탈출구)**: `ui.mountCanvas`(open Shadow DOM + `--ag-*` 시맨틱 토큰), `ui.createStyleElementSafe`, 매니페스트 권한 게이팅 `dom`.
+  - **ISP·보안·SOLID #0**: `env`에서 원시 `hostProfileId` 제거, 미선언 `net`/`dom`/`configBridge` 생략, 이중 키 `net.fetch`(사전 DNS 조회로 RFC1918·IMDS·DNS Rebinding 차단 및 `localLoopback` 0-리다이렉트), `services` 기본 거부 `allowedCallers`·프로토타입 키 제거, `kernel.js` 벤더 셀렉터 프로필 분리 및 CI `npm run check:solid` 게이트 적용.
+- **별도 `@antigravity-addons/sdk` (`packages/sdk/`) 및 GitHub Pages 1-Click Hub (`docs/hub/`)**:
+  - 런타임 호스트 신규 npm 의존성 0개를 유지하면서 `index.d.ts`, `defineAddon()`, `h()`, 실제 커널 기반 `createTestHost({ surface })`, `ag-addon init|check|dev|build|pack` CLI 및 재사용 GitHub Action 제공.
+  - 결정적 `npm run build:hub` / `check:hub`로 Safari 감지 시 공식 큐레이션 올인원 `.user.js`(`closed` Shadow DOM + `GM_*` 클로저 섀도잉)로 안내하는 1-Click Hub 생성.
 
 ## v2.8.0 주요 업데이트 (공개 HTTPS 모듈형 애드온 Userscript · 다중 샌드박스 공존)
 

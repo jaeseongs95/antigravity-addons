@@ -277,8 +277,19 @@ const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
     Object.freeze({
       section: '[data-testid="customizations-installed-plugins"]',
       secondary: '[data-testid="cloud-app-cards"]',
+      wrapperSelector: 'div',
+      gridSelector: 'div.grid',
     }),
   ]),
+  forbiddenNetHosts: Object.freeze([
+    'antigravity.google.com',
+    'accounts.google.com',
+    'oauth2.googleapis.com',
+    'myaccount.google.com',
+  ]),
+  namedLoopbackTargets: Object.freeze({
+    'antigravity-sidecar': 18910,
+  }),
   allowedUrlProtocols: Object.freeze(['http:', 'https:']),
   allowedUrlHosts: Object.freeze(['127.0.0.1', 'localhost', '::1', '[::1]']),
   legacyPatchMarkers: Object.freeze([

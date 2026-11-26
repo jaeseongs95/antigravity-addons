@@ -1,7 +1,7 @@
 {
   "name": "antigravity-addons",
-  "version": "2.9.0",
-  "description": "Vendor-independent native desktop & remote web addon host framework and shared plugin isolation contract (AddonManifest v1/v2) with zero-dependency staged runtime, Shadow DOM isolation, SHA-256 trust pinning, and named-scope Config Bridge.",
+  "version": "3.0.0",
+  "description": "Vendor-independent API-First native desktop & remote web addon host framework (AddonManifest v1/v2/v3, 3-Tier AddonContextV3, dual-key net.fetch, zero-dependency staged runtime, Shadow DOM isolation, SHA-256 trust pinning).",
   "license": "MIT",
   "main": "src/index.js",
   "bin": {
@@ -13,10 +13,13 @@
     "check:runtime": "node scripts/build-runtime.js --check",
     "build:remote": "node scripts/build-remote.js",
     "check:remote": "node scripts/build-remote.js --no-addons --check",
+    "build:hub": "node scripts/build-hub.js",
+    "check:hub": "node scripts/build-hub.js --check",
+    "check:solid": "node scripts/check-solid-zero.js",
     "test": "node --test \"test/unit/**/*.test.js\" \"test/e2e/electron-real-runtime.test.js\"",
-    "test:e2e:remote": "node --test \"test/e2e/v23-remote-web-chromium.test.js\"",
+    "test:e2e:remote": "node --test \"test/e2e/v23-remote-web-chromium.test.js\" \"test/e2e/v30-api-first-chromium.test.js\"",
     "test:e2e:isolated": "node scripts/e2e-isolated-runtime.cjs",
-    "test:all": "npm run check:runtime && npm run check:remote && npm test && npm run test:e2e:remote && npm run test:e2e:isolated",
+    "test:all": "npm run check:solid && npm run check:runtime && npm run check:remote && npm run check:hub && npm test && npm run test:e2e:remote && npm run test:e2e:isolated",
     "status": "node ./bin/addon-host.js --status",
     "doctor": "node ./bin/addon-host.js --doctor"
   },

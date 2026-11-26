@@ -1,0 +1,28 @@
+name: Addon Release (AddonManifest.v3)
+
+on:
+  workflow_call:
+    inputs:
+      addon-dir:
+        description: 'Directory containing addon-manifest.json'
+        required: false
+        default: '.'
+        type: string
+
+jobs:
+  check-and-pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate and pack AddonManifest.v3 plugin
+        run: |
+          npx --yes @antigravity-addons/sdk check "${{ inputs.addon-dir }}"
+          npx --yes @antigravity-addons/sdk pack "${{ inputs.addon-dir }}"
+      - name: Upload packed addon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: addon-dist
+          path: ${{ inputs.addon-dir }}/dist
