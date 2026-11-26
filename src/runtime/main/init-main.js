@@ -326,7 +326,7 @@ function createHostRuntimeController(cfg, deps = {}) {
 
   const remoteBridgeServer = createRemoteBridgeServer({
     configPath: remoteBridgeConfigPath,
-    hostVersion: cfg.hostVersion || '3.3.0',
+    hostVersion: cfg.hostVersion || '3.3.1',
     buildSha8: cfg.buildSha8 || 'dev',
     profileId: profile.id || null,
     allowedOrigins: Array.isArray(profile.remoteAllowedOrigins) ? profile.remoteAllowedOrigins : [],

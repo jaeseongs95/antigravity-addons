@@ -11,6 +11,7 @@ const { createRendererKernel } = require('../../src/runtime/renderer/kernel');
 const { bootRemoteWebHost } = require('../../src/adapters/remote-web/remote-bootstrap');
 const { ANTIGRAVITY_HOST_PROFILE } = require('../../src/profiles/antigravity');
 const { ANTIGRAVITY_REMOTE_WEB_PROFILE, toBrowserRemoteWebProfile } = require('../../src/profiles/antigravity-remote-web');
+const { buildHostLoaderScriptSource } = require('../../src/adapters/electron/host-loader-builder');
 const { createTestHost } = require('../../packages/sdk');
 
 test('TC-V330-UI-01: segmented primitive validation, build, click, patch, disabled, and untrusted rejection', () => {
@@ -329,4 +330,139 @@ test('TC-V330-SEC-04: ctx.ui.registerSectionAction mounts on Antigravity target,
       }
     );
   }, /ERR_UI_SECTION_ACTIONS_FORBIDDEN/);
+});
+
+test('TC-V331-SEC-05: Desktop host-loader serializes uiSectionTargets and section-action-registry mounts on real Antigravity nested button/count DOM without false positives', async () => {
+  // 1. Desktop addon-host-loader.js MUST serialize profile.uiSectionTargets
+  const loaderSrc = buildHostLoaderScriptSource(
+    ANTIGRAVITY_HOST_PROFILE.resolvePaths(process.env),
+    ANTIGRAVITY_HOST_PROFILE,
+    { hostVersion: '3.3.1', buildSha8: 'test3310' }
+  );
+  assert.equal(loaderSrc.includes('uiSectionTargets'), true);
+  assert.equal(loaderSrc.includes('customizations.mcp-servers.header'), true);
+
+  // 2. Real Antigravity v2.35.2 nested collapsible header DOM (no data-testid="customizations-view", no h2)
+  const host = createTestHost({
+    surface: 'desktop',
+    uiSectionTargets: ANTIGRAVITY_HOST_PROFILE.uiSectionTargets,
+  });
+
+  // False-positive decoy inside conversation-view MUST be ignored
+  const convView = host.doc.createElement('div');
+  convView.setAttribute('data-testid', 'conversation-view');
+  const convRow = host.doc.createElement('div');
+  const convLabel = host.doc.createElement('span');
+  convLabel.textContent = 'MCP 서버';
+  const convBtns = host.doc.createElement('div');
+  const convCopy = host.doc.createElement('button');
+  convCopy.textContent = 'Copy';
+  convBtns.appendChild(convCopy);
+  convRow.appendChild(convLabel);
+  convRow.appendChild(convBtns);
+  convView.appendChild(convRow);
+  host.doc.body.appendChild(convView);
+
+  // Real Customizations -> Installed -> MCP 서버 3 v header
+  const page = host.doc.createElement('div');
+  const headerRow = host.doc.createElement('div');
+  headerRow.setAttribute('id', 'mcp-header-row');
+  const leftWrap = host.doc.createElement('div');
+  const toggleBtn = host.doc.createElement('button');
+  const titleSpan = host.doc.createElement('span');
+  titleSpan.textContent = 'MCP 서버';
+  const countSpan = host.doc.createElement('span');
+  countSpan.textContent = '3';
+  const chevSvg = host.doc.createElement('svg');
+  toggleBtn.appendChild(titleSpan);
+  toggleBtn.appendChild(countSpan);
+  toggleBtn.appendChild(chevSvg);
+  leftWrap.appendChild(toggleBtn);
+
+  const rightActions = host.doc.createElement('div');
+  rightActions.setAttribute('id', 'mcp-right-actions');
+  const cfgBtn = host.doc.createElement('button');
+  cfgBtn.textContent = '설정';
+  const addBtn = host.doc.createElement('button');
+  addBtn.textContent = '+';
+  rightActions.appendChild(cfgBtn);
+  rightActions.appendChild(addBtn);
+  headerRow.appendChild(leftWrap);
+  headerRow.appendChild(rightActions);
+  page.appendChild(headerRow);
+  host.doc.body.appendChild(page);
+
+  await host.mountPlugin(
+    {
+      schemaVersion: 3,
+      pluginId: 'antigravity-mcp-manager',
+      displayName: 'MCP Manager',
+      version: '4.3.0',
+      capabilities: ['renderer'],
+      entry: { rendererScript: 'renderer.js' },
+      permissions: { ui: { sectionActions: true } },
+    },
+    (ctx) => {
+      ctx.ui.registerSectionAction({
+        id: 'manage-mcp',
+        target: 'customizations.mcp-servers.header',
+        label: 'MCP 관리',
+        badge: '3',
+        onClick: () => {},
+      });
+    }
+  );
+
+  // Mounted inside rightActions BEFORE native buttons; ZERO mount inside conversation-view
+  assert.equal(convBtns.childNodes.length, 1);
+  assert.equal(rightActions.childNodes.length, 3);
+  assert.equal(
+    rightActions.childNodes[0].getAttribute('data-addon-host-section-actions'),
+    'customizations.mcp-servers.header'
+  );
+  assert.equal(rightActions.childNodes[1], cfgBtn);
+  assert.equal(host.getSectionActions()[0].mounted, true);
+  host.disposePlugin('antigravity-mcp-manager');
+
+  // 3. Direct button sibling header row (button('MCP Servers 3') + button(settings) + button(+))
+  const host2 = createTestHost({
+    surface: 'desktop',
+    uiSectionTargets: ANTIGRAVITY_HOST_PROFILE.uiSectionTargets,
+  });
+  const directRow = host2.doc.createElement('div');
+  const collapseBtn = host2.doc.createElement('button');
+  collapseBtn.textContent = 'MCP Servers 3';
+  const settingsBtn = host2.doc.createElement('button');
+  settingsBtn.textContent = 'Settings';
+  directRow.appendChild(collapseBtn);
+  directRow.appendChild(settingsBtn);
+  host2.doc.body.appendChild(directRow);
+
+  await host2.mountPlugin(
+    {
+      schemaVersion: 3,
+      pluginId: 'antigravity-mcp-manager',
+      displayName: 'MCP Manager',
+      version: '4.3.0',
+      capabilities: ['renderer'],
+      entry: { rendererScript: 'renderer.js' },
+      permissions: { ui: { sectionActions: true } },
+    },
+    (ctx) => {
+      ctx.ui.registerSectionAction({
+        id: 'manage-mcp',
+        target: 'customizations.mcp-servers.header',
+        label: 'MCP 관리',
+        onClick: () => {},
+      });
+    }
+  );
+  assert.equal(directRow.childNodes.length, 3);
+  assert.equal(directRow.childNodes[0], collapseBtn);
+  assert.equal(
+    directRow.childNodes[1].getAttribute('data-addon-host-section-actions'),
+    'customizations.mcp-servers.header'
+  );
+  assert.equal(directRow.childNodes[2], settingsBtn);
+  host2.disposePlugin('antigravity-mcp-manager');
 });

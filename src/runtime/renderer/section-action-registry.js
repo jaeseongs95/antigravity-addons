@@ -116,6 +116,145 @@ function applyShieldAttrs(el, extraNoTranslateAttributes) {
   }
 }
 
+const DEFAULT_LABEL_SELECTORS = 'h1, h2, h3, h4, h5, h6, [role="heading"], button, span, summary';
+const DEFAULT_EXCLUDE_ANCESTORS = ['aside', 'nav', 'pre', 'code', '[contenteditable="true"]'];
+const COUNT_SUFFIX_RE = /\s*(?:\(\s*\d+\s*\)|\d+)$/;
+const MAX_LABEL_TEXT_LEN = 64;
+
+function matchesSimpleSelector(el, sel) {
+  if (!el || el.nodeType !== 1 || typeof sel !== 'string') return false;
+  const trimmed = sel.trim();
+  if (!trimmed) return false;
+  if (typeof el.matches === 'function') {
+    try {
+      return Boolean(el.matches(trimmed));
+    } catch (_e) {}
+  }
+  const attrMatch = trimmed.match(/^([a-zA-Z0-9_-]+)?\[([^=\]]+)(?:="([^"]*)")?\]$/);
+  if (attrMatch) {
+    if (attrMatch[1] && _String(el.tagName || '').toLowerCase() !== attrMatch[1].toLowerCase()) return false;
+    const val = typeof el.getAttribute === 'function' ? el.getAttribute(attrMatch[2]) : null;
+    return val !== null && (attrMatch[3] === undefined || val === attrMatch[3]);
+  }
+  return _String(el.tagName || '').toLowerCase() === trimmed.toLowerCase();
+}
+
+function isInsideExcludedAncestor(el, excludeSelectors) {
+  const allExcludes = ['[data-addon-host-ignore]', `[${SECTION_GROUP_ATTR}]`, ...DEFAULT_EXCLUDE_ANCESTORS];
+  if (_ArrayIsArray(excludeSelectors)) {
+    for (let i = 0; i < excludeSelectors.length; i += 1) {
+      if (typeof excludeSelectors[i] === 'string' && excludeSelectors[i].trim()) {
+        allExcludes.push(excludeSelectors[i].trim());
+      }
+    }
+  }
+  let cur = el;
+  while (cur && cur.nodeType === 1) {
+    for (let i = 0; i < allExcludes.length; i += 1) {
+      if (matchesSimpleSelector(cur, allExcludes[i])) return true;
+    }
+    cur = cur.parentElement || cur.parentNode;
+  }
+  return false;
+}
+
+function matchesHeadingText(rawText, headingTexts, allowCountSuffix) {
+  const txt = normalizeText(rawText);
+  if (!txt || txt.length > MAX_LABEL_TEXT_LEN) return false;
+  if (headingTexts.includes(txt)) return true;
+  if (allowCountSuffix !== false) {
+    const stripped = txt.replace(COUNT_SUFFIX_RE, '').trim();
+    if (stripped && headingTexts.includes(stripped)) return true;
+  }
+  return false;
+}
+
+function isInteractiveNode(node) {
+  if (!node || node.nodeType !== 1) return false;
+  const tag = _String(node.tagName || '').toUpperCase();
+  if (tag === 'BUTTON' || tag === 'A') return true;
+  if (typeof node.getAttribute === 'function' && node.getAttribute('role') === 'button') return true;
+  return false;
+}
+
+function findHeaderRowMount(matchedEl, doc, targetConfig) {
+  const maxDepth =
+    Number.isInteger(targetConfig.maxParentDepth) && targetConfig.maxParentDepth >= 1
+      ? Math.min(8, targetConfig.maxParentDepth)
+      : 5;
+  const requireSiblingActions = targetConfig.requireSiblingActions === true;
+
+  let branch = matchedEl;
+  let row = branch ? branch.parentElement || branch.parentNode : null;
+
+  for (let depth = 1; depth <= maxDepth && row && row.nodeType === 1; depth += 1) {
+    if (row === doc || row === doc.body || row === doc.documentElement) {
+      break;
+    }
+    const rawChildren = _ArrayFrom(row.children || row.childNodes || []).filter(
+      (node) =>
+        node &&
+        node.nodeType === 1 &&
+        !(typeof node.getAttribute === 'function' && node.getAttribute(SECTION_GROUP_ATTR))
+    );
+    const branchIdx = rawChildren.indexOf(branch);
+    const siblings = rawChildren.filter((node) => node !== branch);
+
+    // Priority 1: sibling container (div/span/nav) holding interactive buttons on the same header row
+    for (let i = siblings.length - 1; i >= 0; i -= 1) {
+      const sib = siblings[i];
+      const tag = _String(sib.tagName || '').toUpperCase();
+      if (tag === 'DIV' || tag === 'SPAN' || tag === 'NAV') {
+        const hasInteractive =
+          typeof sib.querySelector === 'function' && Boolean(sib.querySelector('button, a, [role="button"]'));
+        if (hasInteractive) {
+          return {
+            container: sib,
+            insertPosition: targetConfig.insertPosition || 'before-first-child',
+          };
+        }
+      }
+    }
+
+    // Priority 2: direct interactive button/link siblings on the same header row
+    let firstDirectInteractive = null;
+    for (let i = 0; i < rawChildren.length; i += 1) {
+      const child = rawChildren[i];
+      if (child === branch) continue;
+      if (isInteractiveNode(child)) {
+        if (branchIdx !== -1 && i > branchIdx) {
+          firstDirectInteractive = child;
+          break;
+        }
+        if (!firstDirectInteractive) firstDirectInteractive = child;
+      }
+    }
+    if (firstDirectInteractive) {
+      return {
+        container: row,
+        insertPosition: 'before-node',
+        referenceNode: firstDirectInteractive,
+      };
+    }
+
+    branch = row;
+    row = branch.parentElement || branch.parentNode;
+  }
+
+  if (requireSiblingActions) {
+    return null;
+  }
+
+  const directParent = matchedEl.parentElement || matchedEl.parentNode;
+  if (!directParent || directParent === doc || directParent === doc.body || directParent === doc.documentElement) {
+    return null;
+  }
+  return {
+    container: directParent,
+    insertPosition: 'append',
+  };
+}
+
 function resolveTargetMountPoint(doc, targetConfig) {
   if (!doc || !targetConfig || typeof targetConfig !== 'object') return null;
   const rootSelectors = _ArrayIsArray(targetConfig.rootSelectors) ? targetConfig.rootSelectors : [];
@@ -132,7 +271,13 @@ function resolveTargetMountPoint(doc, targetConfig) {
         }
       } catch (_e) {}
     }
-    if (!root) return null;
+    if (!root) {
+      if (targetConfig.fallbackToDocumentRoot === true) {
+        root = doc.body || doc.documentElement || doc;
+      } else {
+        return null;
+      }
+    }
   } else {
     root = doc.body || doc.documentElement || doc;
   }
@@ -161,55 +306,43 @@ function resolveTargetMountPoint(doc, targetConfig) {
     return null;
   }
 
-  let headings = [];
+  const labelSelectorStr =
+    _ArrayIsArray(targetConfig.labelSelectors) && targetConfig.labelSelectors.length > 0
+      ? targetConfig.labelSelectors.filter((s) => typeof s === 'string' && s.trim()).join(', ')
+      : DEFAULT_LABEL_SELECTORS;
+  const allowCountSuffix = targetConfig.allowCountSuffix !== false;
+  const excludeAncestors = _ArrayIsArray(targetConfig.excludeAncestorSelectors)
+    ? targetConfig.excludeAncestorSelectors
+    : [];
+
+  let candidates = [];
   try {
-    headings = _ArrayFrom(root.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]'));
+    candidates = _ArrayFrom(root.querySelectorAll(labelSelectorStr || DEFAULT_LABEL_SELECTORS));
   } catch (_e) {
-    headings = [];
+    candidates = [];
   }
 
-  let matchedHeading = null;
-  for (let i = 0; i < headings.length; i += 1) {
-    const h = headings[i];
-    if (!h) continue;
-    const txt = normalizeText(h.textContent);
-    if (txt && headingTexts.includes(txt)) {
-      matchedHeading = h;
-      break;
+  const matched = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const el = candidates[i];
+    if (!el || isInsideExcludedAncestor(el, excludeAncestors)) continue;
+    if (matchesHeadingText(el.textContent, headingTexts, allowCountSuffix)) {
+      matched.push(el);
     }
   }
-  if (!matchedHeading) return null;
+  if (matched.length === 0) return null;
 
-  const headerRow = matchedHeading.parentElement || matchedHeading.parentNode;
-  if (!headerRow) return null;
-
-  // Prefer an existing sibling action container inside the header row (e.g., div holding native buttons)
-  const siblings = _ArrayFrom(headerRow.children || headerRow.childNodes || []).filter(
-    (node) =>
-      node &&
-      node.nodeType === 1 &&
-      node !== matchedHeading &&
-      !(typeof node.getAttribute === 'function' && node.getAttribute(SECTION_GROUP_ATTR))
+  // Prefer innermost matching nodes first (e.g., <span>MCP 서버</span> before its wrapping <button>)
+  const innermost = matched.filter(
+    (el) => !matched.some((other) => other !== el && typeof el.contains === 'function' && el.contains(other))
   );
-  for (let i = siblings.length - 1; i >= 0; i -= 1) {
-    const sib = siblings[i];
-    const tag = _String(sib.tagName || '').toUpperCase();
-    if (tag === 'DIV' || tag === 'SPAN' || tag === 'NAV') {
-      const hasInteractive =
-        typeof sib.querySelector === 'function' && Boolean(sib.querySelector('button, a, [role="button"]'));
-      if (hasInteractive) {
-        return {
-          container: sib,
-          insertPosition: targetConfig.insertPosition || 'before-first-child',
-        };
-      }
-    }
-  }
+  const ordered = innermost.concat(matched.filter((el) => !innermost.includes(el)));
 
-  return {
-    container: headerRow,
-    insertPosition: 'append',
-  };
+  for (let i = 0; i < ordered.length; i += 1) {
+    const mount = findHeaderRowMount(ordered[i], doc, targetConfig);
+    if (mount && mount.container) return mount;
+  }
+  return null;
 }
 
 function createSectionActionRegistry(
@@ -410,6 +543,13 @@ function createSectionActionRegistry(
         applyShieldAttrs(grp, extraNoTranslateAttributes);
 
         if (
+          mount.insertPosition === 'before-node' &&
+          mount.referenceNode &&
+          mount.referenceNode.parentNode === mount.container &&
+          typeof mount.container.insertBefore === 'function'
+        ) {
+          mount.container.insertBefore(grp, mount.referenceNode);
+        } else if (
           (mount.insertPosition === 'before-first-child' || mount.insertPosition === 'prepend') &&
           mount.container.firstChild &&
           typeof mount.container.insertBefore === 'function'

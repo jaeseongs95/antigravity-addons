@@ -155,6 +155,38 @@ function replaceStringValueLiterals(text, repMap) {
   return lastIdx === 0 ? text : out + text.slice(lastIdx);
 }
 
+// Token-aware object-key unquoting for valid JS identifiers (preserves "hostVersion" & legacy regex-matched keys)
+const SAFE_JS_IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+const KEEP_QUOTED_KEYS = new Set([
+  'hostVersion',
+  '__proto__',
+  'settingsUi',
+  'uiSurfaces',
+  'uiSectionTargets',
+  'remoteProfileId',
+  'remotePrefsPath',
+  'remoteDistDir',
+]);
+
+function unquoteSafeObjectKeys(text) {
+  const tokenRe = /"(?:\\.|[^"\\])*"/g;
+  let out = '';
+  let lastIdx = 0;
+  let m;
+  while ((m = tokenRe.exec(text)) !== null) {
+    const end = m.index + m[0].length;
+    if (text[end] !== ':') continue;
+    const prev = m.index > 0 ? text[m.index - 1] : '';
+    if (prev !== '{' && prev !== ',') continue;
+    const key = m[0].slice(1, -1);
+    if (!KEEP_QUOTED_KEYS.has(key) && SAFE_JS_IDENT_RE.test(key)) {
+      out += text.slice(lastIdx, m.index) + key;
+      lastIdx = end;
+    }
+  }
+  return lastIdx === 0 ? text : out + text.slice(lastIdx);
+}
+
 function serializeDeduplicatedConfigJs(obj) {
   const raw = serializeSafeInlineJson(obj);
   const arrBindings = [];
@@ -284,8 +316,8 @@ function serializeDeduplicatedConfigJs(obj) {
     expr = replaceStringValueLiterals(expr, strRepMap);
   }
 
-  // 4. Hoist up to 4 high-frequency common string prefixes across remaining non-key string values (keeps thin shim well <4096 B)
-  for (let pPass = 0; pPass < 4; pPass += 1) {
+  // 4. Hoist up to 6 high-frequency common string prefixes across remaining non-key string values (keeps thin shim well <4096 B)
+  for (let pPass = 0; pPass < 6; pPass += 1) {
     const pVar = pPass === 0 ? '_P' : `_P${pPass}`;
     const prefCounts = new Map();
     const allTargets = [...strBindings, ...arrBindings, ...objBindings, expr];
@@ -399,6 +431,11 @@ function serializeDeduplicatedConfigJs(obj) {
     }
   }
 
+  for (let i = 0; i < objBindings.length; i += 1) {
+    objBindings[i] = unquoteSafeObjectKeys(objBindings[i]);
+  }
+  expr = unquoteSafeObjectKeys(expr);
+
   const defs = [];
   const merged = [...strBindings, ...arrBindings, ...objBindings];
   if (merged.length > 0) defs.push(`const ${merged.join(',')};`);
@@ -489,6 +526,9 @@ function buildHostLoaderScriptSource(
         : {}),
       ...(Array.isArray(profile.uiGridMerges) && profile.uiGridMerges.length > 0
         ? { uiGridMerges: profile.uiGridMerges }
+        : {}),
+      ...(profile.uiSectionTargets && Object.keys(profile.uiSectionTargets).length > 0
+        ? { uiSectionTargets: profile.uiSectionTargets }
         : {}),
       ...(profile.settingsUi ? { settingsUi: profile.settingsUi } : {}),
       ...(profile.portalBridge ? { portalBridge: profile.portalBridge } : {}),
