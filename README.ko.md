@@ -6,7 +6,18 @@
 > **언어**: [English (README.md)](./README.md) | 한국어  
 > *(구 `antigravity-native-addon-host` — 기존 `addon-host` CLI 명령, `ADDON_HOST_LOADER_V2` 패치 마커 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 데스크톱 `trusted` 전용 `localLoopback`), 별도 `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크(`v3.0.1`)입니다.**
+**호스트 중앙 관리형 통합 원격 브리지(`ag-bridge-v1:` 한 줄 페어링 코드 + 앱 내 1클릭 원격 번들 재빌드), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 신뢰 `localLoopback`), 별도 `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크(`v3.1.0`)입니다.**
+
+## v3.1.0 주요 업데이트 (호스트 중앙 관리형 통합 원격 브리지 · `userApprovedHttps` 수정)
+
+- **Native Host 중앙 관리형 통합 원격 브리지 (`src/runtime/main/remote-bridge-server.js` + `src/adapters/remote-web/remote-host-transport.js`)**:
+  - 원격 웹 <-> 데스크톱 통신을 Native Host가 단일 프레임워크로 통합 관리해 개별 플러그인이 각자 원격 URL/토큰 입력 UI나 독자 원격 서버를 만들 필요가 없습니다.
+  - 기본 비활성(`enabled: false`)이며 데스크톱 **설정 -> 애드온 관리**에서 활성화·설정합니다. CSPRNG 256비트 토큰을 예약 파일 `remote-bridge.json`(`0o600`)에 저장하고 엄격한 정확 일치 `Origin` CORS, 상수 시간 Bearer 인증, 매 요청 실시간 SHA-256 신뢰 검증, 한 줄 페어링 코드(`ag-bridge-v1:...`)를 제공합니다.
+  - 원격 웹 드로어의 **Host Bridge** 탭(인덱스 3)에서 한 번만 페어링하면 모든 플러그인의 `ctx.settingsBridge`, `ctx.configBridge`, `ctx.net.fetch`(신뢰 `localLoopback` 사이드카 포함)를 투명하게 라우팅하고 `host:remote-bridge-changed` 이벤트를 전파합니다.
+- **데스크톱 앱 내 1클릭 원격 번들 재빌드**:
+  - 데스크톱 **설정 -> 애드온 관리**에 **`지금 원격 번들 빌드`** 버튼을 추가해 `execFile`(`shell: false`)로 호스트 CLI를 직접 실행합니다.
+- **결함 수정: `permissions.net.userApprovedHttps: true` 보존**:
+  - `src/core/manifest-normalizer.js` (`normalizePermissionsV3`)에서 v3 매니페스트 정규화 시 `userApprovedHttps: true`가 누락되던 문제를 수정했습니다.
 
 ## v3.0.1 주요 업데이트 (v3 생태계 패리티 및 품질 보강)
 

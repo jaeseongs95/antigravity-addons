@@ -15,6 +15,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const childProcess = require('node:child_process');
 const { parseSafeJson } = require('../shared/safe-json');
 const { BOOKMARKLET_MAX_RUNNABLE_CHARS } = require('../shared/constants');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
@@ -104,6 +105,7 @@ function readHostCliMetaFile(metaPath) {
     exists: false,
     path: metaPath || null,
     cliEntryPath: null,
+    nodeExecPath: null,
     updatedAt: null,
     error: null,
   };
@@ -126,6 +128,7 @@ function readHostCliMetaFile(metaPath) {
       return { ...empty, ok: false, exists: true, error: 'ERR_HOST_CLI_META_INVALID_ROOT' };
     }
     const rawCli = typeof parsed.cliEntryPath === 'string' ? parsed.cliEntryPath.trim() : '';
+    const rawNode = typeof parsed.nodeExecPath === 'string' ? parsed.nodeExecPath.trim() : '';
     const updatedAt = typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null;
     if (!isSafeShellQuotedPath(rawCli)) {
       return { ...empty, ok: false, exists: true, updatedAt, error: 'ERR_HOST_CLI_ENTRY_INVALID' };
@@ -138,11 +141,23 @@ function readHostCliMetaFile(metaPath) {
     } catch (_statErr) {
       return { ...empty, ok: true, exists: true, updatedAt, error: 'ERR_HOST_CLI_ENTRY_MISSING' };
     }
+    let resolvedNode = null;
+    if (isSafeShellQuotedPath(rawNode)) {
+      const candidateNode = path.resolve(rawNode);
+      try {
+        if (fs.statSync(candidateNode).isFile()) {
+          resolvedNode = candidateNode;
+        }
+      } catch (_nodeStatErr) {
+        resolvedNode = null;
+      }
+    }
     return {
       ok: true,
       exists: true,
       path: metaPath,
       cliEntryPath: resolvedCli,
+      nodeExecPath: resolvedNode,
       updatedAt,
       error: null,
     };
@@ -566,7 +581,7 @@ function isOfflineConfigBridgeManifest(manifest, remoteProfileId) {
 }
 
 function createHostAdminService({
-  hostVersion = '2.7.0',
+  hostVersion = '3.1.0',
   buildSha8 = 'dev',
   profile = {},
   addonsDir = null,
@@ -586,6 +601,8 @@ function createHostAdminService({
   planDesktopAddons = () => ({ active: [], disabled: [], rejected: [] }),
   readCurrentPolicy = () => ({ schemaVersion: 1, approved: {} }),
   getLifecycleStates = () => ({}),
+  remoteBridgeServer = null,
+  runBuildRemote = null,
   recordDiag = () => {},
 } = {}) {
   const effectiveRemotePrefsPath =
@@ -808,6 +825,17 @@ function createHostAdminService({
       platform,
     });
 
+    const canRebuildInApp = Boolean(
+      typeof runBuildRemote === 'function' ||
+        resolvedBuildCmd.cliEntryPath ||
+        (resolvedBuildCmd.source === 'path' && resolvedBuildCmd.runnable)
+    );
+
+    const remoteBridgeStatus =
+      remoteBridgeServer && typeof remoteBridgeServer.getStatus === 'function'
+        ? remoteBridgeServer.getStatus({ includeSecrets: true })
+        : null;
+
     return {
       ok: true,
       host: {
@@ -824,11 +852,13 @@ function createHostAdminService({
         remoteEnabledCount: remoteEnabledIds.length,
       },
       addons,
+      remoteBridge: remoteBridgeStatus,
       remoteBundle: {
         ...remoteBundle,
         needsRebuild: remoteBundleNeedsRebuild,
         expectedPluginIds: remoteEnabledIds,
         stalePluginIds,
+        canRebuildInApp,
         buildCommand: resolvedBuildCmd.command,
         buildCommandSource: resolvedBuildCmd.source,
         buildCommandRunnable: resolvedBuildCmd.runnable,
@@ -842,6 +872,120 @@ function createHostAdminService({
         error: remotePrefs.error,
       },
     };
+  }
+
+  async function configureRemoteBridge(patch = {}) {
+    if (!remoteBridgeServer || typeof remoteBridgeServer.configure !== 'function') {
+      return { ok: false, reason: 'ERR_REMOTE_BRIDGE_UNAVAILABLE', state: getState() };
+    }
+    const res = await remoteBridgeServer.configure(patch);
+    return {
+      ok: Boolean(res && res.ok),
+      reason: res && res.reason ? res.reason : null,
+      remoteBridge: res && res.status ? res.status : null,
+      state: getState(),
+    };
+  }
+
+  function rotateRemoteBridgeToken() {
+    if (!remoteBridgeServer || typeof remoteBridgeServer.rotateToken !== 'function') {
+      return { ok: false, reason: 'ERR_REMOTE_BRIDGE_UNAVAILABLE', state: getState() };
+    }
+    const res = remoteBridgeServer.rotateToken();
+    return {
+      ok: Boolean(res && res.ok),
+      reason: res && res.reason ? res.reason : null,
+      remoteBridge: res && res.status ? res.status : null,
+      state: getState(),
+    };
+  }
+
+  function execBuildRemoteCli() {
+    const cliMeta = effectiveHostCliMetaPath ? readHostCliMetaFile(effectiveHostCliMetaPath) : null;
+    const explicitCli =
+      isSafeShellQuotedPath(cliEntryPath) && isRegularNonSymlinkFile(path.resolve(cliEntryPath.trim()))
+        ? path.resolve(cliEntryPath.trim())
+        : null;
+    const resolvedCli = explicitCli || (cliMeta && cliMeta.ok && cliMeta.cliEntryPath ? cliMeta.cliEntryPath : null);
+    const args = effectiveRemoteDistDir ? ['--build-remote', '--out-dir', effectiveRemoteDistDir] : ['--build-remote'];
+
+    if (resolvedCli && isRegularNonSymlinkFile(resolvedCli)) {
+      const nodeBin =
+        cliMeta && cliMeta.ok && cliMeta.nodeExecPath && isRegularNonSymlinkFile(cliMeta.nodeExecPath)
+          ? cliMeta.nodeExecPath
+          : !process.versions || !process.versions.electron
+            ? process.execPath
+            : 'node';
+      return new Promise((resolve) => {
+        childProcess.execFile(
+          nodeBin,
+          [resolvedCli, ...args],
+          { shell: false, timeout: 60000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 },
+          (err, stdout, stderr) => {
+            if (err) {
+              const detail = String(stderr || (err && err.message) || err).trim().slice(0, 400);
+              resolve({ ok: false, reason: detail || 'ERR_BUILD_REMOTE_EXEC_FAILED' });
+              return;
+            }
+            resolve({ ok: true, stdout: String(stdout || '') });
+          }
+        );
+      });
+    }
+
+    if (isCommandOnPath(cliCommandName, { pathEnv, pathExtEnv, platform })) {
+      return new Promise((resolve) => {
+        childProcess.execFile(
+          cliCommandName,
+          args,
+          { shell: false, timeout: 60000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 },
+          (err, stdout, stderr) => {
+            if (err) {
+              const detail = String(stderr || (err && err.message) || err).trim().slice(0, 400);
+              resolve({ ok: false, reason: detail || 'ERR_BUILD_REMOTE_EXEC_FAILED' });
+              return;
+            }
+            resolve({ ok: true, stdout: String(stdout || '') });
+          }
+        );
+      });
+    }
+
+    return Promise.resolve({ ok: false, reason: 'ERR_HOST_CLI_NOT_FOUND' });
+  }
+
+  let rebuildInFlight = null;
+  async function rebuildRemoteBundle() {
+    if (rebuildInFlight) {
+      return rebuildInFlight;
+    }
+    rebuildInFlight = (async () => {
+      try {
+        const res =
+          typeof runBuildRemote === 'function'
+            ? await Promise.resolve(runBuildRemote({ outDir: effectiveRemoteDistDir }))
+            : await execBuildRemoteCli();
+        if (!res || res.ok !== true) {
+          const reason = (res && res.reason) || 'ERR_BUILD_REMOTE_FAILED';
+          recordDiag('warn', 'REMOTE_BUNDLE_REBUILD_ERR', reason);
+          return { ok: false, reason, state: getState() };
+        }
+        const nextState = getState();
+        return {
+          ok: true,
+          reason: null,
+          buildSha8: nextState.remoteBundle ? nextState.remoteBundle.buildSha8 : null,
+          state: nextState,
+        };
+      } catch (err) {
+        const reason = err && err.message ? err.message : 'ERR_BUILD_REMOTE_FAILED';
+        recordDiag('warn', 'REMOTE_BUNDLE_REBUILD_ERR', reason);
+        return { ok: false, reason, state: getState() };
+      } finally {
+        rebuildInFlight = null;
+      }
+    })();
+    return rebuildInFlight;
   }
 
   function setRemoteAddonPreference(pluginId, enabled) {
@@ -881,6 +1025,9 @@ function createHostAdminService({
   return Object.freeze({
     getState,
     setRemoteAddonPreference,
+    configureRemoteBridge,
+    rotateRemoteBridgeToken,
+    rebuildRemoteBundle,
     getRemotePrefsPath: () => effectiveRemotePrefsPath,
   });
 }

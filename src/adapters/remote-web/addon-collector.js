@@ -74,7 +74,10 @@ function buildPackedPluginMeta(addon, verified) {
     if (rawPerms.net && typeof rawPerms.net === 'object') {
       remotePermissions.net = {
         httpsHosts: Array.isArray(rawPerms.net.httpsHosts) ? rawPerms.net.httpsHosts.slice() : [],
-        localLoopback: [],
+        localLoopback:
+          verified.effectiveTrustLevel === 'trusted' && Array.isArray(rawPerms.net.localLoopback)
+            ? rawPerms.net.localLoopback.slice()
+            : [],
         ...(rawPerms.net.userApprovedHttps === true ? { userApprovedHttps: true } : {}),
       };
     }

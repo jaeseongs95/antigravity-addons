@@ -6789,14 +6789,29 @@ function createAddonContextV3({
     (_ArrayIsArray(netHttpsHosts) && netHttpsHosts.length > 0) ||
       (surface === 'remote-web' && netUserApprovedHttps)
   );
-  const hasLocalLoopback = !!(
-    surface === 'desktop' &&
-      effectiveTrustLevel === 'trusted' &&
+  const supportsRemoteHostBridge = !!(
+    surface === 'remote-web' && hostBridge && typeof hostBridge.getRemoteBridgeStatus === 'function'
+  );
+  const isRemoteHostBridgeConnected = () => {
+    if (!supportsRemoteHostBridge) return false;
+    try {
+      const st = hostBridge.getRemoteBridgeStatus();
+      return !!(st && st.connected === true);
+    } catch (_err) {
+      return false;
+    }
+  };
+  const hasDeclaredTrustedLoopback = !!(
+    effectiveTrustLevel === 'trusted' &&
       _ArrayIsArray(netLocalLoopback) &&
       netLocalLoopback.length > 0
   );
+  const hasDesktopLoopback = !!(surface === 'desktop' && hasDeclaredTrustedLoopback);
+  const hasRemoteLoopbackViaBridge = !!(supportsRemoteHostBridge && hasDeclaredTrustedLoopback);
   const hasNetCapability = !!(
-    (hasNetHttps || hasLocalLoopback) && hostBridge && typeof hostBridge.netFetch === 'function'
+    (hasNetHttps || hasDesktopLoopback || hasRemoteLoopbackViaBridge) &&
+      hostBridge &&
+      typeof hostBridge.netFetch === 'function'
   );
   const hasDocumentTransform = !!(
     effectiveTrustLevel === 'trusted' &&
@@ -7077,7 +7092,12 @@ function createAddonContextV3({
       return detectLayoutMode(win);
     },
     capabilities: _ObjectFreeze({
-      hasLocalLoopback,
+      get hasLocalLoopback() {
+        return hasDesktopLoopback || (hasRemoteLoopbackViaBridge && isRemoteHostBridgeConnected());
+      },
+      get hasRemoteHostBridge() {
+        return isRemoteHostBridgeConnected();
+      },
       hasNetHttps,
       hasConfigBridge: !!hasConfigBridge,
       hasSettingsBridge: !!hasSettingsBridge,
@@ -7499,6 +7519,10 @@ const HOST_BRIDGE_PORT_OPTIONAL_METHODS = _ObjectFreeze([
   'writeConfigScope',
   'getHostAdminState',
   'setRemoteAddonPreference',
+  'configureRemoteBridge',
+  'rotateRemoteBridgeToken',
+  'rebuildRemoteBundle',
+  'getRemoteBridgeStatus',
   'netFetch',
 ]);
 
@@ -7534,6 +7558,14 @@ function wrapHostBridgePort(candidate) {
   const fnGetHostAdminState = typeof candidate.getHostAdminState === 'function' ? candidate.getHostAdminState : null;
   const fnSetRemoteAddonPreference =
     typeof candidate.setRemoteAddonPreference === 'function' ? candidate.setRemoteAddonPreference : null;
+  const fnConfigureRemoteBridge =
+    typeof candidate.configureRemoteBridge === 'function' ? candidate.configureRemoteBridge : null;
+  const fnRotateRemoteBridgeToken =
+    typeof candidate.rotateRemoteBridgeToken === 'function' ? candidate.rotateRemoteBridgeToken : null;
+  const fnRebuildRemoteBundle =
+    typeof candidate.rebuildRemoteBundle === 'function' ? candidate.rebuildRemoteBundle : null;
+  const fnGetRemoteBridgeStatus =
+    typeof candidate.getRemoteBridgeStatus === 'function' ? candidate.getRemoteBridgeStatus : null;
   const fnNetFetch = typeof candidate.netFetch === 'function' ? candidate.netFetch : null;
 
   const wrapped = {
@@ -7571,6 +7603,26 @@ function wrapHostBridgePort(candidate) {
   if (fnSetRemoteAddonPreference) {
     wrapped.setRemoteAddonPreference = function setRemoteAddonPreference(pluginId, enabled) {
       return _ReflectApply(fnSetRemoteAddonPreference, candidate, [pluginId, enabled]);
+    };
+  }
+  if (fnConfigureRemoteBridge) {
+    wrapped.configureRemoteBridge = function configureRemoteBridge(patch) {
+      return _ReflectApply(fnConfigureRemoteBridge, candidate, [patch]);
+    };
+  }
+  if (fnRotateRemoteBridgeToken) {
+    wrapped.rotateRemoteBridgeToken = function rotateRemoteBridgeToken() {
+      return _ReflectApply(fnRotateRemoteBridgeToken, candidate, []);
+    };
+  }
+  if (fnRebuildRemoteBundle) {
+    wrapped.rebuildRemoteBundle = function rebuildRemoteBundle() {
+      return _ReflectApply(fnRebuildRemoteBundle, candidate, []);
+    };
+  }
+  if (fnGetRemoteBridgeStatus) {
+    wrapped.getRemoteBridgeStatus = function getRemoteBridgeStatus() {
+      return _ReflectApply(fnGetRemoteBridgeStatus, candidate, []);
     };
   }
   if (fnNetFetch) {
@@ -7682,6 +7734,29 @@ const COPY = Object.freeze({
     syncDescNeedsRebuild: 'Visibility preferences are saved. Run the command below to rebuild the portable Remote Web Userscript, @require host library, and secondary extension.',
     syncDescNotBuilt: 'Run the command below to generate the portable Remote Web Userscript, @require host library, and secondary browser extension.',
     copyCommand: 'Copy command',
+    rebuildNow: 'Rebuild Bundle Now',
+    rebuilding: 'Rebuilding...',
+    rebuildSuccess: 'Rebuilt Remote Web bundle.',
+    rebuildError: 'Failed to rebuild Remote Web bundle.',
+    bridgeTitle: 'Remote Host Bridge',
+    bridgeDesc: 'Enable a single authenticated bridge on this desktop host so Remote Web connects ONCE via Pairing Code and runs all plugins (settings, config, local sidecars) without per-plugin URL/token setup.',
+    bridgeToggleLabel: 'Enable Bridge Server',
+    bridgeStatusRunning: 'Running',
+    bridgeStatusStopped: 'Stopped',
+    bridgePortLabel: 'Port',
+    bridgeBindLabel: 'Bind Address',
+    bridgeBindLocal: 'Local PC only (127.0.0.1)',
+    bridgeBindAll: 'LAN / Reverse Proxy (0.0.0.0)',
+    bridgePublicUrlLabel: 'Public HTTPS URL (optional, for tunnel/proxy)',
+    bridgePublicUrlPlaceholder: 'https://host-bridge.example.com',
+    bridgeSave: 'Save Bridge Settings',
+    bridgeSaving: 'Saving...',
+    bridgeSaved: 'Saved Remote Host Bridge settings.',
+    bridgeSaveError: 'Failed to update Remote Host Bridge.',
+    bridgePairingLabel: '1-Line Pairing Code (paste in Remote Web -> Addons -> Host Bridge)',
+    bridgeCopyPairing: 'Copy Pairing Code',
+    bridgeRotateToken: 'Rotate Token',
+    bridgeTokenRotated: 'Rotated Remote Host Bridge token. Re-pair Remote Web.',
     copyServeCommand: 'Copy same-Wi-Fi QR command',
     copyExtensionPath: 'Copy extension path',
     copyUserscriptPath: 'Copy userscript path',
@@ -7746,6 +7821,29 @@ const COPY = Object.freeze({
     syncDescNeedsRebuild: '변경된 원격 웹 표시 설정은 즉시 저장되었습니다. 아래 명령으로 휴대용 Remote Web Userscript, @require 호스트 라이브러리 및 보조 확장을 재빌드하세요.',
     syncDescNotBuilt: '아래 명령을 실행하면 선택한 애드온이 포함된 휴대용 Remote Web Userscript, @require 호스트 라이브러리 및 보조 브라우저 확장을 생성합니다.',
     copyCommand: '명령 복사',
+    rebuildNow: '지금 원격 번들 빌드',
+    rebuilding: '빌드 중...',
+    rebuildSuccess: '원격 웹 번들을 최신 상태로 다시 빌드했습니다.',
+    rebuildError: '원격 웹 번들 빌드에 실패했습니다.',
+    bridgeTitle: '원격 호스트 브리지 (통합 원격 연결)',
+    bridgeDesc: '네이티브 호스트에서 인증된 단일 브리지 서버를 열면, 원격 웹의 Addons → Host Bridge 탭에서 페어링 코드 한 번만 연결해 모든 플러그인(설정·구성·로컬 사이드카)을 개별 URL/토큰 입력 없이 바로 사용할 수 있습니다.',
+    bridgeToggleLabel: '원격 브리지 서버 켜기',
+    bridgeStatusRunning: '실행 중',
+    bridgeStatusStopped: '중지됨',
+    bridgePortLabel: '포트',
+    bridgeBindLabel: '바인드 주소',
+    bridgeBindLocal: '이 PC 전용 (127.0.0.1)',
+    bridgeBindAll: 'LAN / 터널·프록시 허용 (0.0.0.0)',
+    bridgePublicUrlLabel: '외부 공개 HTTPS 주소 (선택 · Cloudflare Tunnel/프록시 사용 시)',
+    bridgePublicUrlPlaceholder: 'https://host-bridge.example.com',
+    bridgeSave: '브리지 설정 저장',
+    bridgeSaving: '저장 중...',
+    bridgeSaved: '원격 호스트 브리지 설정을 저장했습니다.',
+    bridgeSaveError: '원격 호스트 브리지 설정 저장에 실패했습니다.',
+    bridgePairingLabel: '페어링 코드 (원격 웹 Addons → Host Bridge 탭에 붙여넣기)',
+    bridgeCopyPairing: '페어링 코드 복사',
+    bridgeRotateToken: '토큰 재발급',
+    bridgeTokenRotated: '원격 호스트 브리지 토큰을 재발급했습니다. 원격 웹을 다시 페어링하세요.',
     copyServeCommand: '같은 Wi-Fi QR 복사 명령',
     copyExtensionPath: '확장 경로 복사',
     copyUserscriptPath: 'Userscript 경로 복사',
@@ -8332,6 +8430,52 @@ const PANEL_CSS = `
   flex-wrap: wrap;
 }
 
+.ah-bridge-grid {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 10px;
+}
+
+@media (max-width: 640px) {
+  .ah-bridge-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ah-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ah-field--full {
+  grid-column: 1 / -1;
+}
+
+.ah-field-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.ah-input,
+.ah-select {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.ah-input:focus-visible,
+.ah-select:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
 .ah-install-guide {
   margin: 0;
   padding: 8px 10px;
@@ -8642,6 +8786,9 @@ function createHostSettingsUi(doc, win, opts = {}) {
   let flashMessage = null;
   let flashTimer = null;
   let pendingToggleIds = new Set();
+  let bridgeBusy = false;
+  let rebuildBusy = false;
+  let bridgeDraft = null;
   const savedChildDisplay = new WeakMap();
   const suppressedSiblingStyles = new Map(); // el -> { bg, color }
   let clickHostElement = null;
@@ -9103,6 +9250,83 @@ function createHostSettingsUi(doc, win, opts = {}) {
     return ok;
   }
 
+  async function handleConfigureBridge(patch, t) {
+    if (!hostBridge || typeof hostBridge.configureRemoteBridge !== 'function') return;
+    if (bridgeBusy) return;
+    bridgeBusy = true;
+    lastError = null;
+    renderPanel();
+    try {
+      const res = await Promise.resolve(hostBridge.configureRemoteBridge(patch));
+      if (res && res.state) {
+        lastState = res.state;
+        bridgeDraft = null;
+      }
+      if (res && res.ok === true) {
+        flashMessage = t.bridgeSaved;
+        clearFlashLater();
+      } else {
+        lastError = `${t.bridgeSaveError}${res && res.reason ? ` (${res.reason})` : ''}`;
+      }
+    } catch (err) {
+      lastError = `${t.bridgeSaveError}${err && err.message ? ` (${err.message})` : ''}`;
+    } finally {
+      bridgeBusy = false;
+      if (!disposed && isOpen) renderPanel();
+    }
+  }
+
+  async function handleRotateBridgeToken(t) {
+    if (!hostBridge || typeof hostBridge.rotateRemoteBridgeToken !== 'function') return;
+    if (bridgeBusy) return;
+    bridgeBusy = true;
+    lastError = null;
+    renderPanel();
+    try {
+      const res = await Promise.resolve(hostBridge.rotateRemoteBridgeToken());
+      if (res && res.state) {
+        lastState = res.state;
+        bridgeDraft = null;
+      }
+      if (res && res.ok === true) {
+        flashMessage = t.bridgeTokenRotated;
+        clearFlashLater();
+      } else {
+        lastError = `${t.bridgeSaveError}${res && res.reason ? ` (${res.reason})` : ''}`;
+      }
+    } catch (err) {
+      lastError = `${t.bridgeSaveError}${err && err.message ? ` (${err.message})` : ''}`;
+    } finally {
+      bridgeBusy = false;
+      if (!disposed && isOpen) renderPanel();
+    }
+  }
+
+  async function handleRebuildBundle(t) {
+    if (!hostBridge || typeof hostBridge.rebuildRemoteBundle !== 'function') return;
+    if (rebuildBusy) return;
+    rebuildBusy = true;
+    lastError = null;
+    renderPanel();
+    try {
+      const res = await Promise.resolve(hostBridge.rebuildRemoteBundle());
+      if (res && res.state) {
+        lastState = res.state;
+      }
+      if (res && res.ok === true) {
+        flashMessage = `${t.rebuildSuccess}${res.buildSha8 ? ` (${res.buildSha8})` : ''}`;
+        clearFlashLater();
+      } else {
+        lastError = `${t.rebuildError}${res && res.reason ? ` (${res.reason})` : ''}`;
+      }
+    } catch (err) {
+      lastError = `${t.rebuildError}${err && err.message ? ` (${err.message})` : ''}`;
+    } finally {
+      rebuildBusy = false;
+      if (!disposed && isOpen) renderPanel();
+    }
+  }
+
   async function handleToggleRemote(addon, nextEnabled, t) {
     if (!hostBridge || typeof hostBridge.setRemoteAddonPreference !== 'function') return;
     if (pendingToggleIds.has(addon.pluginId)) return;
@@ -9422,6 +9646,154 @@ function createHostSettingsUi(doc, win, opts = {}) {
       root.appendChild(extraBar);
     }
 
+    // 3.5 Native Host Remote Bridge Card
+    const rb = lastState.remoteBridge && typeof lastState.remoteBridge === 'object' ? lastState.remoteBridge : null;
+    if (rb) {
+      if (!bridgeDraft) {
+        bridgeDraft = {
+          port: String(rb.port || 19384),
+          bindHost: rb.bindHost || '127.0.0.1',
+          publicUrl: rb.publicUrl || '',
+        };
+      }
+      const bridgeCard = createEl('div', 'ah-sync-card');
+      bridgeCard.setAttribute('data-ah-section', 'remote-bridge');
+      const bridgeHead = createEl('div', 'ah-sync-head');
+      bridgeHead.appendChild(createEl('h3', 'ah-sync-title', t.bridgeTitle));
+
+      const bridgeHeadRight = createEl('div', 'ah-toggle-row');
+      const statusText = rb.running
+        ? `${t.bridgeStatusRunning} · :${rb.listeningPort || rb.port}`
+        : t.bridgeStatusStopped;
+      bridgeHeadRight.appendChild(createBadge(statusText, rb.running ? 'ok' : 'neutral', true));
+
+      const bridgeSwitch = createEl('button', 'ah-switch');
+      bridgeSwitch.setAttribute('type', 'button');
+      bridgeSwitch.setAttribute('role', 'switch');
+      bridgeSwitch.setAttribute('aria-label', t.bridgeToggleLabel);
+      bridgeSwitch.setAttribute('aria-checked', rb.enabled ? 'true' : 'false');
+      bridgeSwitch.setAttribute('data-ah-bridge-toggle', '1');
+      bridgeSwitch.disabled = bridgeBusy || typeof hostBridge.configureRemoteBridge !== 'function';
+      bridgeSwitch.appendChild(createEl('span', 'ah-switch-thumb'));
+      bridgeSwitch.addEventListener('click', () => {
+        const nextPort = Number(bridgeDraft.port);
+        handleConfigureBridge(
+          {
+            enabled: !rb.enabled,
+            bindHost: bridgeDraft.bindHost,
+            ...(Number.isInteger(nextPort) ? { port: nextPort } : {}),
+            publicUrl: bridgeDraft.publicUrl,
+          },
+          t
+        );
+      });
+      bridgeHeadRight.appendChild(bridgeSwitch);
+      bridgeHead.appendChild(bridgeHeadRight);
+      bridgeCard.appendChild(bridgeHead);
+
+      bridgeCard.appendChild(createEl('p', 'ah-sync-desc', t.bridgeDesc));
+      if (rb.error) {
+        const bErr = createEl('div', 'ah-banner ah-banner--error', String(rb.error));
+        bridgeCard.appendChild(bErr);
+      }
+
+      const formGrid = createEl('div', 'ah-bridge-grid');
+
+      const portField = createEl('label', 'ah-field');
+      portField.appendChild(createEl('span', 'ah-field-label', t.bridgePortLabel));
+      const portInput = createEl('input', 'ah-input');
+      portInput.setAttribute('type', 'number');
+      portInput.setAttribute('min', '1024');
+      portInput.setAttribute('max', '65535');
+      portInput.setAttribute('data-ah-bridge-port', '1');
+      portInput.value = bridgeDraft.port;
+      portInput.addEventListener('input', () => {
+        bridgeDraft.port = String(portInput.value || '').trim();
+      });
+      portField.appendChild(portInput);
+      formGrid.appendChild(portField);
+
+      const bindField = createEl('label', 'ah-field');
+      bindField.appendChild(createEl('span', 'ah-field-label', t.bridgeBindLabel));
+      const bindSelect = createEl('select', 'ah-select');
+      bindSelect.setAttribute('data-ah-bridge-bind', '1');
+      const optLocal = createEl('option', null, t.bridgeBindLocal);
+      optLocal.value = '127.0.0.1';
+      const optAll = createEl('option', null, t.bridgeBindAll);
+      optAll.value = '0.0.0.0';
+      bindSelect.appendChild(optLocal);
+      bindSelect.appendChild(optAll);
+      bindSelect.value = bridgeDraft.bindHost === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
+      bindSelect.addEventListener('change', () => {
+        bridgeDraft.bindHost = bindSelect.value === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
+      });
+      bindField.appendChild(bindSelect);
+      formGrid.appendChild(bindField);
+
+      const pubField = createEl('label', 'ah-field ah-field--full');
+      pubField.appendChild(createEl('span', 'ah-field-label', t.bridgePublicUrlLabel));
+      const pubInput = createEl('input', 'ah-input');
+      pubInput.setAttribute('type', 'url');
+      pubInput.setAttribute('placeholder', t.bridgePublicUrlPlaceholder);
+      pubInput.setAttribute('data-ah-bridge-public-url', '1');
+      pubInput.value = bridgeDraft.publicUrl;
+      pubInput.addEventListener('input', () => {
+        bridgeDraft.publicUrl = String(pubInput.value || '').trim();
+      });
+      pubField.appendChild(pubInput);
+      formGrid.appendChild(pubField);
+
+      bridgeCard.appendChild(formGrid);
+
+      const bridgeActions = createEl('div', 'ah-delivery-row');
+      const saveBridgeBtn = createEl('button', 'ah-btn ah-btn-primary', bridgeBusy ? t.bridgeSaving : t.bridgeSave);
+      saveBridgeBtn.setAttribute('type', 'button');
+      saveBridgeBtn.setAttribute('data-ah-bridge-save', '1');
+      saveBridgeBtn.disabled = bridgeBusy || typeof hostBridge.configureRemoteBridge !== 'function';
+      saveBridgeBtn.addEventListener('click', () => {
+        const nextPort = Number(bridgeDraft.port);
+        handleConfigureBridge(
+          {
+            enabled: rb.enabled,
+            bindHost: bridgeDraft.bindHost,
+            ...(Number.isInteger(nextPort) ? { port: nextPort } : {}),
+            publicUrl: bridgeDraft.publicUrl,
+          },
+          t
+        );
+      });
+      bridgeActions.appendChild(saveBridgeBtn);
+
+      if (typeof rb.pairingCode === 'string' && rb.pairingCode.length > 0) {
+        const copyPairBtn = createEl('button', 'ah-btn ah-btn-primary', t.bridgeCopyPairing);
+        copyPairBtn.setAttribute('type', 'button');
+        copyPairBtn.setAttribute('data-ah-bridge-copy-pairing', '1');
+        copyPairBtn.addEventListener('click', () => {
+          copyText(rb.pairingCode, copyPairBtn, t);
+        });
+        bridgeActions.appendChild(copyPairBtn);
+      }
+
+      if (typeof hostBridge.rotateRemoteBridgeToken === 'function') {
+        const rotateBtn = createEl('button', 'ah-btn', t.bridgeRotateToken);
+        rotateBtn.setAttribute('type', 'button');
+        rotateBtn.setAttribute('data-ah-bridge-rotate-token', '1');
+        rotateBtn.disabled = bridgeBusy;
+        rotateBtn.addEventListener('click', () => {
+          handleRotateBridgeToken(t);
+        });
+        bridgeActions.appendChild(rotateBtn);
+      }
+      bridgeCard.appendChild(bridgeActions);
+
+      if (rb.connectUrl) {
+        const maskedHint = `${t.bridgePairingLabel}: ${rb.connectUrl}${rb.tokenHint ? ` · token ${rb.tokenHint}` : ''}`;
+        bridgeCard.appendChild(createEl('p', 'ah-install-guide', maskedHint));
+      }
+
+      root.appendChild(bridgeCard);
+    }
+
     // 4. Remote Web Bundle Sync Footer
     const needsAttention = !bundle.built || bundle.needsRebuild;
     const syncCard = createEl('div', needsAttention ? 'ah-sync-card ah-sync-card--warn' : 'ah-sync-card');
@@ -9446,7 +9818,22 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const buildCmd = bundle.buildCommand || 'addon-host --build-remote';
     cmdRow.appendChild(createEl('code', 'ah-cmd-code', buildCmd));
 
-    const copyCmdBtn = createEl('button', needsAttention ? 'ah-btn ah-btn-primary' : 'ah-btn', t.copyCommand);
+    if (typeof hostBridge.rebuildRemoteBundle === 'function' && bundle.canRebuildInApp !== false) {
+      const rebuildBtn = createEl(
+        'button',
+        needsAttention ? 'ah-btn ah-btn-primary' : 'ah-btn',
+        rebuildBusy ? t.rebuilding : t.rebuildNow
+      );
+      rebuildBtn.setAttribute('type', 'button');
+      rebuildBtn.setAttribute('data-ah-action', 'rebuild-bundle');
+      rebuildBtn.disabled = rebuildBusy;
+      rebuildBtn.addEventListener('click', () => {
+        handleRebuildBundle(t);
+      });
+      cmdRow.appendChild(rebuildBtn);
+    }
+
+    const copyCmdBtn = createEl('button', needsAttention && typeof hostBridge.rebuildRemoteBundle !== 'function' ? 'ah-btn ah-btn-primary' : 'ah-btn', t.copyCommand);
     copyCmdBtn.setAttribute('type', 'button');
     copyCmdBtn.setAttribute('data-ah-action', 'copy-command');
     copyCmdBtn.addEventListener('click', () => {
@@ -9545,6 +9932,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
       const res = await Promise.resolve(hostBridge.getHostAdminState());
       if (res && res.ok === true) {
         lastState = res;
+        bridgeDraft = null;
       } else {
         lastError = `${t.loadError}${res && res.reason ? ` (${res.reason})` : ''}`;
       }
@@ -11194,11 +11582,20 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     }
   }
 
+  function emitHostEvent(topic, payload, token) {
+    assertHostToken(token);
+    if (!booted || !eventBus || typeof eventBus.emit !== 'function') {
+      return 0;
+    }
+    return eventBus.emit('__host__', topic, payload);
+  }
+
   const api = _ObjectFreeze({
     boot,
     createPluginHandle,
     stagePluginHandle,
     pushPluginSettings,
+    emitHostEvent,
     consumeStagedHandle,
     clearStagedHandle,
     disposePlugin,

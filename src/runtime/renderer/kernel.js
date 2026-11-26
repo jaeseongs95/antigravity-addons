@@ -1034,11 +1034,20 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     }
   }
 
+  function emitHostEvent(topic, payload, token) {
+    assertHostToken(token);
+    if (!booted || !eventBus || typeof eventBus.emit !== 'function') {
+      return 0;
+    }
+    return eventBus.emit('__host__', topic, payload);
+  }
+
   const api = _ObjectFreeze({
     boot,
     createPluginHandle,
     stagePluginHandle,
     pushPluginSettings,
+    emitHostEvent,
     consumeStagedHandle,
     clearStagedHandle,
     disposePlugin,

@@ -138,6 +138,7 @@ const ANTIGRAVITY_HOST_PROFILE = Object.freeze({
   supportedCapabilities: Object.freeze(['renderer', 'mainHook']),
   remoteProfileId: 'antigravity-remote-web',
   remoteSupportedCapabilities: Object.freeze(['renderer']),
+  remoteAllowedOrigins: Object.freeze(['https://antigravity.google.com']),
   settingsUi: Object.freeze({
     navId: 'addon-manager',
     navLabel: Object.freeze({

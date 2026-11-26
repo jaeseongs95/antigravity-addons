@@ -28,6 +28,9 @@ const IPC_CONFIG_READ = 'addon-host:v2:config-read';
 const IPC_CONFIG_WRITE = 'addon-host:v2:config-write';
 const IPC_HOST_ADMIN_STATE = 'addon-host:v2:host-admin-state';
 const IPC_HOST_ADMIN_SET_REMOTE_PREF = 'addon-host:v2:host-admin-set-remote-pref';
+const IPC_HOST_ADMIN_CONFIGURE_REMOTE_BRIDGE = 'addon-host:v3:host-admin-configure-remote-bridge';
+const IPC_HOST_ADMIN_ROTATE_REMOTE_TOKEN = 'addon-host:v3:host-admin-rotate-remote-token';
+const IPC_HOST_ADMIN_REBUILD_REMOTE_BUNDLE = 'addon-host:v3:host-admin-rebuild-remote-bundle';
 const IPC_NET_FETCH = 'addon-host:v3:net-fetch';
 const IPC_REPORT_ERROR = 'addon-host:v2:report-error';
 const IPC_PING = 'addon-host:v2:ping';
@@ -112,6 +115,19 @@ try {
             pluginId: String(pluginId || ''),
             enabled: Boolean(enabled),
           });
+        },
+        configureRemoteBridge(patch) {
+          const safePatch = patch && typeof patch === 'object' ? patch : {};
+          return ipcRenderer.invoke(IPC_HOST_ADMIN_CONFIGURE_REMOTE_BRIDGE, {
+            docGenId,
+            patch: safePatch,
+          });
+        },
+        rotateRemoteBridgeToken() {
+          return ipcRenderer.invoke(IPC_HOST_ADMIN_ROTATE_REMOTE_TOKEN, { docGenId });
+        },
+        rebuildRemoteBundle() {
+          return ipcRenderer.invoke(IPC_HOST_ADMIN_REBUILD_REMOTE_BUNDLE, { docGenId });
         },
         netFetch(pluginId, url, init) {
           const safeInit = init && typeof init === 'object' ? init : {};

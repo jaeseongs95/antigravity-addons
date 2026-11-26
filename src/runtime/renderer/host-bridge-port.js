@@ -29,6 +29,10 @@ const HOST_BRIDGE_PORT_OPTIONAL_METHODS = _ObjectFreeze([
   'writeConfigScope',
   'getHostAdminState',
   'setRemoteAddonPreference',
+  'configureRemoteBridge',
+  'rotateRemoteBridgeToken',
+  'rebuildRemoteBundle',
+  'getRemoteBridgeStatus',
   'netFetch',
 ]);
 
@@ -64,6 +68,14 @@ function wrapHostBridgePort(candidate) {
   const fnGetHostAdminState = typeof candidate.getHostAdminState === 'function' ? candidate.getHostAdminState : null;
   const fnSetRemoteAddonPreference =
     typeof candidate.setRemoteAddonPreference === 'function' ? candidate.setRemoteAddonPreference : null;
+  const fnConfigureRemoteBridge =
+    typeof candidate.configureRemoteBridge === 'function' ? candidate.configureRemoteBridge : null;
+  const fnRotateRemoteBridgeToken =
+    typeof candidate.rotateRemoteBridgeToken === 'function' ? candidate.rotateRemoteBridgeToken : null;
+  const fnRebuildRemoteBundle =
+    typeof candidate.rebuildRemoteBundle === 'function' ? candidate.rebuildRemoteBundle : null;
+  const fnGetRemoteBridgeStatus =
+    typeof candidate.getRemoteBridgeStatus === 'function' ? candidate.getRemoteBridgeStatus : null;
   const fnNetFetch = typeof candidate.netFetch === 'function' ? candidate.netFetch : null;
 
   const wrapped = {
@@ -101,6 +113,26 @@ function wrapHostBridgePort(candidate) {
   if (fnSetRemoteAddonPreference) {
     wrapped.setRemoteAddonPreference = function setRemoteAddonPreference(pluginId, enabled) {
       return _ReflectApply(fnSetRemoteAddonPreference, candidate, [pluginId, enabled]);
+    };
+  }
+  if (fnConfigureRemoteBridge) {
+    wrapped.configureRemoteBridge = function configureRemoteBridge(patch) {
+      return _ReflectApply(fnConfigureRemoteBridge, candidate, [patch]);
+    };
+  }
+  if (fnRotateRemoteBridgeToken) {
+    wrapped.rotateRemoteBridgeToken = function rotateRemoteBridgeToken() {
+      return _ReflectApply(fnRotateRemoteBridgeToken, candidate, []);
+    };
+  }
+  if (fnRebuildRemoteBundle) {
+    wrapped.rebuildRemoteBundle = function rebuildRemoteBundle() {
+      return _ReflectApply(fnRebuildRemoteBundle, candidate, []);
+    };
+  }
+  if (fnGetRemoteBridgeStatus) {
+    wrapped.getRemoteBridgeStatus = function getRemoteBridgeStatus() {
+      return _ReflectApply(fnGetRemoteBridgeStatus, candidate, []);
     };
   }
   if (fnNetFetch) {

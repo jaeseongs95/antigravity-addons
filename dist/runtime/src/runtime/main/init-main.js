@@ -25,6 +25,7 @@ const { createHostAdminService } = require('./host-admin-service');
 const { createRendererInjector } = require('./renderer-injector');
 const { createUpdateSurvivalHook } = require('./update-survival-hook');
 const { createNetFetchBroker } = require('./net-fetch-broker');
+const { DEFAULT_REMOTE_BRIDGE_FILENAME, createRemoteBridgeServer } = require('./remote-bridge-server');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
 const { createNodeFileSystemPort } = require('../../adapters/node-fs-port');
 const { isPluginEnabledInConfig } = require('../../adapters/electron/config-reader');
@@ -162,10 +163,21 @@ function createHostRuntimeController(cfg, deps = {}) {
 
   const settingsDataDir =
     cfg.settingsDataDir || (cfg.addonsDir ? path.dirname(path.resolve(cfg.addonsDir)) : null);
+  const remoteBridgeConfigPath =
+    cfg.remoteBridgeConfigPath ||
+    (settingsDataDir ? path.join(settingsDataDir, DEFAULT_REMOTE_BRIDGE_FILENAME) : null);
+  const reservedHostFiles = [
+    cfg.trustPolicyPath,
+    cfg.configJsonPath,
+    remoteBridgeConfigPath,
+    cfg.remotePrefsPath || (settingsDataDir ? path.join(settingsDataDir, 'remote-preferences.json') : null),
+    settingsDataDir ? path.join(settingsDataDir, 'host-cli.json') : null,
+  ].filter(Boolean);
+
   let rendererInjectorRef = null;
   const settingsBridge = createSettingsBridge({
     settingsDataDir,
-    reservedFilePaths: [cfg.trustPolicyPath, cfg.configJsonPath].filter(Boolean),
+    reservedFilePaths: reservedHostFiles,
     debounceMs: cfg.settingsWatchDebounceMs,
     onSnapshotChange: (pluginId, snapshot) => {
       if (rendererInjectorRef) {
@@ -177,7 +189,7 @@ function createHostRuntimeController(cfg, deps = {}) {
 
   const configBridge = createConfigBridge({
     configScopes: cfg.configScopes || {},
-    reservedFilePaths: [cfg.trustPolicyPath, cfg.configJsonPath].filter(Boolean),
+    reservedFilePaths: reservedHostFiles,
     recordDiag,
   });
 
@@ -237,8 +249,25 @@ function createHostRuntimeController(cfg, deps = {}) {
     recordDiag,
   });
 
+  const remoteBridgeServer = createRemoteBridgeServer({
+    configPath: remoteBridgeConfigPath,
+    hostVersion: cfg.hostVersion || '3.1.0',
+    buildSha8: cfg.buildSha8 || 'dev',
+    profileId: profile.id || null,
+    allowedOrigins: Array.isArray(profile.remoteAllowedOrigins) ? profile.remoteAllowedOrigins : [],
+    allowLoopbackOrigin: Boolean(cfg.allowLoopbackBridgeOrigin),
+    strictTrustPolicy,
+    planCurrentAddons,
+    readCurrentPolicy,
+    settingsBridge,
+    configBridge,
+    netFetchBroker,
+    httpModule: deps.bridgeHttpModule,
+    recordDiag,
+  });
+
   const hostAdminService = createHostAdminService({
-    hostVersion: cfg.hostVersion || '3.0.0',
+    hostVersion: cfg.hostVersion || '3.1.0',
     buildSha8: cfg.buildSha8 || 'dev',
     profile,
     addonsDir: cfg.addonsDir,
@@ -252,6 +281,8 @@ function createHostRuntimeController(cfg, deps = {}) {
     planDesktopAddons: planCurrentAddons,
     readCurrentPolicy,
     getLifecycleStates: () => Object.fromEntries(lifecycleStates.entries()),
+    remoteBridgeServer,
+    runBuildRemote: deps.runBuildRemote || null,
     recordDiag,
   });
 
@@ -406,6 +437,33 @@ function createHostRuntimeController(cfg, deps = {}) {
         return hostAdminService.setRemoteAddonPreference(payload.pluginId, Boolean(payload.enabled));
       });
 
+      ipcMain.handle(IPC_CHANNELS.HOST_ADMIN_CONFIGURE_REMOTE_BRIDGE, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, reason: 'ERR_INVALID_PAYLOAD', state: null };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, reason: check.reason || 'ERR_INVALID_PAYLOAD', state: null };
+        }
+        return hostAdminService.configureRemoteBridge(payload.patch || {});
+      });
+
+      ipcMain.handle(IPC_CHANNELS.HOST_ADMIN_ROTATE_REMOTE_TOKEN, (ev, payload) => {
+        const check = originResolver.verifyClaimedEvent(ev, payload && payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, reason: check.reason || 'ERR_INVALID_PAYLOAD', state: null };
+        }
+        return hostAdminService.rotateRemoteBridgeToken();
+      });
+
+      ipcMain.handle(IPC_CHANNELS.HOST_ADMIN_REBUILD_REMOTE_BUNDLE, (ev, payload) => {
+        const check = originResolver.verifyClaimedEvent(ev, payload && payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, reason: check.reason || 'ERR_INVALID_PAYLOAD', state: null };
+        }
+        return hostAdminService.rebuildRemoteBundle();
+      });
+
       ipcMain.handle(IPC_CHANNELS.NET_FETCH, (ev, payload) => {
         if (!payload || typeof payload !== 'object') {
           return { ok: false, reason: 'ERR_INVALID_PAYLOAD' };
@@ -474,8 +532,12 @@ function createHostRuntimeController(cfg, deps = {}) {
         } catch (err) {
           recordDiag('error', 'MAIN_READY_RECONCILE_ERR', err && err.message ? err.message : String(err));
         }
+        remoteBridgeServer.startIfEnabled().catch((err) => {
+          recordDiag('warn', 'REMOTE_BRIDGE_AUTOSTART_ERR', err && err.message ? err.message : String(err));
+        });
       });
       app.on('will-quit', () => {
+        remoteBridgeServer.dispose();
         updateSurvivalHook.dispose();
         settingsBridge.dispose();
         portalArbiter.dispose();
@@ -498,10 +560,15 @@ function createHostRuntimeController(cfg, deps = {}) {
     getPreloadStatus: () => preloadRegistrar.getStatus(),
     getSettingsBridgeStatus: () => settingsBridge.getStatus(),
     getConfigBridgeStatus: () => configBridge.getStatus(),
+    getRemoteBridgeStatus: (opts) => remoteBridgeServer.getStatus(opts),
+    configureRemoteBridge: (patch) => hostAdminService.configureRemoteBridge(patch),
+    rotateRemoteBridgeToken: () => hostAdminService.rotateRemoteBridgeToken(),
+    rebuildRemoteBundle: () => hostAdminService.rebuildRemoteBundle(),
     getHostAdminState: () => hostAdminService.getState(),
     setRemoteAddonPreference: (pluginId, enabled) => hostAdminService.setRemoteAddonPreference(pluginId, enabled),
     refreshSettingsBridge: () => settingsBridge.refreshNow(),
     dispose: () => {
+      remoteBridgeServer.dispose();
       updateSurvivalHook.dispose();
       settingsBridge.dispose();
       portalArbiter.dispose();

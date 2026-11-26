@@ -71,6 +71,7 @@ function normalizePermissionsV3(manifest, rawConfigBridge) {
       ? {
           httpsHosts: Array.isArray(net.httpsHosts) ? net.httpsHosts.map((h) => String(h).trim().toLowerCase()) : [],
           localLoopback: Array.isArray(net.localLoopback) ? net.localLoopback.slice() : [],
+          ...(net.userApprovedHttps === true ? { userApprovedHttps: true } : {}),
         }
       : null,
     dom: dom
