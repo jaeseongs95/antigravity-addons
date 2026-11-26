@@ -392,23 +392,29 @@ test('v3.0.1: Desktop HostSettingsUi mounts ui.registerSettingsPage in left side
   assert.ok(pluginNavBtn, 'Registered settings page must mount in Desktop Settings left sidebar');
   assert.equal(pluginNavBtn.textContent.trim(), 'MCP Manager');
 
-  // Clicking sidebar item opens the settings page
+  // Clicking sidebar item mounts the settings page INLINE inside the Settings content pane (v3.0.3 — never a modal over Settings)
   pluginNavBtn.click();
-  assert.equal(opened.length, 1);
-  assert.deepEqual(opened[0], { pluginId: 'sample-mcp', title: 'MCP Manager' });
+  assert.equal(opened.length, 0, 'Desktop Settings sidebar click must render inline, not open a floating modal');
+  assert.equal(ui.getActivePluginPageKey(), 'sample-mcp:mcp-manager');
+  assert.equal(nativePanel.style.display, 'none');
+  const { pluginShadowRoot } = ui.getElements();
+  assert.ok(pluginShadowRoot && pluginShadowRoot.textContent.includes('MCP Settings Rendered'));
 
-  // Opening Addon Manager panel also shows a Settings button on the addon card
+  // Opening Addon Manager panel also shows a Settings button on the addon card, which switches cleanly to the inline plugin pane
   ui.openPanel();
   await new Promise((r) => setTimeout(r, 20));
   const { shadowRoot } = ui.getElements();
   const cardBtn = shadowRoot.querySelector('[data-ah-settings-page="sample-mcp:mcp-manager"]');
   assert.ok(cardBtn, 'Addon Manager card must expose a button to open registered settings page');
   cardBtn.click();
-  assert.equal(opened.length, 2);
+  assert.equal(opened.length, 0);
+  assert.equal(ui.getActivePluginPageKey(), 'sample-mcp:mcp-manager');
 
-  // Disposing the settings page removes its sidebar button cleanly
+  // Disposing the settings page removes its sidebar button and restores native content cleanly
   pageHandle.dispose();
   assert.equal(navList.querySelector(`[${PLUGIN_NAV_ATTR}="sample-mcp:mcp-manager"]`), null);
+  assert.equal(ui.getActivePluginPageKey(), null);
+  assert.equal(nativePanel.style.display, '');
 
   ui.dispose();
 });

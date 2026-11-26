@@ -43,26 +43,33 @@ async function ensureInputReady(win) {
   try { win.setOpacity(0); } catch (_e) { /* headless platforms may not support setOpacity */ }
   win.showInactive();
   win.webContents.focus();
+  await new Promise((r) => setTimeout(r, 120));
   await win.webContents.executeJavaScript(
     'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))'
   );
 }
 
 async function clickShadowTrusted(win, worldId, selector, index = 0) {
-  const rect = await win.webContents.executeJavaScriptInIsolatedWorld(worldId, [{
-    code:
-      '(() => {' +
-      '  const host = document.getElementById("remote-addon-host-drawer-root");' +
-      '  const sr = host && host.shadowRoot;' +
-      '  if (!sr) return null;' +
-      '  const els = sr.querySelectorAll(' + JSON.stringify(selector) + ');' +
-      '  const el = els[' + Number(index) + '];' +
-      '  if (!el) return null;' +
-      '  if (typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "center", inline: "center" });' +
-      '  const r = el.getBoundingClientRect();' +
-      '  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), width: r.width, height: r.height };' +
-      '})()',
-  }]);
+  let rect = null;
+  const deadline = Date.now() + 1200;
+  while (Date.now() < deadline) {
+    rect = await win.webContents.executeJavaScriptInIsolatedWorld(worldId, [{
+      code:
+        '(() => {' +
+        '  const host = document.getElementById("remote-addon-host-drawer-root");' +
+        '  const sr = host && host.shadowRoot;' +
+        '  if (!sr) return null;' +
+        '  const els = sr.querySelectorAll(' + JSON.stringify(selector) + ');' +
+        '  const el = els[' + Number(index) + '];' +
+        '  if (!el) return null;' +
+        '  if (typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "center", inline: "center" });' +
+        '  const r = el.getBoundingClientRect();' +
+        '  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), width: r.width, height: r.height };' +
+        '})()',
+    }]);
+    if (rect && rect.width > 0 && rect.height > 0) break;
+    await new Promise((r) => setTimeout(r, 40));
+  }
   if (!rect || rect.width <= 0 || rect.height <= 0) {
     throw new Error('clickShadowTrusted target not visible: ' + selector + '[' + index + '] -> ' + JSON.stringify(rect));
   }
@@ -71,6 +78,9 @@ async function clickShadowTrusted(win, worldId, selector, index = 0) {
   win.webContents.sendInputEvent({ type: 'mouseDown', x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
   win.webContents.sendInputEvent({ type: 'mouseUp', x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
   await new Promise((r) => setTimeout(r, 90));
+  await win.webContents.executeJavaScript(
+    'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))'
+  );
   return rect;
 }
 `;
@@ -305,17 +315,20 @@ app.whenReady().then(async () => {
 
     let firstBoot = bootBase;
     if (bootBase.ok) {
-      await clickShadowTrusted(win, 998, '.rah-pill', 0);
-      const openedAfterClick = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
-        {
-          code:
-            '(() => {' +
-            'const h = document.getElementById("remote-addon-host-drawer-root");' +
-            'const p = h && h.shadowRoot && h.shadowRoot.querySelector("#rah-drawer-panel");' +
-            'return Boolean(p && !p.hasAttribute("hidden"));' +
-            '})()',
-        },
-      ]);
+      let openedAfterClick = false;
+      for (let attempt = 0; attempt < 3 && !openedAfterClick; attempt += 1) {
+        await clickShadowTrusted(win, 998, '.rah-pill', 0);
+        openedAfterClick = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
+          {
+            code:
+              '(() => {' +
+              'const h = document.getElementById("remote-addon-host-drawer-root");' +
+              'const p = h && h.shadowRoot && h.shadowRoot.querySelector("#rah-drawer-panel");' +
+              'return Boolean(p && !p.hasAttribute("hidden"));' +
+              '})()',
+          },
+        ]);
+      }
       await clickShadowTrusted(win, 998, '.rah-tab', 1);
       const afterTab = await win.webContents.executeJavaScriptInIsolatedWorld(998, [
         {

@@ -1,6 +1,6 @@
 {
   "name": "antigravity-addons",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "description": "Vendor-independent API-First native desktop & remote web addon host framework (AddonManifest v1/v2/v3, 3-Tier AddonContextV3, dual-key net.fetch, zero-dependency staged runtime, Shadow DOM isolation, SHA-256 trust pinning).",
   "license": "MIT",
   "main": "src/index.js",

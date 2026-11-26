@@ -6350,19 +6350,23 @@ module.exports = {
 'use strict';
 
 /**
- * Vendor-neutral Unified Settings Page Coordinator for Tier-1 `ui.registerSettingsPage` (v3.0.0 — SOLID #0).
+ * Vendor-neutral Unified Settings Page Coordinator for Tier-1 `ui.registerSettingsPage` (v3.0.3 — SOLID #0).
  *
- * - Bridges both Desktop Settings sidebar tabs (`settingsTabs`) AND Remote Web Drawer settings tabs
- *   through a single declarative API.
+ * - Bridges both Desktop Settings sidebar tabs (`settingsTabs` + inline Desktop Settings pane host)
+ *   AND Remote Web Drawer settings tabs through a single declarative API.
  * - Supports either a Tier-2 declarative JSON `schema` (with `state`, `onChange`, `onAction`)
  *   OR a Tier-3 Shadow-DOM `render(canvasRoot)` callback.
- * - Opens inside a host-managed modal/panel surface when triggered from Remote Web or Desktop
- *   without requiring plugins to query or mutate host Settings DOM directly.
+ * - When an inline Settings host (`setInlineHost`) is mounted (Desktop Settings view), renders
+ *   registered plugin pages directly inline inside the Settings content pane like a native tab;
+ *   otherwise falls back cleanly to a host-managed modal/panel overlay (Command Palette / Remote Web).
  */
 
 function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = null, openTier3Modal = null } = {}) {
   const pagesByKey = new Map(); // `${pluginId}:${pageId}` -> record
   const changeListeners = new Set();
+  let inlineHost = null;
+  let activePageKey = null;
+  let activePageHandle = null;
 
   function notifyChange() {
     for (const fn of Array.from(changeListeners)) {
@@ -6370,6 +6374,28 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
         fn();
       } catch (_e) {}
     }
+  }
+
+  function closeActiveHandle() {
+    const prev = activePageHandle;
+    activePageHandle = null;
+    activePageKey = null;
+    if (prev && typeof prev.close === 'function') {
+      try {
+        prev.close();
+      } catch (_e) {}
+    }
+  }
+
+  function setInlineHost(host) {
+    if (host && typeof host.canMountInline === 'function' && typeof host.mountInlinePage === 'function') {
+      inlineHost = host;
+      return () => {
+        if (inlineHost === host) inlineHost = null;
+      };
+    }
+    inlineHost = null;
+    return () => {};
   }
 
   function registerSettingsPage(pluginMeta, spec = {}) {
@@ -6385,16 +6411,36 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       throw new Error('ERR_SETTINGS_PAGE_REQUIRES_SCHEMA_OR_RENDER');
     }
 
-    let activeModalHandle = null;
     const openPage = () => {
-      if (activeModalHandle && typeof activeModalHandle.close === 'function') {
-        try {
-          activeModalHandle.close();
-        } catch (_e) {}
-        activeModalHandle = null;
+      closeActiveHandle();
+
+      let openedHandle = null;
+      const onClosed = () => {
+        if (activePageHandle === openedHandle) {
+          activePageHandle = null;
+          activePageKey = null;
+        }
+      };
+
+      if (inlineHost && typeof inlineHost.canMountInline === 'function' && inlineHost.canMountInline()) {
+        openedHandle = inlineHost.mountInlinePage({
+          pluginMeta,
+          pageId,
+          key,
+          title,
+          kind: hasSchema ? 'schema' : 'canvas',
+          spec,
+          onClosed,
+        });
+        if (openedHandle) {
+          activePageHandle = openedHandle;
+          activePageKey = key;
+          return openedHandle;
+        }
       }
+
       if (hasSchema && typeof openTier2Modal === 'function') {
-        activeModalHandle = openTier2Modal(pluginMeta, {
+        openedHandle = openTier2Modal(pluginMeta, {
           title,
           placement: { zone: 'surface-center', width: spec.width || 560 },
           tree: typeof spec.getSchema === 'function' ? spec.getSchema() : spec.schema,
@@ -6402,25 +6448,33 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
           onChange: spec.onChange || null,
           onAction: spec.onAction || null,
           onClose: () => {
-            activeModalHandle = null;
+            onClosed();
             if (typeof spec.onClose === 'function') spec.onClose();
           },
         });
-        return activeModalHandle;
+        if (openedHandle) {
+          activePageHandle = openedHandle;
+          activePageKey = key;
+        }
+        return openedHandle;
       }
       if (hasRender && typeof openTier3Modal === 'function') {
-        activeModalHandle = openTier3Modal(pluginMeta, {
+        openedHandle = openTier3Modal(pluginMeta, {
           title,
           placement: { zone: 'surface-center', width: spec.width || 560 },
           onClose: () => {
-            activeModalHandle = null;
+            onClosed();
             if (typeof spec.onClose === 'function') spec.onClose();
           },
         });
-        if (activeModalHandle && activeModalHandle.bodyEl) {
-          spec.render(activeModalHandle.bodyEl, activeModalHandle);
+        if (openedHandle) {
+          activePageHandle = openedHandle;
+          activePageKey = key;
+          if (openedHandle.bodyEl) {
+            spec.render(openedHandle.bodyEl, openedHandle);
+          }
         }
-        return activeModalHandle;
+        return openedHandle;
       }
       return null;
     };
@@ -6452,16 +6506,13 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       update(nextSchema, nextState) {
         if (nextSchema && typeof nextSchema === 'object') spec.schema = nextSchema;
         if (nextState && typeof nextState === 'object') spec.state = nextState;
-        if (activeModalHandle && typeof activeModalHandle.update === 'function') {
-          activeModalHandle.update(nextSchema || spec.schema, nextState);
+        if (activePageKey === key && activePageHandle && typeof activePageHandle.update === 'function') {
+          activePageHandle.update(nextSchema || spec.schema, nextState);
         }
       },
       dispose() {
-        if (activeModalHandle && typeof activeModalHandle.close === 'function') {
-          try {
-            activeModalHandle.close();
-          } catch (_e) {}
-          activeModalHandle = null;
+        if (activePageKey === key) {
+          closeActiveHandle();
         }
         if (tabHandle && typeof tabHandle.unregister === 'function') {
           try {
@@ -6499,6 +6550,9 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     let removed = false;
     for (const [key, rec] of Array.from(pagesByKey.entries())) {
       if (rec.pluginId !== pluginId) continue;
+      if (activePageKey === key) {
+        closeActiveHandle();
+      }
       if (rec.tabHandle && typeof rec.tabHandle.unregister === 'function') {
         try {
           rec.tabHandle.unregister();
@@ -6521,6 +6575,8 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     registerSettingsPage,
     listSettingsPages,
     openSettingsPage,
+    setInlineHost,
+    getActivePageKey: () => activePageKey,
     disposePlugin,
     onChange,
   });
@@ -7478,9 +7534,12 @@ module.exports = {
  * - Coexists cleanly with native Settings tabs and peer plugin tabs (e.g. MCP Manager).
  */
 
+const { SCHEMA_UI_CSS, createSchemaUiController } = require('./ui-schema-renderer');
+
 const NAV_ATTR = 'data-addon-host-admin-nav';
 const PLUGIN_NAV_ATTR = 'data-addon-host-plugin-settings-nav';
 const PANE_ATTR = 'data-addon-host-admin-pane';
+const PLUGIN_PANE_ATTR = 'data-addon-host-plugin-settings-pane';
 const IGNORE_ATTR = 'data-addon-host-ignore';
 const NO_TRANSLATE_ATTR = 'data-addon-host-no-translate';
 const LANG_STORAGE_KEY = 'addon-host:settings-ui-lang';
@@ -8246,6 +8305,64 @@ const PANEL_CSS = `
 }
 `;
 
+const INLINE_PLUGIN_PANE_CSS = `
+:host {
+  all: initial;
+  display: block;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  font-family: var(--ag-font, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif);
+  color: var(--ag-text, #f0f6fc);
+}
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+.ag-inline-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px 32px 28px 28px;
+  max-width: 880px;
+  height: 100%;
+  overflow-y: auto;
+  color: var(--ag-text, #f0f6fc);
+}
+.ag-inline-page--canvas {
+  padding: 18px 28px 28px 28px;
+  max-width: 1040px;
+  gap: 12px;
+}
+.ag-inline-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ag-border, rgba(255, 255, 255, 0.1));
+}
+.ag-inline-header--compact {
+  justify-content: flex-start;
+  padding-bottom: 6px;
+  border-bottom: none;
+}
+.ag-inline-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--ag-text, #f0f6fc);
+}
+.ag-inline-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+`;
+
 function normalizeText(value) {
   return String(value || '')
     .replace(/\s+/g, ' ')
@@ -8416,6 +8533,7 @@ function removeStyleProp(el, prop, restoreValue) {
 function createHostSettingsUi(doc, win, opts = {}) {
   const hostBridge = opts.hostBridge || null;
   const settingsPageCoordinator = opts.settingsPageCoordinator || null;
+  const themeAndI18n = opts.themeAndI18n || null;
   const settingsUiCfg = opts.settingsUi && typeof opts.settingsUi === 'object' ? opts.settingsUi : DEFAULT_SETTINGS_UI_CONFIG;
   const extraNoTranslateAttributes = Array.isArray(opts.extraNoTranslateAttributes) ? opts.extraNoTranslateAttributes : [];
   const anchorGroups =
@@ -8439,8 +8557,14 @@ function createHostSettingsUi(doc, win, opts = {}) {
   let navInactiveColor = '';
   let pluginNavElements = [];
   let unsubSettingsPages = null;
+  let unsubInlineHost = null;
   let paneHostElement = null;
   let shadowRoot = null;
+  let pluginPaneHostElement = null;
+  let pluginShadowRoot = null;
+  let activePluginPageKey = null;
+  let activePluginCloseFn = null;
+  let lastActiveTheme = null;
   let isOpen = false;
   let isLoading = false;
   let lastState = null;
@@ -8747,7 +8871,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     for (let i = 0; i < children.length; i += 1) {
       const sib = children[i];
       if (!sib || sib.nodeType !== 1 || sib === navElement) continue;
-      if (sib.getAttribute && sib.getAttribute(NAV_ATTR) === 'true') continue;
+      if (sib.getAttribute && (sib.getAttribute(NAV_ATTR) === 'true' || sib.getAttribute(PLUGIN_NAV_ATTR))) continue;
       if (hasVisibleBackground(sib, win)) {
         try {
           const cs = win.getComputedStyle(sib);
@@ -8797,12 +8921,39 @@ function createHostSettingsUi(doc, win, opts = {}) {
     }
   }
 
+  function ensureNativeSuppressed() {
+    if (suppressedSiblingStyles.size === 0 || !lastActiveTheme) {
+      lastActiveTheme = suppressNativeActiveSiblings();
+    }
+    return lastActiveTheme;
+  }
+
+  function updatePluginNavVisualState(selectedKey, activeTheme) {
+    for (let i = 0; i < pluginNavElements.length; i += 1) {
+      const el = pluginNavElements[i];
+      if (!el) continue;
+      const key = el.getAttribute ? el.getAttribute(PLUGIN_NAV_ATTR) : null;
+      const active = Boolean(selectedKey && key === selectedKey);
+      el.setAttribute('aria-selected', active ? 'true' : 'false');
+      el.setAttribute('data-active', active ? 'true' : 'false');
+      if (active) {
+        const bg = (activeTheme && activeTheme.activeBg) || 'rgba(56, 189, 248, 0.14)';
+        const fg = (activeTheme && activeTheme.activeColor) || '#f8fafc';
+        setImportantStyle(el, 'background-color', bg);
+        setImportantStyle(el, 'color', fg);
+      } else {
+        removeStyleProp(el, 'background-color', '');
+        removeStyleProp(el, 'color', '');
+      }
+    }
+  }
+
   function restoreNativeContentChildren() {
     if (!mountedContentPane) return;
     const children = Array.from(mountedContentPane.children || []);
     for (let i = 0; i < children.length; i += 1) {
       const child = children[i];
-      if (child === paneHostElement) continue;
+      if (child === paneHostElement || child === pluginPaneHostElement) continue;
       if (savedChildDisplay.has(child)) {
         child.style.display = savedChildDisplay.get(child);
         savedChildDisplay.delete(child);
@@ -8819,7 +8970,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const children = Array.from(mountedContentPane.children || []);
     for (let i = 0; i < children.length; i += 1) {
       const child = children[i];
-      if (child === paneHostElement) continue;
+      if (child === paneHostElement || child === pluginPaneHostElement) continue;
       if (isCloseButtonElement(child, paneRect)) {
         if (child.style) child.style.zIndex = '20';
         continue;
@@ -9339,9 +9490,151 @@ function createHostSettingsUi(doc, win, opts = {}) {
     }
   }
 
+  function closePluginPane({ restoreNative = true } = {}) {
+    if (!activePluginPageKey && !activePluginCloseFn && !pluginPaneHostElement) return false;
+    const closer = activePluginCloseFn;
+    activePluginCloseFn = null;
+    activePluginPageKey = null;
+    updatePluginNavVisualState(null);
+    if (pluginShadowRoot) {
+      while (pluginShadowRoot.firstChild) pluginShadowRoot.removeChild(pluginShadowRoot.firstChild);
+    }
+    if (pluginPaneHostElement && pluginPaneHostElement.style) {
+      pluginPaneHostElement.style.display = 'none';
+    }
+    if (typeof closer === 'function') {
+      try {
+        closer();
+      } catch (_err) {}
+    }
+    if (restoreNative && !isOpen) {
+      restoreNativeActiveSiblings();
+      lastActiveTheme = null;
+      restoreNativeContentChildren();
+    }
+    return true;
+  }
+
+  function canMountInline() {
+    return Boolean(!disposed && mountedContentPane && mountedContentPane.isConnected);
+  }
+
+  function mountInlinePage({ pluginMeta, pageId, key, title, kind, spec, onClosed }) {
+    if (!canMountInline()) return null;
+
+    closePanel({ restoreNative: false });
+    closePluginPane({ restoreNative: false });
+
+    const activeTheme = ensureNativeSuppressed();
+    hideOtherContentChildren();
+
+    if (!pluginPaneHostElement || pluginPaneHostElement.parentElement !== mountedContentPane) {
+      pluginPaneHostElement = doc.createElement('div');
+      pluginPaneHostElement.setAttribute(PLUGIN_PANE_ATTR, 'true');
+      applyShieldAttributes(pluginPaneHostElement, extraNoTranslateAttributes);
+      pluginPaneHostElement.style.width = '100%';
+      pluginPaneHostElement.style.height = '100%';
+      pluginPaneHostElement.style.overflow = 'hidden';
+      pluginShadowRoot =
+        typeof pluginPaneHostElement.attachShadow === 'function'
+          ? pluginPaneHostElement.attachShadow({ mode: 'open' })
+          : pluginPaneHostElement;
+      mountedContentPane.appendChild(pluginPaneHostElement);
+    }
+    pluginPaneHostElement.setAttribute('data-addon-host-owner', pluginMeta.pluginId);
+    pluginPaneHostElement.setAttribute('data-addon-host-settings-page', key);
+
+    while (pluginShadowRoot.firstChild) {
+      pluginShadowRoot.removeChild(pluginShadowRoot.firstChild);
+    }
+
+    const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
+    const styleEl = doc.createElement('style');
+    styleEl.textContent = `${tokenCss}\n${SCHEMA_UI_CSS}\n${INLINE_PLUGIN_PANE_CSS}`;
+    pluginShadowRoot.appendChild(styleEl);
+
+    const isCanvas = kind === 'canvas';
+    const pageWrap = createEl('div', isCanvas ? 'ag-inline-page ag-inline-page--canvas' : 'ag-inline-page');
+    const header = createEl('div', isCanvas ? 'ag-inline-header ag-inline-header--compact' : 'ag-inline-header');
+    if (!isCanvas) {
+      header.appendChild(createEl('h2', 'ag-inline-title', title));
+    }
+    const badge = createEl('span', 'ag-ui-attribution', `Addon: ${String(pluginMeta.displayName || pluginMeta.pluginId)}`);
+    badge.setAttribute('data-addon-host-attribution', '1');
+    header.appendChild(badge);
+    pageWrap.appendChild(header);
+
+    const bodyEl = createEl('div', 'ag-inline-body');
+    pageWrap.appendChild(bodyEl);
+    pluginShadowRoot.appendChild(pageWrap);
+
+    let closed = false;
+    let schemaController = null;
+    const notifyClosedOnce = () => {
+      if (closed) return;
+      closed = true;
+      if (typeof onClosed === 'function') {
+        try {
+          onClosed();
+        } catch (_e) {}
+      }
+      if (spec && typeof spec.onClose === 'function') {
+        try {
+          spec.onClose();
+        } catch (_e) {}
+      }
+    };
+
+    const handle = Object.freeze({
+      kind: 'inline-settings',
+      element: pluginPaneHostElement,
+      bodyEl,
+      attributionBadge: badge,
+      getPlacement: () => null,
+      reposition: () => null,
+      update(nextTree, nextState) {
+        if (closed || !schemaController) return;
+        schemaController.update(nextTree, nextState);
+      },
+      getState: () => (schemaController ? schemaController.getState() : null),
+      getElementById: (nodeId) => (schemaController ? schemaController.getElementById(nodeId) : null),
+      close() {
+        if (closed) return false;
+        if (activePluginPageKey === key) {
+          closePluginPane({ restoreNative: true });
+        } else {
+          notifyClosedOnce();
+        }
+        return true;
+      },
+    });
+
+    activePluginPageKey = key;
+    activePluginCloseFn = notifyClosedOnce;
+    pluginPaneHostElement.style.display = 'block';
+    updateNavVisualState(false);
+    updatePluginNavVisualState(key, activeTheme);
+
+    if (!isCanvas) {
+      const tree = typeof spec.getSchema === 'function' ? spec.getSchema() : spec.schema;
+      const state = typeof spec.getState === 'function' ? spec.getState() : spec.state || {};
+      schemaController = createSchemaUiController(doc, bodyEl, {
+        tree,
+        state,
+        onChange: spec.onChange || null,
+        onAction: spec.onAction || null,
+      });
+    } else if (typeof spec.render === 'function') {
+      spec.render(bodyEl, handle);
+    }
+
+    return handle;
+  }
+
   function openPanel() {
     if (disposed || !mountedContentPane) return false;
-    const activeTheme = suppressNativeActiveSiblings();
+    closePluginPane({ restoreNative: false });
+    const activeTheme = ensureNativeSuppressed();
     hideOtherContentChildren();
 
     if (!paneHostElement || paneHostElement.parentElement !== mountedContentPane) {
@@ -9357,20 +9650,24 @@ function createHostSettingsUi(doc, win, opts = {}) {
     paneHostElement.style.display = 'block';
     isOpen = true;
     updateNavVisualState(true, activeTheme);
+    updatePluginNavVisualState(null);
     renderPanel();
     refresh();
     return true;
   }
 
-  function closePanel() {
+  function closePanel({ restoreNative = true } = {}) {
     if (!isOpen && !paneHostElement) return false;
     isOpen = false;
-    restoreNativeActiveSiblings();
     updateNavVisualState(false);
     if (paneHostElement && paneHostElement.style) {
       paneHostElement.style.display = 'none';
     }
-    restoreNativeContentChildren();
+    if (restoreNative && !activePluginPageKey) {
+      restoreNativeActiveSiblings();
+      lastActiveTheme = null;
+      restoreNativeContentChildren();
+    }
     return true;
   }
 
@@ -9534,6 +9831,9 @@ function createHostSettingsUi(doc, win, opts = {}) {
       pluginNavElements.push(btn);
       anchor = btn;
     }
+    if (activePluginPageKey) {
+      updatePluginNavVisualState(activePluginPageKey, lastActiveTheme);
+    }
   }
 
   function ensureMount() {
@@ -9550,13 +9850,17 @@ function createHostSettingsUi(doc, win, opts = {}) {
     }
 
     // Previous Settings modal was unmounted; clean stale references
+    closePluginPane({ restoreNative: false });
     restoreNativeActiveSiblings();
+    lastActiveTheme = null;
     detachNavListeners();
     removePluginNavItems();
     navElement = null;
     navInactiveColor = '';
     paneHostElement = null;
     shadowRoot = null;
+    pluginPaneHostElement = null;
+    pluginShadowRoot = null;
     mountedListParent = null;
     mountedOuterSidebar = null;
     mountedContentPane = null;
@@ -9604,12 +9908,12 @@ function createHostSettingsUi(doc, win, opts = {}) {
     navElement = btn;
     syncPluginNavItems();
 
-    // Close our panel smoothly whenever the user selects any other tab/item in the sidebar (native OR peer addon)
+    // Close our panels smoothly whenever the user selects any other tab/item in the sidebar (native OR peer addon)
     const clickHost = mountedOuterSidebar || listParent;
     clickHostElement = clickHost;
     listClickHandler = (ev) => {
       const target = ev && ev.target;
-      if (!target || !navElement || !isOpen) return;
+      if (!target || !navElement || (!isOpen && !activePluginPageKey)) return;
       if (target === navElement || (navElement.contains && navElement.contains(target))) {
         return;
       }
@@ -9620,7 +9924,13 @@ function createHostSettingsUi(doc, win, opts = {}) {
         }
       }
       if (clickHost && clickHost.contains && clickHost.contains(target)) {
-        closePanel();
+        closePanel({ restoreNative: false });
+        closePluginPane({ restoreNative: true });
+        if (!isOpen && !activePluginPageKey) {
+          restoreNativeActiveSiblings();
+          lastActiveTheme = null;
+          restoreNativeContentChildren();
+        }
       }
     };
     clickHost.addEventListener('click', listClickHandler, true);
@@ -9638,6 +9948,12 @@ function createHostSettingsUi(doc, win, opts = {}) {
   function start() {
     if (disposed || started) return false;
     started = true;
+    if (settingsPageCoordinator && typeof settingsPageCoordinator.setInlineHost === 'function') {
+      unsubInlineHost = settingsPageCoordinator.setInlineHost({
+        canMountInline,
+        mountInlinePage,
+      });
+    }
     if (settingsPageCoordinator && typeof settingsPageCoordinator.onChange === 'function') {
       unsubSettingsPages = settingsPageCoordinator.onChange(() => {
         if (disposed) return;
@@ -9690,14 +10006,22 @@ function createHostSettingsUi(doc, win, opts = {}) {
       } catch (_err) {}
       observer = null;
     }
+    if (unsubInlineHost) {
+      try {
+        unsubInlineHost();
+      } catch (_err) {}
+      unsubInlineHost = null;
+    }
     if (unsubSettingsPages) {
       try {
         unsubSettingsPages();
       } catch (_err) {}
       unsubSettingsPages = null;
     }
-    closePanel();
+    closePluginPane({ restoreNative: false });
+    closePanel({ restoreNative: true });
     restoreNativeActiveSiblings();
+    lastActiveTheme = null;
     detachNavListeners();
     removePluginNavItems();
     if (navElement && navElement.parentNode) {
@@ -9710,10 +10034,17 @@ function createHostSettingsUi(doc, win, opts = {}) {
         paneHostElement.parentNode.removeChild(paneHostElement);
       } catch (_err) {}
     }
+    if (pluginPaneHostElement && pluginPaneHostElement.parentNode) {
+      try {
+        pluginPaneHostElement.parentNode.removeChild(pluginPaneHostElement);
+      } catch (_err) {}
+    }
     navElement = null;
     navInactiveColor = '';
     paneHostElement = null;
     shadowRoot = null;
+    pluginPaneHostElement = null;
+    pluginShadowRoot = null;
     mountedListParent = null;
     mountedOuterSidebar = null;
     mountedContentPane = null;
@@ -9726,17 +10057,21 @@ function createHostSettingsUi(doc, win, opts = {}) {
     ensureMount,
     openPanel,
     closePanel,
+    closePluginPane,
     refresh,
     dispose,
     getLanguage,
     setLanguage,
     isMounted: () => Boolean(navElement && navElement.isConnected),
     isOpen: () => isOpen,
+    getActivePluginPageKey: () => activePluginPageKey,
     getElements: () => ({
       navElement,
       pluginNavElements: pluginNavElements.slice(),
       paneHostElement,
       shadowRoot,
+      pluginPaneHostElement,
+      pluginShadowRoot,
     }),
   });
 }
@@ -9745,6 +10080,7 @@ module.exports = {
   NAV_ATTR,
   PLUGIN_NAV_ATTR,
   PANE_ATTR,
+  PLUGIN_PANE_ATTR,
   LANG_STORAGE_KEY,
   DEFAULT_SETTINGS_UI_CONFIG,
   createHostSettingsUi,
@@ -10176,6 +10512,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         settingsUi: cfg.settingsUi,
         extraNoTranslateAttributes,
         settingsPageCoordinator,
+        themeAndI18n,
       });
       hostSettingsUi.start();
     }
