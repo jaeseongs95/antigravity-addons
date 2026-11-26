@@ -77,15 +77,42 @@ function pinSafePromiseConstructor(p) {
 }
 
 function shadowThenableOnResolvedValue(val) {
-  // R5-BLK-01: Shadow non-enumerable own `then: undefined` on sanitized objects/arrays/Dates so ECMA-262
-  // Promise Resolve Functions & caller `await` never walk `Object.prototype.then`.
-  if (val !== null && typeof val === 'object' && !_ObjectHasOwn(val, 'then')) {
+  // R5-BLK-01 / R6-BLK-01: Shadow non-enumerable own `then: undefined` on extensible objects/arrays/Dates
+  // so ECMA-262 Promise Resolve Functions & caller `await` never walk `Object.prototype.then`,
+  // without throwing TypeError on frozen/sealed/non-extensible values (e.g. caller `.then(() => Object.freeze(...)).finally(...)`).
+  if (val !== null && typeof val === 'object' && !_ObjectHasOwn(val, 'then') && _ObjectIsExtensible(val)) {
     const desc = _ObjectCreate(null);
     desc.value = undefined;
     desc.writable = true;
     desc.configurable = true;
     desc.enumerable = false;
     _ObjectDefineProperty(val, 'then', desc);
+  }
+  return val;
+}
+
+function shadowThenableDeep(val) {
+  // R6-BLK-02: Recursively shadow non-enumerable own `then: undefined` across the entire freshly
+  // sanitized payload tree (objects, Arrays, Dates) so nested `.then(r => r.nested)`, awaited sync
+  // `serviceBus.call`, and awaited service args cannot trigger a poisoned `Object.prototype.then`.
+  if (val === null || typeof val !== 'object') {
+    return val;
+  }
+  shadowThenableOnResolvedValue(val);
+  if (_ArrayIsArray(val)) {
+    for (let i = 0; i < val.length; i += 1) {
+      if (_ObjectHasOwn(val, i)) {
+        shadowThenableDeep(val[i]);
+      }
+    }
+    return val;
+  }
+  const keys = _ObjectKeys(val);
+  for (let i = 0; i < keys.length; i += 1) {
+    const k = keys[i];
+    if (_ObjectHasOwn(val, k)) {
+      shadowThenableDeep(val[k]);
+    }
   }
   return val;
 }
@@ -310,15 +337,17 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
         }
         pushSafe(
           out,
-          _ObjectFreeze({
-            name: rec.name,
-            providerPluginId: rec.providerPluginId,
-            methods: _ObjectFreeze(methods),
-          })
+          _ObjectFreeze(
+            shadowThenableOnResolvedValue({
+              name: rec.name,
+              providerPluginId: rec.providerPluginId,
+              methods: _ObjectFreeze(shadowThenableOnResolvedValue(methods)),
+            })
+          )
         );
       }
     });
-    return _ObjectFreeze(out);
+    return _ObjectFreeze(shadowThenableOnResolvedValue(out));
   }
 
   function call(callerPluginId, serviceName, methodName) {
@@ -336,10 +365,10 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     if (typeof fn !== 'function') {
       throw new _Error(`ERR_SERVICE_METHOD_NOT_FOUND:${serviceName}.${methodName}`);
     }
-    // R3-BLK-01: Populate cleanArgs via defineSafeDataProp so Array.prototype[0] setters cannot steal/tamper arguments.
+    // R3-BLK-01 / R6-BLK-02: Populate cleanArgs via defineSafeDataProp & deep-shadow own `then: undefined`.
     const cleanArgs = [];
     for (let i = 3; i < arguments.length; i += 1) {
-      pushSafe(cleanArgs, sanitizeBusPayload(arguments[i]));
+      pushSafe(cleanArgs, shadowThenableDeep(sanitizeBusPayload(arguments[i])));
     }
     const ret = _ReflectApply(fn, undefined, cleanArgs);
     // R3-BLK-03 / R4-BLK-01: Only treat genuine native Promises as async, pin own constructor=undefined
@@ -352,7 +381,7 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
           ret,
           (resolved) => {
             try {
-              resolve(shadowThenableOnResolvedValue(sanitizeBusPayload(resolved)));
+              resolve(shadowThenableDeep(sanitizeBusPayload(resolved)));
             } catch (err) {
               reject(err);
             }
@@ -362,7 +391,7 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
       });
       return hardenReturnedPromise(safePromise);
     }
-    return sanitizeBusPayload(ret);
+    return shadowThenableDeep(sanitizeBusPayload(ret));
   }
 
   function getInternalService(serviceName) {

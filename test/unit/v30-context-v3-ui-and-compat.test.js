@@ -531,11 +531,26 @@ test('TC-V30-08: services default-deny ACL, storage TTL + onDidChange, and v2 co
   });
   const preResolvedArrayPromise = Promise.resolve(['ARR-SECRET-1']);
   const preResolvedDatePromise = Promise.resolve(new Date('2026-01-01T00:00:00.000Z'));
+  const preResolvedNestedPromise = Promise.resolve({
+    nested: {
+      secret: 'NESTED-TOP-SECRET',
+      list: [{ inner: 'LIST-SECRET' }],
+      at: new Date('2026-02-02T00:00:00.000Z'),
+    },
+    then: 'DATA_THEN',
+  });
   asyncVaultCtx.services.provide('r4-async-victim.vault', {
     getSecret: async () => ({ apiKey: 'SK-LIVE-9999-SECRET' }),
     getNullProtoSecret: () => Promise.resolve(Object.assign(Object.create(null), { apiKey: 'SK-NULL-PROTO-SECRET' })),
     getArraySecret: () => preResolvedArrayPromise,
     getDateSecret: () => preResolvedDatePromise,
+    getNestedSecret: () => preResolvedNestedPromise,
+    getSyncSecret: () => ({ apiKey: 'SYNC-SECRET-123' }),
+    getSyncNested: () => ({ nested: { secret: 'SYNC-NESTED-SECRET', list: [{ inner: 'SYNC-LIST' }] } }),
+    echoAsyncArgNested: async (arg) => {
+      const inner = await arg.nested;
+      return inner.token;
+    },
     getFrozenSecret: () => Object.freeze(Promise.resolve({ apiKey: 'FROZEN-SECRET' })),
   });
 
@@ -671,11 +686,83 @@ test('TC-V30-08: services default-deny ACL, storage TTL + onDidChange, and v2 co
     assert.equal(stolenViaCatchOrFinally, null, 'R5-BLK-02: Promise.prototype.finally must NOT hijack returned Promise');
     assert.equal(finallyRan, 1);
     assert.equal(r5FinallyRes.apiKey, 'SK-NULL-PROTO-SECRET');
+
+    // R6-BLK-02: Deep nested async `.then(r => r.nested)` + awaited sync return + awaited service arg under poisoned Object.prototype.then
+    const r6Nested = await partnerCtx.services
+      .call('r4-async-victim.vault', 'getNestedSecret')
+      .then((r) => {
+        assert.equal(r.then, 'DATA_THEN', 'Own non-function data property `then` must remain preserved');
+        return r.nested;
+      });
+    assert.equal(stolenViaObjProtoThen, null, 'R6-BLK-02: Object.prototype.then must NOT exfiltrate async nested object via .then(r => r.nested)');
+    assert.equal(r6Nested.secret, 'NESTED-TOP-SECRET');
+    assert.equal(typeof r6Nested.evilFn, 'undefined');
+    assert.deepEqual(Object.keys(r6Nested), ['secret', 'list', 'at']);
+
+    const r6NestedItem = await partnerCtx.services
+      .call('r4-async-victim.vault', 'getNestedSecret')
+      .then((r) => r.nested.list[0]);
+    assert.equal(stolenViaObjProtoThen, null, 'R6-BLK-02: Object.prototype.then must NOT exfiltrate async nested array item');
+    assert.equal(r6NestedItem.inner, 'LIST-SECRET');
+
+    const r6NestedDate = await partnerCtx.services
+      .call('r4-async-victim.vault', 'getNestedSecret')
+      .then((r) => r.nested.at);
+    assert.equal(stolenViaObjProtoThen, null, 'R6-BLK-02: Object.prototype.then must NOT exfiltrate async nested Date');
+    assert.equal(r6NestedDate instanceof Date, true);
+    assert.equal(r6NestedDate.toISOString(), '2026-02-02T00:00:00.000Z');
+
+    const r6Sync = await partnerCtx.services.call('r4-async-victim.vault', 'getSyncSecret');
+    assert.equal(stolenViaObjProtoThen, null, 'R6-BLK-02: Object.prototype.then must NOT exfiltrate awaited sync service return');
+    assert.equal(r6Sync.apiKey, 'SYNC-SECRET-123');
+    assert.equal(typeof r6Sync.evilFn, 'undefined');
+    assert.deepEqual(Object.keys(r6Sync), ['apiKey']);
+
+    const r6SyncNested = await OrigPromise.resolve(
+      partnerCtx.services.call('r4-async-victim.vault', 'getSyncNested').nested
+    );
+    assert.equal(stolenViaObjProtoThen, null, 'R6-BLK-02: Object.prototype.then must NOT exfiltrate nested sync return');
+    assert.equal(r6SyncNested.secret, 'SYNC-NESTED-SECRET');
+
+    const r6ArgToken = await partnerCtx.services.call('r4-async-victim.vault', 'echoAsyncArgNested', {
+      nested: { token: 'ARG-NESTED-TOKEN' },
+    });
+    assert.equal(stolenViaObjProtoThen, null, 'R6-BLK-02: Object.prototype.then must NOT exfiltrate awaited nested service arg');
+    assert.equal(r6ArgToken, 'ARG-NESTED-TOKEN');
   } finally {
     delete Object.prototype.then;
     Promise.prototype.catch = origProtoCatch;
     Promise.prototype.finally = origProtoFinally;
   }
+
+  // R6-BLK-01: Clean-environment (zero prototype poisoning) `.then(() => Object.freeze(...)).finally(...)` must NOT throw TypeError
+  let cleanFinallySyncRan = 0;
+  const frozenSyncFin = await partnerCtx.services
+    .call('r4-async-victim.vault', 'getNullProtoSecret')
+    .then(() => Object.freeze({ ok: 1 }))
+    .finally(() => {
+      cleanFinallySyncRan += 1;
+    });
+  assert.equal(cleanFinallySyncRan, 1);
+  assert.deepEqual(frozenSyncFin, { ok: 1 });
+  assert.equal(Object.isFrozen(frozenSyncFin), true);
+
+  let cleanFinallyAsyncRan = 0;
+  const frozenAsyncFin = await partnerCtx.services
+    .call('r4-async-victim.vault', 'getNullProtoSecret')
+    .then(() => Object.freeze({ ok: 2 }))
+    .finally(async () => {
+      cleanFinallyAsyncRan += 1;
+    });
+  assert.equal(cleanFinallyAsyncRan, 1);
+  assert.deepEqual(frozenAsyncFin, { ok: 2 });
+
+  const frozenListFin = await partnerCtx.services
+    .call('r4-async-victim.vault', 'getNullProtoSecret')
+    .then(() => partnerCtx.services.list())
+    .finally(() => {});
+  assert.equal(Array.isArray(frozenListFin), true);
+  assert.equal(Object.isFrozen(frozenListFin), true);
 
   // R4-NB-01: Inherited Object.prototype.updateItem/removeItem must NOT intercept status item updates/dispose
   const minimalBarCtx = await host.mountPlugin({
