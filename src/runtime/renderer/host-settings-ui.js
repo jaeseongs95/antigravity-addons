@@ -12,9 +12,11 @@
  */
 
 const NAV_ATTR = 'data-addon-host-admin-nav';
+const PLUGIN_NAV_ATTR = 'data-addon-host-plugin-settings-nav';
 const PANE_ATTR = 'data-addon-host-admin-pane';
 const IGNORE_ATTR = 'data-addon-host-ignore';
 const NO_TRANSLATE_ATTR = 'data-addon-host-no-translate';
+const LANG_STORAGE_KEY = 'addon-host:settings-ui-lang';
 
 const DEFAULT_SETTINGS_UI_CONFIG = Object.freeze({
   navId: 'addon-manager',
@@ -53,7 +55,9 @@ const COPY = Object.freeze({
     bundleNotBuilt: 'Not built yet',
     sectionAddons: 'Installed Native Host Addons',
     emptyTitle: 'No addons registered yet',
-    emptyBody: 'Register an AddonManifest.v2 plugin with the host CLI to manage it here.',
+    emptyBody: 'Register an AddonManifest.v3 / v2 plugin with the host CLI to manage it here.',
+    openSettings: 'Settings',
+    sectionPluginPages: 'Plugin Settings Pages',
     statusActive: 'Running',
     statusDisabled: 'Disabled',
     statusRejected: 'Blocked',
@@ -94,6 +98,9 @@ const COPY = Object.freeze({
     saveError: 'Failed to save Remote Web preference.',
     loading: 'Loading addon status...',
     remotePrefsSaved: 'Saved Remote Web preference.',
+    langSwitchAria: 'Addon Manager language',
+    langKo: '한국어',
+    langEn: 'EN',
   }),
   ko: Object.freeze({
     title: '애드온 관리',
@@ -112,7 +119,9 @@ const COPY = Object.freeze({
     bundleNotBuilt: '미빌드',
     sectionAddons: '네이티브 호스트 애드온 목록',
     emptyTitle: '등록된 애드온이 없습니다',
-    emptyBody: '호스트 CLI로 AddonManifest.v2 플러그인을 등록하면 이 화면에서 관리할 수 있습니다.',
+    emptyBody: '호스트 CLI로 AddonManifest.v3 / v2 플러그인을 등록하면 이 화면에서 관리할 수 있습니다.',
+    openSettings: '설정',
+    sectionPluginPages: '플러그인 설정 페이지',
     statusActive: '실행 중',
     statusDisabled: '비활성',
     statusRejected: '차단됨',
@@ -153,6 +162,9 @@ const COPY = Object.freeze({
     saveError: '원격 웹 표시 설정 저장에 실패했습니다.',
     loading: '애드온 상태를 불러오는 중...',
     remotePrefsSaved: '원격 웹 표시 설정을 저장했습니다.',
+    langSwitchAria: '애드온 관리 언어',
+    langKo: '한국어',
+    langEn: 'EN',
   }),
 });
 
@@ -300,6 +312,45 @@ const PANEL_CSS = `
   background: var(--chip-bg);
   color: var(--chip-fg);
   border: 1px solid var(--card-border);
+}
+
+.ah-lang-switch {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  gap: 2px;
+}
+
+.ah-lang-btn {
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 4px 8px;
+  cursor: pointer;
+  line-height: 1.2;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.ah-lang-btn:hover {
+  color: var(--text-primary);
+}
+
+.ah-lang-btn[aria-pressed="true"] {
+  background: var(--accent-strong);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.ah-lang-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 .ah-btn {
@@ -540,8 +591,22 @@ const PANEL_CSS = `
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 6px;
+  gap: 8px;
   flex: 0 0 auto;
+}
+
+.ah-addon-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ah-plugin-pages-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .ah-toggle-row {
@@ -705,6 +770,7 @@ const PANEL_CSS = `
 
 @media (prefers-reduced-motion: reduce) {
   .ah-btn,
+  .ah-lang-btn,
   .ah-addon-card,
   .ah-switch,
   .ah-switch-thumb {
@@ -720,12 +786,51 @@ function normalizeText(value) {
     .toLowerCase();
 }
 
-function detectLanguage(doc, listParent) {
+function normalizeLang(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim().toLowerCase();
+  if (v === 'ko' || v.startsWith('ko-')) return 'ko';
+  if (v === 'en' || v.startsWith('en-')) return 'en';
+  return null;
+}
+
+function readStoredLanguage(win) {
   try {
-    const sample = listParent && listParent.textContent ? String(listParent.textContent) : '';
-    if (/[\uAC00-\uD7A3]/.test(sample)) return 'ko';
-    const docLang = doc && doc.documentElement && doc.documentElement.lang ? String(doc.documentElement.lang).toLowerCase() : '';
-    if (docLang.startsWith('ko')) return 'ko';
+    const storage = win && win.localStorage;
+    if (storage && typeof storage.getItem === 'function') {
+      return normalizeLang(storage.getItem(LANG_STORAGE_KEY));
+    }
+  } catch (_err) {}
+  return null;
+}
+
+function writeStoredLanguage(win, lang) {
+  try {
+    const storage = win && win.localStorage;
+    if (storage && typeof storage.setItem === 'function') {
+      storage.setItem(LANG_STORAGE_KEY, lang);
+      return true;
+    }
+  } catch (_err) {}
+  return false;
+}
+
+function resolveLanguage(win, doc, overrideLang) {
+  const explicit = normalizeLang(overrideLang);
+  if (explicit) return explicit;
+  const stored = readStoredLanguage(win);
+  if (stored) return stored;
+  try {
+    const docLang =
+      doc && doc.documentElement && doc.documentElement.lang
+        ? normalizeLang(String(doc.documentElement.lang))
+        : null;
+    if (docLang) return docLang;
+    const nav = win && win.navigator;
+    const navLang = nav
+      ? normalizeLang(nav.language || (Array.isArray(nav.languages) ? nav.languages[0] : ''))
+      : null;
+    if (navLang) return navLang;
   } catch (_err) {}
   return 'en';
 }
@@ -843,6 +948,7 @@ function removeStyleProp(el, prop, restoreValue) {
 
 function createHostSettingsUi(doc, win, opts = {}) {
   const hostBridge = opts.hostBridge || null;
+  const settingsPageCoordinator = opts.settingsPageCoordinator || null;
   const settingsUiCfg = opts.settingsUi && typeof opts.settingsUi === 'object' ? opts.settingsUi : DEFAULT_SETTINGS_UI_CONFIG;
   const extraNoTranslateAttributes = Array.isArray(opts.extraNoTranslateAttributes) ? opts.extraNoTranslateAttributes : [];
   const anchorGroups =
@@ -859,9 +965,13 @@ function createHostSettingsUi(doc, win, opts = {}) {
   let mountedListParent = null;
   let mountedOuterSidebar = null;
   let mountedContentPane = null;
+  let mountedReferenceItem = null;
   let mountedLang = null;
+  let userLangOverride = readStoredLanguage(win);
   let navElement = null;
   let navInactiveColor = '';
+  let pluginNavElements = [];
+  let unsubSettingsPages = null;
   let paneHostElement = null;
   let shadowRoot = null;
   let isOpen = false;
@@ -883,6 +993,25 @@ function createHostSettingsUi(doc, win, opts = {}) {
       if (typeof labels.en === 'string' && labels.en.trim()) return labels.en.trim();
     }
     return lang === 'ko' ? DEFAULT_SETTINGS_UI_CONFIG.navLabel.ko : DEFAULT_SETTINGS_UI_CONFIG.navLabel.en;
+  }
+
+  function getLanguage() {
+    return resolveLanguage(win, doc, userLangOverride);
+  }
+
+  function setLanguage(nextLang) {
+    const norm = normalizeLang(nextLang);
+    if (!norm) return getLanguage();
+    userLangOverride = norm;
+    writeStoredLanguage(win, norm);
+    mountedLang = norm;
+    if (navElement && navElement.isConnected) {
+      replaceLeafText(navElement, getNavLabel(norm), doc);
+    }
+    if (!disposed && isOpen) {
+      renderPanel();
+    }
+    return norm;
   }
 
   function matchAnchorGroupIndex(text) {
@@ -1331,7 +1460,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
   function renderPanel() {
     if (!shadowRoot) return;
-    const lang = detectLanguage(doc, mountedListParent);
+    const lang = getLanguage();
     const t = COPY[lang] || COPY.en;
 
     while (shadowRoot.firstChild) {
@@ -1355,12 +1484,33 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const actions = createEl('div', 'ah-header-actions');
     if (lastState && lastState.host) {
       actions.appendChild(
-        createEl('span', 'ah-meta-pill', `${t.hostLabel} v${lastState.host.version || '2.5.0'}`)
+        createEl('span', 'ah-meta-pill', `${t.hostLabel} v${lastState.host.version || '3.0.1'}`)
       );
       if (lastState.host.buildSha8) {
         actions.appendChild(createEl('span', 'ah-meta-pill', `${t.buildLabel} ${lastState.host.buildSha8}`));
       }
     }
+    const langGroup = createEl('div', 'ah-lang-switch');
+    langGroup.setAttribute('role', 'group');
+    langGroup.setAttribute('aria-label', t.langSwitchAria);
+    langGroup.setAttribute('data-ah-control', 'language-switch');
+    const langDefs = [
+      { code: 'ko', label: t.langKo },
+      { code: 'en', label: t.langEn },
+    ];
+    for (let i = 0; i < langDefs.length; i += 1) {
+      const def = langDefs[i];
+      const lBtn = createEl('button', 'ah-lang-btn', def.label);
+      lBtn.setAttribute('type', 'button');
+      lBtn.setAttribute('data-ah-lang', def.code);
+      lBtn.setAttribute('aria-pressed', lang === def.code ? 'true' : 'false');
+      lBtn.addEventListener('click', () => {
+        setLanguage(def.code);
+      });
+      langGroup.appendChild(lBtn);
+    }
+    actions.appendChild(langGroup);
+
     const refreshBtn = createEl('button', 'ah-btn', isLoading ? t.refreshing : t.refresh);
     refreshBtn.setAttribute('type', 'button');
     refreshBtn.disabled = isLoading;
@@ -1443,6 +1593,19 @@ function createHostSettingsUi(doc, win, opts = {}) {
     root.appendChild(summaryGrid);
 
     // 3. Addon list
+    const registeredPages =
+      settingsPageCoordinator && typeof settingsPageCoordinator.listSettingsPages === 'function'
+        ? settingsPageCoordinator.listSettingsPages()
+        : [];
+    const pagesByPlugin = new Map();
+    for (let p = 0; p < registeredPages.length; p += 1) {
+      const pg = registeredPages[p];
+      if (!pg || !pg.pluginId) continue;
+      if (!pagesByPlugin.has(pg.pluginId)) pagesByPlugin.set(pg.pluginId, []);
+      pagesByPlugin.get(pg.pluginId).push(pg);
+    }
+    const renderedPageKeys = new Set();
+
     root.appendChild(createEl('h3', 'ah-section-title', t.sectionAddons));
     const addons = Array.isArray(lastState.addons) ? lastState.addons : [];
     if (addons.length === 0) {
@@ -1495,8 +1658,28 @@ function createHostSettingsUi(doc, win, opts = {}) {
         main.appendChild(badges);
         card.appendChild(main);
 
-        // Right control: Remote Web visibility toggle
+        // Right control: Plugin Settings Page button(s) + Remote Web visibility toggle
         const ctrl = createEl('div', 'ah-addon-control');
+        const pluginPages = pagesByPlugin.get(addon.pluginId) || [];
+        if (pluginPages.length > 0 && settingsPageCoordinator && typeof settingsPageCoordinator.openSettingsPage === 'function') {
+          const actionRow = createEl('div', 'ah-addon-actions');
+          for (let j = 0; j < pluginPages.length; j += 1) {
+            const page = pluginPages[j];
+            const pageKey = `${addon.pluginId}:${page.id}`;
+            renderedPageKeys.add(pageKey);
+            const btnLabel = pluginPages.length === 1 ? t.openSettings : page.title;
+            const openBtn = createEl('button', 'ah-btn ah-btn-primary', btnLabel);
+            openBtn.setAttribute('type', 'button');
+            openBtn.setAttribute('title', page.title);
+            openBtn.setAttribute('aria-label', page.title);
+            openBtn.setAttribute('data-ah-settings-page', pageKey);
+            openBtn.addEventListener('click', () => {
+              settingsPageCoordinator.openSettingsPage(addon.pluginId, page.id);
+            });
+            actionRow.appendChild(openBtn);
+          }
+          ctrl.appendChild(actionRow);
+        }
         const toggleRow = createEl('div', 'ah-toggle-row');
         const toggleLabel = createEl('span', 'ah-toggle-label', t.remoteToggleLabel);
         toggleRow.appendChild(toggleLabel);
@@ -1531,6 +1714,24 @@ function createHostSettingsUi(doc, win, opts = {}) {
         list.appendChild(card);
       }
       root.appendChild(list);
+    }
+
+    const extraPages = registeredPages.filter((pg) => pg && !renderedPageKeys.has(`${pg.pluginId}:${pg.id}`));
+    if (extraPages.length > 0 && settingsPageCoordinator && typeof settingsPageCoordinator.openSettingsPage === 'function') {
+      root.appendChild(createEl('h3', 'ah-section-title', t.sectionPluginPages));
+      const extraBar = createEl('div', 'ah-plugin-pages-bar');
+      for (let e = 0; e < extraPages.length; e += 1) {
+        const pg = extraPages[e];
+        const pageKey = `${pg.pluginId}:${pg.id}`;
+        const btn = createEl('button', 'ah-btn ah-btn-primary', pg.title);
+        btn.setAttribute('type', 'button');
+        btn.setAttribute('data-ah-settings-page', pageKey);
+        btn.addEventListener('click', () => {
+          settingsPageCoordinator.openSettingsPage(pg.pluginId, pg.id);
+        });
+        extraBar.appendChild(btn);
+      }
+      root.appendChild(extraBar);
     }
 
     // 4. Remote Web Bundle Sync Footer
@@ -1646,7 +1847,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     if (disposed || !hostBridge || typeof hostBridge.getHostAdminState !== 'function') {
       return { ok: false, reason: 'ERR_HOST_ADMIN_UNAVAILABLE' };
     }
-    const lang = detectLanguage(doc, mountedListParent);
+    const lang = getLanguage();
     const t = COPY[lang] || COPY.en;
     isLoading = true;
     lastError = null;
@@ -1783,11 +1984,96 @@ function createHostSettingsUi(doc, win, opts = {}) {
     return idx + 1 < siblings.length ? siblings[idx + 1] : null;
   }
 
+  function removePluginNavItems() {
+    for (let i = 0; i < pluginNavElements.length; i += 1) {
+      const el = pluginNavElements[i];
+      if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
+        try {
+          el.parentNode.removeChild(el);
+        } catch (_err) {}
+      }
+    }
+    pluginNavElements = [];
+  }
+
+  function buildPluginNavItem(referenceItem, page) {
+    let btn;
+    if (referenceItem && typeof referenceItem.cloneNode === 'function') {
+      btn = referenceItem.cloneNode(true);
+      btn.removeAttribute('id');
+      btn.removeAttribute('aria-current');
+      btn.removeAttribute('data-state');
+      btn.removeAttribute('data-active');
+      if (btn.tagName && String(btn.tagName).toUpperCase() === 'BUTTON') {
+        btn.setAttribute('type', 'button');
+      }
+      if (typeof btn.querySelectorAll === 'function') {
+        const innerBtns = btn.querySelectorAll('button');
+        for (let i = 0; i < innerBtns.length; i += 1) {
+          innerBtns[i].removeAttribute('id');
+          innerBtns[i].setAttribute('type', 'button');
+        }
+      }
+      replaceLeafText(btn, page.title, doc);
+    } else {
+      btn = doc.createElement('button');
+      btn.setAttribute('type', 'button');
+      btn.textContent = page.title;
+    }
+
+    const pageKey = `${page.pluginId}:${page.id}`;
+    btn.setAttribute(PLUGIN_NAV_ATTR, pageKey);
+    btn.setAttribute('data-addon-host-owner', page.pluginId);
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-selected', 'false');
+    applyShieldAttributes(btn, extraNoTranslateAttributes);
+    if (btn.style && !btn.style.cursor) {
+      btn.style.cursor = 'pointer';
+    }
+
+    btn.addEventListener('click', (ev) => {
+      if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+      if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+      if (settingsPageCoordinator && typeof settingsPageCoordinator.openSettingsPage === 'function') {
+        settingsPageCoordinator.openSettingsPage(page.pluginId, page.id);
+      }
+    });
+
+    return btn;
+  }
+
+  function syncPluginNavItems() {
+    if (disposed || !mountedListParent || !mountedListParent.isConnected || !navElement || !navElement.isConnected) {
+      return;
+    }
+    removePluginNavItems();
+    if (!settingsPageCoordinator || typeof settingsPageCoordinator.listSettingsPages !== 'function') {
+      return;
+    }
+    const pages = settingsPageCoordinator.listSettingsPages();
+    if (!Array.isArray(pages) || pages.length === 0) return;
+
+    let anchor = navElement;
+    for (let i = 0; i < pages.length; i += 1) {
+      const page = pages[i];
+      if (!page || !page.pluginId || !page.id) continue;
+      const btn = buildPluginNavItem(mountedReferenceItem, page);
+      const nextSib = anchor.nextSibling || null;
+      if (nextSib && typeof mountedListParent.insertBefore === 'function') {
+        mountedListParent.insertBefore(btn, nextSib);
+      } else if (typeof mountedListParent.appendChild === 'function') {
+        mountedListParent.appendChild(btn);
+      }
+      pluginNavElements.push(btn);
+      anchor = btn;
+    }
+  }
+
   function ensureMount() {
     if (disposed || !doc) return false;
 
     if (navElement && navElement.isConnected && mountedListParent && mountedListParent.isConnected) {
-      const liveLang = detectLanguage(doc, mountedListParent);
+      const liveLang = getLanguage();
       if (liveLang !== mountedLang) {
         mountedLang = liveLang;
         replaceLeafText(navElement, getNavLabel(liveLang), doc);
@@ -1799,6 +2085,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     // Previous Settings modal was unmounted; clean stale references
     restoreNativeActiveSiblings();
     detachNavListeners();
+    removePluginNavItems();
     navElement = null;
     navInactiveColor = '';
     paneHostElement = null;
@@ -1806,6 +2093,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     mountedListParent = null;
     mountedOuterSidebar = null;
     mountedContentPane = null;
+    mountedReferenceItem = null;
     mountedLang = null;
     isOpen = false;
 
@@ -1819,11 +2107,13 @@ function createHostSettingsUi(doc, win, opts = {}) {
       mountedListParent = listParent;
       mountedOuterSidebar = outerSidebar || listParent;
       mountedContentPane = contentPane;
-      mountedLang = detectLanguage(doc, listParent);
+      mountedReferenceItem = referenceItem || null;
+      mountedLang = getLanguage();
+      syncPluginNavItems();
       return true;
     }
 
-    const lang = detectLanguage(doc, listParent);
+    const lang = getLanguage();
     try {
       if (referenceItem && win && typeof win.getComputedStyle === 'function') {
         navInactiveColor = String(win.getComputedStyle(referenceItem).color || '');
@@ -1842,8 +2132,10 @@ function createHostSettingsUi(doc, win, opts = {}) {
     mountedListParent = listParent;
     mountedOuterSidebar = outerSidebar || listParent;
     mountedContentPane = contentPane;
+    mountedReferenceItem = referenceItem || null;
     mountedLang = lang;
     navElement = btn;
+    syncPluginNavItems();
 
     // Close our panel smoothly whenever the user selects any other tab/item in the sidebar (native OR peer addon)
     const clickHost = mountedOuterSidebar || listParent;
@@ -1853,6 +2145,12 @@ function createHostSettingsUi(doc, win, opts = {}) {
       if (!target || !navElement || !isOpen) return;
       if (target === navElement || (navElement.contains && navElement.contains(target))) {
         return;
+      }
+      for (let i = 0; i < pluginNavElements.length; i += 1) {
+        const pNav = pluginNavElements[i];
+        if (pNav && (target === pNav || (pNav.contains && pNav.contains(target)))) {
+          return;
+        }
       }
       if (clickHost && clickHost.contains && clickHost.contains(target)) {
         closePanel();
@@ -1873,6 +2171,13 @@ function createHostSettingsUi(doc, win, opts = {}) {
   function start() {
     if (disposed || started) return false;
     started = true;
+    if (settingsPageCoordinator && typeof settingsPageCoordinator.onChange === 'function') {
+      unsubSettingsPages = settingsPageCoordinator.onChange(() => {
+        if (disposed) return;
+        syncPluginNavItems();
+        if (isOpen) renderPanel();
+      });
+    }
     ensureMount();
     const MO = (win && win.MutationObserver) || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
     const observeTarget = doc && (doc.documentElement || doc.body);
@@ -1918,9 +2223,16 @@ function createHostSettingsUi(doc, win, opts = {}) {
       } catch (_err) {}
       observer = null;
     }
+    if (unsubSettingsPages) {
+      try {
+        unsubSettingsPages();
+      } catch (_err) {}
+      unsubSettingsPages = null;
+    }
     closePanel();
     restoreNativeActiveSiblings();
     detachNavListeners();
+    removePluginNavItems();
     if (navElement && navElement.parentNode) {
       try {
         navElement.parentNode.removeChild(navElement);
@@ -1938,6 +2250,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     mountedListParent = null;
     mountedOuterSidebar = null;
     mountedContentPane = null;
+    mountedReferenceItem = null;
     mountedLang = null;
   }
 
@@ -1948,10 +2261,13 @@ function createHostSettingsUi(doc, win, opts = {}) {
     closePanel,
     refresh,
     dispose,
+    getLanguage,
+    setLanguage,
     isMounted: () => Boolean(navElement && navElement.isConnected),
     isOpen: () => isOpen,
     getElements: () => ({
       navElement,
+      pluginNavElements: pluginNavElements.slice(),
       paneHostElement,
       shadowRoot,
     }),
@@ -1960,7 +2276,9 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
 module.exports = {
   NAV_ATTR,
+  PLUGIN_NAV_ATTR,
   PANE_ATTR,
+  LANG_STORAGE_KEY,
   DEFAULT_SETTINGS_UI_CONFIG,
   createHostSettingsUi,
 };

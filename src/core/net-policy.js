@@ -215,7 +215,7 @@ function normalizeLoopbackTarget(entry) {
 
 function validateNetPermissions(netPerm, { trustLevel = 'restricted', forbiddenHosts = [] } = {}) {
   if (netPerm === null || netPerm === undefined) {
-    return { ok: true, httpsHosts: [], localLoopback: [] };
+    return { ok: true, httpsHosts: [], localLoopback: [], userApprovedHttps: false };
   }
   if (typeof netPerm !== 'object' || Array.isArray(netPerm)) {
     return { ok: false, reason: 'ERR_INVALID_NET_PERMISSIONS', errors: ['permissions.net must be an object'] };
@@ -237,6 +237,15 @@ function validateNetPermissions(netPerm, { trustLevel = 'restricted', forbiddenH
           httpsHosts.push(norm);
         }
       }
+    }
+  }
+
+  let userApprovedHttps = false;
+  if (netPerm.userApprovedHttps !== undefined) {
+    if (typeof netPerm.userApprovedHttps !== 'boolean') {
+      errors.push('permissions.net.userApprovedHttps must be a boolean');
+    } else {
+      userApprovedHttps = netPerm.userApprovedHttps;
     }
   }
 
@@ -271,7 +280,7 @@ function validateNetPermissions(netPerm, { trustLevel = 'restricted', forbiddenH
   if (errors.length > 0) {
     return { ok: false, reason: 'ERR_INVALID_NET_PERMISSIONS', errors };
   }
-  return { ok: true, httpsHosts, localLoopback };
+  return { ok: true, httpsHosts, localLoopback, userApprovedHttps };
 }
 
 function sanitizeNetHeaders(rawHeaders) {
@@ -284,7 +293,12 @@ function sanitizeNetHeaders(rawHeaders) {
     const rawName = String(pair[0] || '').trim();
     const lower = rawName.toLowerCase();
     if (!rawName || !/^[a-z0-9-]+$/i.test(rawName)) continue;
-    if (FORBIDDEN_REQUEST_HEADERS.includes(lower) || lower.startsWith('sec-fetch-') || lower.startsWith('proxy-')) {
+    if (
+      FORBIDDEN_REQUEST_HEADERS.includes(lower) ||
+      lower.startsWith('sec-fetch-') ||
+      lower.startsWith('proxy-') ||
+      lower.startsWith('x-addon-host-')
+    ) {
       continue;
     }
     const rawVal = String(pair[1] === undefined || pair[1] === null ? '' : pair[1]);
@@ -345,14 +359,26 @@ function evaluateNetRequest(rawUrl, init = {}, policy = {}) {
     const allowedPorts = new Set();
     const declared = Array.isArray(policy.localLoopback) ? policy.localLoopback : [];
     const namedMap = policy.namedLoopbackPorts && typeof policy.namedLoopbackPorts === 'object' ? policy.namedLoopbackPorts : {};
+    let hasNamedTarget = false;
     for (let i = 0; i < declared.length; i += 1) {
       const entry = declared[i];
       if (typeof entry === 'number' && Number.isInteger(entry) && entry >= 1024 && entry <= 65535) {
         allowedPorts.add(entry);
-      } else if (typeof entry === 'string' && Object.prototype.hasOwnProperty.call(namedMap, entry)) {
-        const resolvedPort = Number(namedMap[entry]);
-        if (Number.isInteger(resolvedPort) && resolvedPort >= 1024 && resolvedPort <= 65535) {
-          allowedPorts.add(resolvedPort);
+      } else if (typeof entry === 'string') {
+        hasNamedTarget = true;
+        if (Object.prototype.hasOwnProperty.call(namedMap, entry)) {
+          const resolvedPort = Number(namedMap[entry]);
+          if (Number.isInteger(resolvedPort) && resolvedPort >= 1024 && resolvedPort <= 65535) {
+            allowedPorts.add(resolvedPort);
+          }
+        }
+      }
+    }
+    if (hasNamedTarget && Array.isArray(policy.dynamicLoopbackPorts)) {
+      for (let i = 0; i < policy.dynamicLoopbackPorts.length; i += 1) {
+        const dynPort = Number(policy.dynamicLoopbackPorts[i]);
+        if (Number.isInteger(dynPort) && dynPort >= 1024 && dynPort <= 65535) {
+          allowedPorts.add(dynPort);
         }
       }
     }

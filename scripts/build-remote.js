@@ -443,12 +443,13 @@ function buildModularAddonUserscriptMetaHeader({
   const userscriptFileName = `${pluginId}.user.js`;
   const metaFileName = `${pluginId}.meta.js`;
 
+  const manifestSchemaVer = manifest.schemaVersion || manifest.sourceSchemaVersion || 2;
   const lines = [
     '// ==UserScript==',
     `// @name         ${displayName} (${browserProfile.displayName})`,
     `// @namespace    ${namespace}`,
     `// @version      ${version}`,
-    `// @description  Modular AddonManifest.v2 Remote Web Userscript for ${displayName}`,
+    `// @description  Modular AddonManifest.v${manifestSchemaVer} Remote Web Userscript for ${displayName}`,
     ...matchLines,
     '// @run-at       document-idle',
     '// @inject-into  content',
@@ -571,6 +572,7 @@ function buildAddonUserscript({
       remotePermissions.net = {
         httpsHosts: Array.isArray(rawPerms.net.httpsHosts) ? rawPerms.net.httpsHosts.slice() : [],
         localLoopback: [],
+        ...(rawPerms.net.userApprovedHttps === true ? { userApprovedHttps: true } : {}),
       };
     }
     if (rawPerms.dom && typeof rawPerms.dom === 'object') {

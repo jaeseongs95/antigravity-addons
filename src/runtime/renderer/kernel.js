@@ -420,6 +420,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         hostBridge,
         settingsUi: cfg.settingsUi,
         extraNoTranslateAttributes,
+        settingsPageCoordinator,
       });
       hostSettingsUi.start();
     }
@@ -777,6 +778,67 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         ignoreElements: (opts && opts.ignoreElements) || [],
       });
 
+    const getSettingsFn = () => {
+      assertActive();
+      if (!hasSettingsBridge) return null;
+      return _MapGet(pluginSettingsSnapshots, pluginId) || null;
+    };
+
+    const onSettingsChangeFn = (callback) => {
+      assertActive();
+      if (typeof callback !== 'function') {
+        throw new _Error('ERR_INVALID_SETTINGS_CALLBACK');
+      }
+      if (!hasSettingsBridge) {
+        throw new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
+      }
+      let subs = _MapGet(pluginSettingsListeners, pluginId);
+      if (!subs) {
+        subs = new _Set();
+        _MapSet(pluginSettingsListeners, pluginId, subs);
+      }
+      _SetAdd(subs, callback);
+      const unsub = () => {
+        _SetDelete(subs, callback);
+      };
+      addPluginDisposer(pluginId, unsub);
+      return unsub;
+    };
+
+    const saveSettingsFn = (nextData) => {
+      assertActive();
+      if (!hasSettingsBridge) {
+        return _PromiseReject(new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED'));
+      }
+      if (!nextData || typeof nextData !== 'object' || _ArrayIsArray(nextData)) {
+        return _PromiseReject(new _Error('ERR_SETTINGS_MUST_BE_OBJECT'));
+      }
+      if (!hostBridge || typeof hostBridge.saveSettings !== 'function') {
+        return _PromiseReject(new _Error('ERR_SETTINGS_SAVE_UNAVAILABLE'));
+      }
+      let rawJson;
+      try {
+        const clean = sanitizeJsonPayload(nextData);
+        rawJson = _JSONStringify(clean);
+      } catch (err) {
+        return _PromiseReject(new _Error(err && err.message ? err.message : 'ERR_SETTINGS_INVALID_JSON'));
+      }
+      if (typeof rawJson !== 'string') {
+        return _PromiseReject(new _Error('ERR_SETTINGS_INVALID_JSON'));
+      }
+      return _PromiseResolve(hostBridge.saveSettings(pluginId, rawJson)).then((res) => {
+        if (res && res.ok === true && res.snapshot && typeof res.snapshot === 'object') {
+          const frozen = deepFreezeClone(res.snapshot);
+          return _ObjectFreeze({ ok: true, reason: null, snapshot: frozen });
+        }
+        return _ObjectFreeze({
+          ok: false,
+          reason: (res && res.reason) || 'ERR_SETTINGS_SAVE_FAILED',
+          snapshot: null,
+        });
+      });
+    };
+
     const v3Context = createAddonContextV3({
       doc,
       win,
@@ -806,6 +868,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       hasConfigBridge,
       frozenConfigScopes,
       hasSettingsBridge,
+      getSettings: getSettingsFn,
+      onSettingsChange: onSettingsChangeFn,
+      saveSettings: saveSettingsFn,
       assertActive,
       addDisposer: (fn) => addPluginDisposer(pluginId, fn),
       disposeSelf: disposeSelfFn,
@@ -848,62 +913,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         return settingsTabs.registerSettingsTab(pluginId, tabId, opts);
       },
       isElementInsideIgnored: isIgnoredFn,
-      getSettings() {
-        assertActive();
-        if (!hasSettingsBridge) return null;
-        return _MapGet(pluginSettingsSnapshots, pluginId) || null;
-      },
-      onSettingsChange(callback) {
-        assertActive();
-        if (typeof callback !== 'function') {
-          throw new _Error('ERR_INVALID_SETTINGS_CALLBACK');
-        }
-        if (!hasSettingsBridge) {
-          throw new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
-        }
-        let subs = _MapGet(pluginSettingsListeners, pluginId);
-        if (!subs) {
-          subs = new _Set();
-          _MapSet(pluginSettingsListeners, pluginId, subs);
-        }
-        _SetAdd(subs, callback);
-        return () => {
-          _SetDelete(subs, callback);
-        };
-      },
-      saveSettings(nextData) {
-        assertActive();
-        if (!hasSettingsBridge) {
-          return _PromiseReject(new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED'));
-        }
-        if (!nextData || typeof nextData !== 'object' || _ArrayIsArray(nextData)) {
-          return _PromiseReject(new _Error('ERR_SETTINGS_MUST_BE_OBJECT'));
-        }
-        if (!hostBridge || typeof hostBridge.saveSettings !== 'function') {
-          return _PromiseReject(new _Error('ERR_SETTINGS_SAVE_UNAVAILABLE'));
-        }
-        let rawJson;
-        try {
-          const clean = sanitizeJsonPayload(nextData);
-          rawJson = _JSONStringify(clean);
-        } catch (err) {
-          return _PromiseReject(new _Error(err && err.message ? err.message : 'ERR_SETTINGS_INVALID_JSON'));
-        }
-        if (typeof rawJson !== 'string') {
-          return _PromiseReject(new _Error('ERR_SETTINGS_INVALID_JSON'));
-        }
-        return _PromiseResolve(hostBridge.saveSettings(pluginId, rawJson)).then((res) => {
-          if (res && res.ok === true && res.snapshot && typeof res.snapshot === 'object') {
-            const frozen = deepFreezeClone(res.snapshot);
-            return _ObjectFreeze({ ok: true, reason: null, snapshot: frozen });
-          }
-          return _ObjectFreeze({
-            ok: false,
-            reason: (res && res.reason) || 'ERR_SETTINGS_SAVE_FAILED',
-            snapshot: null,
-          });
-        });
-      },
+      getSettings: getSettingsFn,
+      onSettingsChange: onSettingsChangeFn,
+      saveSettings: saveSettingsFn,
       readConfigScope,
       writeConfigScope,
     });

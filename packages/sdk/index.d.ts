@@ -244,6 +244,14 @@ export interface AddonContextV3 {
     read(scopeId: string): Promise<Record<string, unknown>>;
     write(scopeId: string, nextDataOrRawJson: Record<string, unknown> | string, opts?: { expectedSha256?: string | null }): Promise<Record<string, unknown>>;
   };
+  readonly settingsBridge?: {
+    getSettings(): Record<string, unknown> | null;
+    getSnapshot(): Record<string, unknown> | null;
+    onSettingsChange(cb: (snapshot: Record<string, unknown> | null) => void): () => void;
+    onDidChange(cb: (snapshot: Record<string, unknown> | null) => void): () => void;
+    saveSettings(nextData: Record<string, unknown>): Promise<{ ok: boolean; reason: string | null; snapshot: Record<string, unknown> | null }>;
+    save(nextData: Record<string, unknown>): Promise<{ ok: boolean; reason: string | null; snapshot: Record<string, unknown> | null }>;
+  };
 }
 
 export interface AddonManifestV3 {
@@ -269,6 +277,7 @@ export interface AddonManifestV3 {
     };
     net?: {
       httpsHosts?: string[];
+      userApprovedHttps?: boolean;
       localLoopback?: Array<number | string>;
     };
     dom?: {
@@ -279,6 +288,7 @@ export interface AddonManifestV3 {
       scopes: Array<{ scopeId: string; access: 'ro' | 'rw'; maxBytes?: number }>;
     };
   };
+  settingsBridge?: { fileName: string; maxBytes?: number };
   uiSlots?: Array<Record<string, unknown>>;
   isolation?: Record<string, unknown>;
   loadOrder?: number;
@@ -299,6 +309,7 @@ export interface TestHostOptions {
   themeMode?: 'dark' | 'light';
   netHandler?: (pluginId: string, url: string, init?: Record<string, unknown>) => Promise<NetFetchResponse> | NetFetchResponse;
   configScopes?: Record<string, { data: Record<string, unknown>; sha256?: string }>;
+  initialSettings?: Record<string, Record<string, unknown>>;
 }
 
 export interface TestHostHandle {

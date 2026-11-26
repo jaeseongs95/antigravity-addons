@@ -961,6 +961,7 @@ test('TC-V25-007: host-settings-ui mounts reliably across div/li/wrapped/icon-sp
 
   for (const variant of ['div-items', 'wrapped-li-buttons', 'icon-and-div-button', 'deep-nesting']) {
     const { doc, host, svgCloseBtn, nativePane, peerSlot, projectsHeading, projectLink } = buildSidebarDom(variant);
+    doc.documentElement.lang = 'ko';
     const ui = createHostSettingsUi(
       doc,
       { getComputedStyle: () => ({ backgroundColor: 'rgba(0, 0, 0, 0)', color: '#cbd5e1' }) },
@@ -993,20 +994,36 @@ test('TC-V25-007: host-settings-ui mounts reliably across div/li/wrapped/icon-sp
     ui.dispose();
   }
 
-  // Late Korean localization after initial English mount updates nav label dynamically
+  // Addon Manager language is strictly independent of peer translation plugins (never sniffs sidebar text)
+  // and switches KO <-> EN via its own persisted language control.
   const { doc, createdItems } = buildSidebarDom('late-ko-translation');
   doc.documentElement.lang = 'en';
-  const uiLang = createHostSettingsUi(
-    doc,
-    { getComputedStyle: () => ({ backgroundColor: 'rgba(0, 0, 0, 0)', color: '#cbd5e1' }) },
-    { hostBridge, settingsUi: ANTIGRAVITY_HOST_PROFILE.settingsUi }
-  );
+  const langStore = new Map();
+  const winWithLangStorage = {
+    getComputedStyle: () => ({ backgroundColor: 'rgba(0, 0, 0, 0)', color: '#cbd5e1' }),
+    localStorage: {
+      getItem: (k) => (langStore.has(k) ? langStore.get(k) : null),
+      setItem: (k, v) => langStore.set(k, String(v)),
+    },
+  };
+  const uiLang = createHostSettingsUi(doc, winWithLangStorage, {
+    hostBridge,
+    settingsUi: ANTIGRAVITY_HOST_PROFILE.settingsUi,
+  });
   assert.equal(uiLang.ensureMount(), true);
   assert.equal(uiLang.getElements().navElement.textContent, 'Addon Manager');
+  // Mutating sidebar text to Korean (e.g. by another plugin) must NOT hijack Addon Manager language
   createdItems[0].textContent = '일반';
   createdItems[6].textContent = '브라우저';
   assert.equal(uiLang.ensureMount(), true);
+  assert.equal(uiLang.getElements().navElement.textContent, 'Addon Manager');
+  // Switching Addon Manager language directly updates nav + panel and persists independently
+  uiLang.setLanguage('ko');
   assert.equal(uiLang.getElements().navElement.textContent, '애드온 관리');
+  assert.equal(langStore.get('addon-host:settings-ui-lang'), 'ko');
+  uiLang.setLanguage('en');
+  assert.equal(uiLang.getElements().navElement.textContent, 'Addon Manager');
+  assert.equal(langStore.get('addon-host:settings-ui-lang'), 'en');
   uiLang.dispose();
 });
 
