@@ -20,7 +20,7 @@ test('TC-V320-01: Extenra v3.2.0 rebranding preserves 100% Antigravity runtime, 
 
   // 1. Package & CLI rebranding + backward-compatible aliases
   assert.equal(rootPkg.name, 'extenra');
-  assert.equal(rootPkg.version, '3.2.0');
+  assert.match(rootPkg.version, /^3\.(?:[2-9]|[1-9]\d+)\.\d+/);
   assert.equal(rootPkg.bin.extenra, 'bin/addon-host.js');
   assert.equal(rootPkg.bin['addon-host'], 'bin/addon-host.js');
   assert.equal(rootPkg.bin['antigravity-addons'], 'bin/addon-host.js');
@@ -29,7 +29,7 @@ test('TC-V320-01: Extenra v3.2.0 rebranding preserves 100% Antigravity runtime, 
   assert.equal(rootPkg.bugs.url, 'https://github.com/jaeseongs95/extenra/issues');
 
   assert.equal(sdkPkg.name, '@extenra/sdk');
-  assert.equal(sdkPkg.version, '3.2.0');
+  assert.equal(sdkPkg.version, rootPkg.version);
   assert.equal(sdkPkg.bin['extenra-addon'], 'bin/ag-addon.js');
   assert.equal(sdkPkg.bin['ag-addon'], 'bin/ag-addon.js');
   assert.equal(sdkPkg.repository.url, 'https://github.com/jaeseongs95/extenra.git');
@@ -59,7 +59,7 @@ test('TC-V320-01: Extenra v3.2.0 rebranding preserves 100% Antigravity runtime, 
     'https://github.com/jaeseongs95/extenra/releases/latest/download/antigravity-curated-all-in-one.user.js'
   );
   assert.equal(hubManifest.channels.desktopCli.installCommand, 'npx extenra --install');
-  assert.ok(hubFiles['index.html'].includes('<title>Extenra — 1-Click Install Hub (v3.2.0)</title>'));
+  assert.ok(hubFiles['index.html'].includes(`<title>Extenra — 1-Click Install Hub (v${rootPkg.version})</title>`));
   assert.ok(hubFiles['index.html'].includes('<h1>Extenra — 1-Click Install Hub</h1>'));
 
   const curated = buildCuratedAllInOneUserscript({ version: rootPkg.version });

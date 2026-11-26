@@ -57,19 +57,28 @@ function detectModeFromComputedBackground(doc, win) {
 }
 
 const DARK_TOKENS = _ObjectFreeze({
-  '--ag-bg': '#0f131a',
+  '--ag-bg': '#0d1117',
   '--ag-surface': '#161b24',
-  '--ag-surface-elevated': '#1e2532',
-  '--ag-border': 'rgba(255, 255, 255, 0.14)',
-  '--ag-text': '#f0f6fc',
-  '--ag-text-muted': '#8b949e',
+  '--ag-surface-elevated': 'rgba(255, 255, 255, 0.04)',
+  '--ag-surface-hover': 'rgba(255, 255, 255, 0.08)',
+  '--ag-input-bg': 'rgba(9, 12, 18, 0.78)',
+  '--ag-border': 'rgba(255, 255, 255, 0.09)',
+  '--ag-border-strong': 'rgba(255, 255, 255, 0.16)',
+  '--ag-text': '#f1f5f9',
+  '--ag-text-muted': '#94a3b8',
   '--ag-accent': '#38bdf8',
   '--ag-accent-fg': '#082f49',
-  '--ag-danger': '#f87171',
+  '--ag-primary': '#2563eb',
+  '--ag-primary-hover': '#3b82f6',
+  '--ag-primary-fg': '#ffffff',
+  '--ag-focus-ring': 'rgba(59, 130, 246, 0.32)',
+  '--ag-scrollbar-thumb': 'rgba(148, 163, 184, 0.28)',
+  '--ag-scrollbar-thumb-hover': 'rgba(148, 163, 184, 0.46)',
+  '--ag-danger': '#ef4444',
   '--ag-success': '#4ade80',
   '--ag-warning': '#fbbf24',
-  '--ag-radius': '10px',
-  '--ag-shadow': '0 12px 32px rgba(0, 0, 0, 0.52)',
+  '--ag-radius': '12px',
+  '--ag-shadow': '0 20px 48px rgba(0, 0, 0, 0.56), 0 0 0 1px rgba(255, 255, 255, 0.06)',
   '--ag-font': 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif',
 });
 
@@ -77,23 +86,33 @@ const LIGHT_TOKENS = Object.freeze({
   '--ag-bg': '#ffffff',
   '--ag-surface': '#f8fafc',
   '--ag-surface-elevated': '#ffffff',
-  '--ag-border': 'rgba(15, 23, 42, 0.14)',
+  '--ag-surface-hover': 'rgba(15, 23, 42, 0.05)',
+  '--ag-input-bg': '#ffffff',
+  '--ag-border': 'rgba(15, 23, 42, 0.11)',
+  '--ag-border-strong': 'rgba(15, 23, 42, 0.2)',
   '--ag-text': '#0f172a',
   '--ag-text-muted': '#475569',
   '--ag-accent': '#0284c7',
   '--ag-accent-fg': '#ffffff',
+  '--ag-primary': '#2563eb',
+  '--ag-primary-hover': '#1d4ed8',
+  '--ag-primary-fg': '#ffffff',
+  '--ag-focus-ring': 'rgba(37, 99, 235, 0.24)',
+  '--ag-scrollbar-thumb': 'rgba(100, 116, 139, 0.3)',
+  '--ag-scrollbar-thumb-hover': 'rgba(100, 116, 139, 0.5)',
   '--ag-danger': '#dc2626',
   '--ag-success': '#16a34a',
   '--ag-warning': '#d97706',
-  '--ag-radius': '10px',
-  '--ag-shadow': '0 12px 32px rgba(15, 23, 42, 0.16)',
+  '--ag-radius': '12px',
+  '--ag-shadow': '0 16px 40px rgba(15, 23, 42, 0.16), 0 0 0 1px rgba(15, 23, 42, 0.06)',
   '--ag-font': 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif',
 });
 
 function buildTokenCss(mode) {
-  const tokens = mode === 'light' ? LIGHT_TOKENS : DARK_TOKENS;
+  const isLight = mode === 'light';
+  const tokens = isLight ? LIGHT_TOKENS : DARK_TOKENS;
   const keys = _ObjectKeys(tokens);
-  const lines = [];
+  const lines = [`  color-scheme: ${isLight ? 'light' : 'dark'};`];
   for (let i = 0; i < keys.length; i += 1) {
     lines[lines.length] = `  ${keys[i]}: ${tokens[keys[i]]};`;
   }
