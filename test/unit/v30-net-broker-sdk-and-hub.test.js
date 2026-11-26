@@ -175,7 +175,7 @@ test('TC-V30-10: Remote Web host bridge netFetch allows httpsHosts via GM_xmlhtt
   assert.equal(loopDenied.reason, 'ERR_NET_LOOPBACK_NOT_SUPPORTED');
 });
 
-test('TC-V30-11: @antigravity-addons/sdk parity harness (Desktop vs Remote Web) and ag-addon CLI init/check/pack', async () => {
+test('TC-V30-11: @extenra/sdk parity harness (Desktop vs Remote Web) and extenra-addon / ag-addon CLI init/check/pack', async () => {
   const addon = defineAddon({
     setup(ctx) {
       ctx.ui.registerStatusItem({ id: 'btn', label: ctx.env.surface });

@@ -1,11 +1,12 @@
 {
-  "name": "@antigravity-addons/sdk",
-  "version": "3.1.1",
-  "description": "Developer SDK, TypeScript types, declarative UI builder h(), Desktop/Remote test host harness, and ag-addon CLI for AddonManifest.v3 plugins.",
+  "name": "@extenra/sdk",
+  "version": "3.2.0",
+  "description": "Extenra Developer SDK, TypeScript types, declarative UI builder h(), Desktop/Remote test host harness, and extenra-addon / ag-addon CLI for AddonManifest.v3 plugins.",
   "license": "MIT",
   "main": "src/index.js",
   "types": "index.d.ts",
   "bin": {
+    "extenra-addon": "bin/ag-addon.js",
     "ag-addon": "bin/ag-addon.js"
   },
   "engines": {
@@ -20,7 +21,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/jaeseongs95/antigravity-addons.git",
+    "url": "https://github.com/jaeseongs95/extenra.git",
     "directory": "packages/sdk"
   }
 }

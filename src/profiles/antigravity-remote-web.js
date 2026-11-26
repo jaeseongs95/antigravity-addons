@@ -28,7 +28,7 @@ const DEFAULT_EXCLUDED_URL_PROTOCOLS = Object.freeze([
 ]);
 const DEFAULT_TRUSTED_TYPES_POLICY_NAME = 'antigravity-remote-addon-host';
 const DEFAULT_STORAGE_NAMESPACE = 'agy-remote-addon-host:v2';
-const DEFAULT_UPDATE_BASE_URL = 'https://github.com/jaeseongs95/antigravity-addons/releases/latest/download';
+const DEFAULT_UPDATE_BASE_URL = 'https://github.com/jaeseongs95/extenra/releases/latest/download';
 
 function resolveAntigravityRemoteWebPaths(env = process.env) {
   const base = resolveAntigravityPaths(env);

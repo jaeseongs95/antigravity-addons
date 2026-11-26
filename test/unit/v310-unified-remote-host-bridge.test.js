@@ -751,7 +751,7 @@ test('TC-V310-04: Desktop host-admin-service + host-settings-ui Remote Bridge & 
   }
 });
 
-test('TC-V310-05: @antigravity-addons/sdk createTestHost supports optional remoteBridgeConnected parity', async () => {
+test('TC-V310-05: @extenra/sdk createTestHost supports optional remoteBridgeConnected parity', async () => {
   const manifest = {
     schemaVersion: 3,
     pluginId: 'sdk-bridge-demo',

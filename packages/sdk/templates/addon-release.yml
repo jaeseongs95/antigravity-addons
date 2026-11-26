@@ -19,8 +19,8 @@ jobs:
           node-version: '22'
       - name: Validate and pack AddonManifest.v3 plugin
         run: |
-          npx --yes @antigravity-addons/sdk check "${{ inputs.addon-dir }}"
-          npx --yes @antigravity-addons/sdk pack "${{ inputs.addon-dir }}"
+          npx --yes @extenra/sdk check "${{ inputs.addon-dir }}"
+          npx --yes @extenra/sdk pack "${{ inputs.addon-dir }}"
       - name: Upload packed addon artifact
         uses: actions/upload-artifact@v4
         with:

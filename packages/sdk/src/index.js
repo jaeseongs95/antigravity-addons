@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * `@antigravity-addons/sdk` Entry (v3.0.0 — Zero external npm dependencies).
+ * `@extenra/sdk` Entry (v3.2.0 — Zero external npm dependencies).
  *
  * Exports:
  * - `defineAddon(def)`: ergonomic plugin definition wrapper with runtime contract check.

@@ -2,7 +2,7 @@
 
 [한국어 문서 (Korean)](./REMOTE_WEB.ko.md)
 
-`antigravity-addons` v2.8.0 delivers a **universal Remote Web Host** (`antigravity-remote-web`) built directly on top of the shared renderer kernel (`src/runtime/renderer/kernel.js`) and `HostBridgePort` contract.
+**Extenra** (`extenra`, formerly `antigravity-addons`) delivers a **universal Remote Web Host** (`antigravity-remote-web`) built directly on top of the shared renderer kernel (`src/runtime/renderer/kernel.js`) and `HostBridgePort` contract.
 
 Its primary design goal is **1-click public HTTPS installation and multi-addon coexistence across every device and network (LTE/5G, work/travel devices, zero private IP or home PC required)**. Any compliant `AddonManifest.v2` renderer plugin can publish its own standalone HTTPS `@require` Userscript using `addon-host --build-addon-userscript`.
 
@@ -81,7 +81,7 @@ node ./bin/addon-host.js --build-addon-userscript \
 ```
 
 Optional flags:
-- `--host-lib-url <https-url>`: Custom HTTPS `@require` host library URL (defaults to `https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js`)
+- `--host-lib-url <https-url>`: Custom HTTPS `@require` host library URL (defaults to `https://github.com/jaeseongs95/extenra/releases/latest/download/antigravity-remote-host.lib.js`)
 - `--connect <hostname>` (repeatable) + `--grant-xhr`: Declare strict `@connect` hostnames and `GM_xmlhttpRequest` when needed (wildcards `*` rejected)
 - `--check`: Prove byte-exact determinism across two temporary builds with 0 AST violations
 
@@ -94,7 +94,7 @@ Optional flags:
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
-// @require      https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js
+// @require      https://github.com/jaeseongs95/extenra/releases/latest/download/antigravity-remote-host.lib.js
 // ==/UserScript==
 
 (function () {

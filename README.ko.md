@@ -1,12 +1,19 @@
-# antigravity-addons
+# Extenra
 
-[![CI](https://github.com/jaeseongs95/antigravity-addons/actions/workflows/ci.yml/badge.svg)](https://github.com/jaeseongs95/antigravity-addons/actions/workflows/ci.yml)
+[![CI](https://github.com/jaeseongs95/extenra/actions/workflows/ci.yml/badge.svg)](https://github.com/jaeseongs95/extenra/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 > **언어**: [English (README.md)](./README.md) | 한국어  
-> *(구 `antigravity-native-addon-host` — 기존 `addon-host` CLI 명령, `ADDON_HOST_LOADER_V2` 패치 마커 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
+> *(구 `antigravity-addons` / `antigravity-native-addon-host` — 기존 `addon-host` / `antigravity-addons` CLI 별칭, `ag-addon` SDK 별칭, `ADDON_HOST_LOADER_V2` 패치 마커, `~/.gemini/antigravity` 경로, `ag-bridge-v1:` 페어링 접두어, 원격 번들 파일명 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**호스트 중앙 관리형 통합 원격 브리지(`ag-bridge-v1:` 한 줄 페어링 코드 + Chrome PNA 프리플라이트 + 앱 내 1클릭 원격 번들 재빌드), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 신뢰 `localLoopback`), 별도 `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크(`v3.1.1`)입니다.**
+**Extenra (`v3.2.0`)는 호스트 중앙 관리형 통합 원격 브리지(`ag-bridge-v1:` 한 줄 페어링 코드 + Chrome PNA 프리플라이트 + 앱 내 1클릭 원격 번들 재빌드), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 신뢰 `localLoopback`), 별도 `@extenra/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크입니다.**
+
+## v3.2.0 주요 업데이트 (프로젝트명 Extenra 변경 · 100% 하위 호환 유지)
+
+- **프로젝트·패키지명 변경 (`Extenra`)**:
+  - 프로젝트 및 패키지명을 **`extenra`**, **`@extenra/sdk`**로 변경하고 **`extenra`** · **`extenra-addon`** CLI 명령을 추가했습니다. GitHub 저장소 URL(`https://github.com/jaeseongs95/extenra`), 1-Click Hub, JSON Schema v3 `$id`, 기본 Userscript `@namespace`/`@require` 주소 및 영문·국문 문서를 일괄 갱신했습니다.
+- **100% 하위 호환성 유지**:
+  - 기존 CLI 별칭(`addon-host`, `antigravity-addons`, `ag-addon`), Antigravity 호스트 프로필(`antigravity-desktop`, `antigravity-remote-web`), 로컬 경로(`~/.gemini/antigravity/...`), ASAR 패치 마커(`ADDON_HOST_LOADER_V2`), 페어링 접두어(`ag-bridge-v1:`), 원격 번들 파일명(`antigravity-remote-host.lib.js`, `antigravity-remote.user.js`, `antigravity-curated-all-in-one.user.js`)은 그대로 유지되어 기존 플러그인들이 수정 없이 동작합니다.
 
 ## v3.1.1 주요 업데이트 (Chrome PNA 프리플라이트 지원 · 원격 브리지 셀프 호스팅 예시 문서화)
 
@@ -212,6 +219,7 @@ tailscale funnel 19384
 
 ## 문서
 
+- [릴리스 노트 (`v3.2.0` 영문/국문)](./RELEASE_NOTES_v3.2.0.md)
 - [릴리스 노트 (`v3.1.1` 영문/국문)](./RELEASE_NOTES_v3.1.1.md)
 - [릴리스 노트 (`v3.1.0` 영문/국문)](./RELEASE_NOTES_v3.1.0.md)
 - [릴리스 노트 (`v2.5.0` 영문/국문)](./RELEASE_NOTES_v2.5.0.md)

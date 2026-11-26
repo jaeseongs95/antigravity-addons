@@ -32,7 +32,7 @@ const {
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_HUB_DIR = path.join(REPO_ROOT, 'docs', 'hub');
-const DEFAULT_RELEASE_BASE = 'https://github.com/jaeseongs95/antigravity-addons/releases/latest/download';
+const DEFAULT_RELEASE_BASE = 'https://github.com/jaeseongs95/extenra/releases/latest/download';
 
 function toLf(text) {
   return String(text || '').replace(/\r\n/g, '\n');
@@ -63,7 +63,7 @@ function buildCuratedAllInOneUserscript({
   connectHosts = [],
   version = readHostVersion(),
   updateBaseUrl = DEFAULT_RELEASE_BASE,
-  bundleName = 'Antigravity Addons — Curated All-in-One',
+  bundleName = 'Extenra — Curated All-in-One',
 } = {}) {
   const browserProfile = toBrowserRemoteWebProfile(profile);
   const safeConnects = normalizeConnectHosts(connectHosts);
@@ -91,7 +91,7 @@ function buildCuratedAllInOneUserscript({
   const headerLines = [
     '// ==UserScript==',
     `// @name         ${bundleName}`,
-    '// @namespace    https://github.com/jaeseongs95/antigravity-addons',
+    '// @namespace    https://github.com/jaeseongs95/extenra',
     `// @version      ${version}`,
     '// @description  Official Curated All-in-One Remote Web Userscript (closed Shadow DOM, GM_* closure shadowing, Safari-compatible).',
     ...matchLines,
@@ -156,8 +156,8 @@ function buildHubFiles({
         safariSupported: true,
       },
       desktopCli: {
-        installCommand: 'npx antigravity-addons --install',
-        reconcileCommand: 'npx antigravity-addons --reconcile --handoff --relaunch',
+        installCommand: 'npx extenra --install',
+        reconcileCommand: 'npx extenra --reconcile --handoff --relaunch',
       },
     },
   };
@@ -167,7 +167,7 @@ function buildHubFiles({
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Antigravity Addons — 1-Click Install Hub (v${version})</title>
+  <title>Extenra — 1-Click Install Hub (v${version})</title>
   <style>
     :root {
       color-scheme: dark light;
@@ -272,7 +272,7 @@ function buildHubFiles({
   <main>
     <header class="card">
       <span class="badge" id="hub-env-badge">Detecting environment...</span>
-      <h1>Antigravity Addons — 1-Click Install Hub</h1>
+      <h1>Extenra — 1-Click Install Hub</h1>
       <p>API-First AddonManifest.v3 Host Framework (v${version}) for Desktop &amp; Remote Web.</p>
       <div class="notice" id="hub-safari-notice" hidden>
         Safari detected: External <code>@require #sha256=</code> SRI links are hidden on Safari until Userscripts SRI support is verified. Use the Official Curated All-in-One <code>.user.js</code> bundle below.
@@ -299,8 +299,8 @@ function buildHubFiles({
     <section class="card" id="hub-desktop">
       <h2>3. Native Desktop App (Windows / macOS / Linux)</h2>
       <p>Install or recover the native Desktop host after an app auto-update without losing addons or trust pins.</p>
-      <pre><code>npx antigravity-addons --install
-npx antigravity-addons --reconcile --handoff --relaunch</code></pre>
+      <pre><code>npx extenra --install
+npx extenra --reconcile --handoff --relaunch</code></pre>
     </section>
   </main>
   <script src="./hub.js" defer></script>
