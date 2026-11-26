@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "a865823c",
-  "buildSha256": "a865823c276fb78e905d4292fe5b7990c3280cff55eba290fc5a853f646e0c1f",
+  "buildSha8": "c810cd45",
+  "buildSha256": "c810cd45e7af0785ba9534525bfb8d54e6968ac63b07294ae87569288606abc5",
   "fileCount": 40,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
@@ -37,7 +37,7 @@
     "src/runtime/main/net-fetch-broker.js": "8c906f4c972d04bd140502955b497466d11d147edb803dd787978fd02ec88e1a",
     "src/runtime/main/portal-arbiter.js": "3dbb4c85ada7a7d9046956aef130d655ce1b05c8dfb196bb4230b12f7a473704",
     "src/runtime/main/preload-registrar.js": "c323aa7c2a4da31091fe57ca66e0d90b4c549883b739dcbed513fae766a79c47",
-    "src/runtime/main/remote-bridge-server.js": "064d80a4c5c933aed101b36ddd1fde255632912fb004376d8f18b797188daca7",
+    "src/runtime/main/remote-bridge-server.js": "7e94dcfb6ee4edb6032f677278e65faf9c510bdf80c22095ee7beecdecfbd59e",
     "src/runtime/main/renderer-injector.js": "2fc9608c640182c780853066702949e7d08c961ca2fb7644700abbfe427a25b9",
     "src/runtime/main/settings-bridge.js": "ccf09eddf6f65c6763d387213165aab775f49b92223fd2672841410d3f9b0902",
     "src/runtime/main/trust-verifier.js": "cd2857094274b7b861b096376eb2222a29748d4c20923e6f727ade6212971c30",

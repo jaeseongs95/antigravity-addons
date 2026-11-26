@@ -20,10 +20,20 @@
 | 환경 | 권장 Userscript 관리자 | 비고 및 실제 제약 |
 | --- | --- | --- |
 | **iOS / iPadOS Safari** | **Userscripts** (무료 오픈소스 App Store 확장) | Safari 확장으로 동작. *홈 화면에 추가한 독립 실행 PWA 웹앱에서는 Safari 확장이 실행되지 않습니다.* |
-| **Android Firefox** | **Violentmonkey** 확장 | 모바일 Firefox 애드온 스토어에서 직접 설치 가능. *순정 Android Chrome은 확장·Userscript를 지원하지 않습니다.* |
+| **Android Firefox / Edge** | **Violentmonkey** (Firefox) / **Tampermonkey** (Edge) | 공식 모바일 확장 스토어에서 설치 가능. *순정 Android Chrome은 확장·Userscript를 지원하지 않습니다.* |
 | **macOS / Windows / Linux 브라우저** (Chrome, Edge, Firefox, Safari, Brave, Arc) | **Violentmonkey / Tampermonkey / Userscripts** | `@inject-into content` 격리 실행, `GM_getValue`/`GM_setValue` 영속 저장, `@updateURL`/`@downloadURL` HTTPS 자동 갱신 및 다중 애드온 단일 드로어 공존 지원 |
 
 > **참고 (검증 경계)**: 북마클릿(`javascript:`)은 `antigravity.google.com`의 3중 교차 CSP(`script-src 'nonce-...'` + `require-trusted-types-for 'script'`) 및 브라우저 길이 상한 때문에 차단되므로 1차 수단이 아닙니다. 또한 로그인 후 동적 DOM 셀렉터와 브라우저 내 외부 번역 API CORS 정책은 실제 로그인 세션에 따라 달라질 수 있습니다.
+
+## 통합 원격 호스트 브리지 (`v3.1.0+`)
+
+개별 플러그인의 URL/토큰 입력 UI 없이 원격 웹에서 데스크톱 Native Host의 `ctx.settingsBridge` · `ctx.configBridge` · 신뢰 `localLoopback` `ctx.net.fetch`를 실시간 라우팅하려면:
+1. 데스크톱 **설정 → 애드온 관리**에서 **원격 호스트 브리지**를 켭니다(기본 비활성, `127.0.0.1:19384`, 예약 파일 `remote-bridge.json` 256비트 토큰, 정확 일치 `Origin` CORS + Chrome PNA 프리플라이트 지원).
+2. 외부·모바일 기기에서 접속할 때는 원하는 셀프 호스팅 방식으로 HTTPS 앞단을 붙여 **공개 HTTPS URL**에 입력합니다:
+   - **공유기**: 포트포워딩(`443`) + DDNS + HTTPS 리버스 프록시(Caddy `reverse_proxy 127.0.0.1:19384`, Nginx Proxy Manager, 시놀로지 NAS 등). 평문 HTTP 외부 노출 금지.
+   - **Cloudflare Tunnel**: `cloudflared tunnel --url http://127.0.0.1:19384`
+   - **Tailscale Funnel**: `tailscale funnel 19384`
+3. 1줄 페어링 코드(`ag-bridge-v1:...`)를 복사해 원격 웹 드로어 **Host Bridge** 탭(인덱스 3)에 한 번만 붙여 넣습니다.
 
 ## 아키텍처 및 SOLID 경계
 

@@ -20,10 +20,20 @@ Its primary design goal is **1-click public HTTPS installation and multi-addon c
 | Platform / Browser | Recommended Userscript Manager | Notes & Honest Caveats |
 | --- | --- | --- |
 | **iOS / iPadOS Safari** | **Userscripts** (free open-source App Store extension) | Runs as a Safari Web Extension. *Standalone Home-Screen PWA web apps on iOS do not execute Safari extensions.* |
-| **Android Firefox** | **Violentmonkey** add-on | Installable directly from Mozilla Add-ons. *Stock Android Chrome does not support extensions or Userscripts.* |
+| **Android Firefox / Edge** | **Violentmonkey** (Firefox) / **Tampermonkey** (Edge) | Installable from official mobile add-on stores. *Stock Android Chrome does not support extensions or Userscripts.* |
 | **macOS / Windows / Linux Browsers** (Chrome, Edge, Firefox, Safari, Brave, Arc) | **Violentmonkey / Tampermonkey / Userscripts** | Isolated execution via `@inject-into content`, `GM_getValue`/`GM_setValue` persistence, HTTPS `@updateURL`/`@downloadURL` auto-updates, and multi-sandbox coexistence in one drawer. |
 
 > **Verification boundary**: Bookmarklets (`javascript:`) are blocked by `antigravity.google.com`'s 3-policy intersected CSP (`script-src 'nonce-...'` + `require-trusted-types-for 'script'`) and browser length limits. Authenticated post-login DOM selectors and in-browser external translation API CORS behavior depend on a live signed-in session.
+
+## Unified Remote Host Bridge (`v3.1.0+`)
+
+To route `ctx.settingsBridge`, `ctx.configBridge`, and trusted `localLoopback` `ctx.net.fetch` calls from Remote Web to your Desktop Native Host without per-plugin URL/token UIs:
+1. Enable **Remote Host Bridge** in Desktop **Settings → Addon Manager** (default off, `127.0.0.1:19384`, CSPRNG 256-bit Bearer token in reserved `remote-bridge.json`, strict `Origin` CORS + Chrome PNA preflight).
+2. For external/mobile devices, terminate HTTPS in front using your preferred self-hosted method and enter that `https://...` URL in **Public HTTPS URL**:
+   - **Home Router**: Port Forwarding (`443`) + DDNS + HTTPS Reverse Proxy (e.g. Caddy `reverse_proxy 127.0.0.1:19384`, Nginx Proxy Manager, or Synology NAS). Never expose plain HTTP externally.
+   - **Cloudflare Tunnel**: `cloudflared tunnel --url http://127.0.0.1:19384`
+   - **Tailscale Funnel**: `tailscale funnel 19384`
+3. Copy the 1-line Pairing Code (`ag-bridge-v1:...`) and paste it once into the Remote Web Drawer **Host Bridge** tab (tab index 3).
 
 ## Architecture & SOLID Boundaries
 
