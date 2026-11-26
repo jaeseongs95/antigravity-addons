@@ -3023,6 +3023,7 @@ function createPlacementEngine(doc, win, { surfaceGeometry = null, uiAnchors = {
       surfaceId: bounds.surfaceId,
       left: Math.round(centerLeft),
       top: Math.round(centerTop),
+      width: explicitW ? Math.round(boxWidth) : undefined,
       maxWidth: Math.round(maxW),
       maxHeight: Math.round(maxH),
       flipped: false,
@@ -3062,25 +3063,34 @@ function createPlacementEngine(doc, win, { surfaceGeometry = null, uiAnchors = {
 
   function trackElementPlacement(el, spec = {}, onUpdate = null) {
     let disposed = false;
+    let syncing = false;
+    let resizeObserver = null;
+    let rafId = null;
+
     const sync = () => {
-      if (disposed) return null;
-      let measured = {};
+      if (disposed || syncing) return null;
+      syncing = true;
       try {
-        if (el && typeof el.getBoundingClientRect === 'function') {
-          const r = el.getBoundingClientRect();
-          if (r && r.width > 0 && r.height > 0) {
-            measured = { width: r.width, height: r.height };
-          }
-        }
-      } catch (_e) {}
-      const placement = computePlacement(spec, measured);
-      applyPlacementStyles(el, placement);
-      if (typeof onUpdate === 'function') {
+        let measured = {};
         try {
-          onUpdate(placement);
+          if (el && typeof el.getBoundingClientRect === 'function') {
+            const r = el.getBoundingClientRect();
+            if (r && r.width > 0 && r.height > 0) {
+              measured = { width: r.width, height: r.height };
+            }
+          }
         } catch (_e) {}
+        const placement = computePlacement(spec, measured);
+        applyPlacementStyles(el, placement);
+        if (typeof onUpdate === 'function') {
+          try {
+            onUpdate(placement);
+          } catch (_e) {}
+        }
+        return placement;
+      } finally {
+        syncing = false;
       }
-      return placement;
     };
 
     const initial = sync();
@@ -3089,12 +3099,51 @@ function createPlacementEngine(doc, win, { surfaceGeometry = null, uiAnchors = {
       win.addEventListener('scroll', sync, true);
     }
 
+    const RO = (win && win.ResizeObserver) || (typeof ResizeObserver !== 'undefined' ? ResizeObserver : null);
+    if (typeof RO === 'function' && el) {
+      try {
+        resizeObserver = new RO(() => {
+          if (!disposed && !syncing) sync();
+        });
+        resizeObserver.observe(el);
+        const inner = el.firstElementChild || (el.childNodes && el.childNodes[0]);
+        if (inner && inner !== el && inner.nodeType === 1) {
+          resizeObserver.observe(inner);
+        }
+      } catch (_e) {
+        resizeObserver = null;
+      }
+    }
+
+    if (win && typeof win.requestAnimationFrame === 'function') {
+      try {
+        rafId = win.requestAnimationFrame(() => {
+          rafId = null;
+          if (!disposed) sync();
+        });
+      } catch (_e) {
+        rafId = null;
+      }
+    }
+
     return Object.freeze({
       initial,
       reposition: sync,
       dispose() {
         if (disposed) return;
         disposed = true;
+        if (rafId !== null && win && typeof win.cancelAnimationFrame === 'function') {
+          try {
+            win.cancelAnimationFrame(rafId);
+          } catch (_e) {}
+          rafId = null;
+        }
+        if (resizeObserver && typeof resizeObserver.disconnect === 'function') {
+          try {
+            resizeObserver.disconnect();
+          } catch (_e) {}
+          resizeObserver = null;
+        }
         if (win && typeof win.removeEventListener === 'function') {
           try {
             win.removeEventListener('resize', sync);
@@ -4030,6 +4079,13 @@ const {
 } = require('../../core/ui-schema-validator');
 
 const SCHEMA_UI_CSS = `
+:host {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+  min-height: 0;
+  width: 100%;
+}
 :host, .ag-ui-shell {
   box-sizing: border-box;
   font-family: var(--ag-font, system-ui, -apple-system, sans-serif);
@@ -4046,7 +4102,9 @@ const SCHEMA_UI_CSS = `
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  width: 100%;
   max-height: inherit;
+  min-height: 0;
 }
 .ag-ui-header {
   display: flex;
@@ -4055,6 +4113,7 @@ const SCHEMA_UI_CSS = `
   gap: 8px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--ag-border, rgba(255, 255, 255, 0.14));
+  flex: 0 0 auto;
 }
 .ag-ui-header-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .ag-ui-title { font-weight: 700; font-size: 14px; color: var(--ag-text, #f0f6fc); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4082,7 +4141,7 @@ const SCHEMA_UI_CSS = `
   font-size: 14px;
 }
 .ag-ui-close:hover { color: var(--ag-text, #f0f6fc); }
-.ag-ui-body { padding: 12px 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.ag-ui-body { padding: 12px 14px; overflow-y: auto; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
 .ag-stack { display: flex; flex-direction: column; gap: 8px; }
 .ag-row { display: flex; flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ag-section { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.12)); border-radius: 8px; background: var(--ag-surface-elevated, rgba(255,255,255,0.03)); }
@@ -6799,12 +6858,23 @@ function createAddonContextV3({
       el.style.padding = '0';
       el.style.border = 'none';
       el.style.background = 'transparent';
-      el.style.overflow = 'visible';
+      el.style.overflow = 'hidden';
+      el.style.boxSizing = 'border-box';
       el.style.zIndex = String(2147483200 + activeOverlays.size + 1);
     }
 
     const shadowHost = isModal ? doc.createElement('div') : el;
-    if (isModal) el.appendChild(shadowHost);
+    if (isModal) {
+      if (shadowHost.style) {
+        shadowHost.style.width = '100%';
+        shadowHost.style.maxHeight = 'inherit';
+        shadowHost.style.display = 'flex';
+        shadowHost.style.flexDirection = 'column';
+        shadowHost.style.overflow = 'hidden';
+        shadowHost.style.boxSizing = 'border-box';
+      }
+      el.appendChild(shadowHost);
+    }
     const sr = typeof shadowHost.attachShadow === 'function' ? shadowHost.attachShadow({ mode: 'open' }) : shadowHost;
 
     let closed = false;

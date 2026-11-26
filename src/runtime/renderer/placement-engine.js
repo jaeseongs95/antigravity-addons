@@ -269,6 +269,7 @@ function createPlacementEngine(doc, win, { surfaceGeometry = null, uiAnchors = {
       surfaceId: bounds.surfaceId,
       left: Math.round(centerLeft),
       top: Math.round(centerTop),
+      width: explicitW ? Math.round(boxWidth) : undefined,
       maxWidth: Math.round(maxW),
       maxHeight: Math.round(maxH),
       flipped: false,
@@ -308,25 +309,34 @@ function createPlacementEngine(doc, win, { surfaceGeometry = null, uiAnchors = {
 
   function trackElementPlacement(el, spec = {}, onUpdate = null) {
     let disposed = false;
+    let syncing = false;
+    let resizeObserver = null;
+    let rafId = null;
+
     const sync = () => {
-      if (disposed) return null;
-      let measured = {};
+      if (disposed || syncing) return null;
+      syncing = true;
       try {
-        if (el && typeof el.getBoundingClientRect === 'function') {
-          const r = el.getBoundingClientRect();
-          if (r && r.width > 0 && r.height > 0) {
-            measured = { width: r.width, height: r.height };
-          }
-        }
-      } catch (_e) {}
-      const placement = computePlacement(spec, measured);
-      applyPlacementStyles(el, placement);
-      if (typeof onUpdate === 'function') {
+        let measured = {};
         try {
-          onUpdate(placement);
+          if (el && typeof el.getBoundingClientRect === 'function') {
+            const r = el.getBoundingClientRect();
+            if (r && r.width > 0 && r.height > 0) {
+              measured = { width: r.width, height: r.height };
+            }
+          }
         } catch (_e) {}
+        const placement = computePlacement(spec, measured);
+        applyPlacementStyles(el, placement);
+        if (typeof onUpdate === 'function') {
+          try {
+            onUpdate(placement);
+          } catch (_e) {}
+        }
+        return placement;
+      } finally {
+        syncing = false;
       }
-      return placement;
     };
 
     const initial = sync();
@@ -335,12 +345,51 @@ function createPlacementEngine(doc, win, { surfaceGeometry = null, uiAnchors = {
       win.addEventListener('scroll', sync, true);
     }
 
+    const RO = (win && win.ResizeObserver) || (typeof ResizeObserver !== 'undefined' ? ResizeObserver : null);
+    if (typeof RO === 'function' && el) {
+      try {
+        resizeObserver = new RO(() => {
+          if (!disposed && !syncing) sync();
+        });
+        resizeObserver.observe(el);
+        const inner = el.firstElementChild || (el.childNodes && el.childNodes[0]);
+        if (inner && inner !== el && inner.nodeType === 1) {
+          resizeObserver.observe(inner);
+        }
+      } catch (_e) {
+        resizeObserver = null;
+      }
+    }
+
+    if (win && typeof win.requestAnimationFrame === 'function') {
+      try {
+        rafId = win.requestAnimationFrame(() => {
+          rafId = null;
+          if (!disposed) sync();
+        });
+      } catch (_e) {
+        rafId = null;
+      }
+    }
+
     return Object.freeze({
       initial,
       reposition: sync,
       dispose() {
         if (disposed) return;
         disposed = true;
+        if (rafId !== null && win && typeof win.cancelAnimationFrame === 'function') {
+          try {
+            win.cancelAnimationFrame(rafId);
+          } catch (_e) {}
+          rafId = null;
+        }
+        if (resizeObserver && typeof resizeObserver.disconnect === 'function') {
+          try {
+            resizeObserver.disconnect();
+          } catch (_e) {}
+          resizeObserver = null;
+        }
         if (win && typeof win.removeEventListener === 'function') {
           try {
             win.removeEventListener('resize', sync);
