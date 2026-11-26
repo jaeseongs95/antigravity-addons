@@ -1,6 +1,6 @@
-# AddonManifest.v3 & `AddonContextV3` API Reference (v3.0.0)
+# AddonManifest.v3 & `AddonContextV3` API Reference (v3.2.0)
 
-`antigravity-addons` v3.0.0 introduces an **API-First, 3-Tier Progressive Abstraction** framework with strict ISP capability separation while preserving 1-major backward compatibility (`v3.x`) for all existing v1/v2 plugins via `createV2CompatAdapter(v3)`.
+**Extenra** (`extenra`, formerly `antigravity-addons`) introduces an **API-First, 3-Tier Progressive Abstraction** framework (`v3.0.0+`) with strict ISP capability separation while preserving 1-major backward compatibility (`v3.x`) for all existing v1/v2 plugins via `createV2CompatAdapter(v3)`.
 
 ## 1. 3-Tier Host UI Architecture
 
@@ -20,10 +20,10 @@
   - `dom`: manifest-gated `observeRegion`, `isElementInsideIgnored`, `mountSlot`, `unmountSlot`.
   - `configBridge`: Desktop `trusted`-only named-scope CAS config reads/writes.
 
-## 3. Developer SDK (`@antigravity-addons/sdk`)
+## 3. Developer SDK (`@extenra/sdk`)
 
-Located in `packages/sdk/` as a separate `devDependency` package (keeping `antigravity-addons` runtime at **0 new runtime npm dependencies**):
+Located in `packages/sdk/` as a separate `devDependency` package (keeping `extenra` runtime at **0 new runtime npm dependencies**):
 - Full TypeScript definitions (`index.d.ts`)
 - `defineAddon()`, `h()` declarative UI tree builder
 - `createTestHost({ surface: 'desktop' | 'remote-web' })` real-kernel parity test harness
-- `ag-addon init | check | dev | build | pack` CLI & reusable GitHub Action template (`templates/addon-release.yml`)
+- `extenra-addon` / `ag-addon init | check | dev | build | pack` CLI & reusable GitHub Action template (`templates/addon-release.yml`)

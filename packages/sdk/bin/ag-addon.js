@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * `@antigravity-addons/sdk` Developer CLI (`ag-addon init|check|dev|build|pack`) — v3.0.0.
+ * `@extenra/sdk` Developer CLI (`extenra-addon` / `ag-addon init|check|dev|build|pack`) — v3.2.0.
  * Zero external runtime dependencies (uses Node built-ins + host manifest validator when present).
  */
 

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildSha8": "c810cd45",
-  "buildSha256": "c810cd45e7af0785ba9534525bfb8d54e6968ac63b07294ae87569288606abc5",
+  "buildSha8": "cd01ee2b",
+  "buildSha256": "cd01ee2bbccd71115f2ea5c2591521c423c4bfc17070d8d17239f552784049d9",
   "fileCount": 40,
   "files": {
     "main/init-main.js": "5df0835d365b8a916259fac0b09c7f665cc1ee42c29ad5a0c9ea56ed3da3511f",
@@ -9,7 +9,7 @@
     "renderer/kernel-bundle.cjs": "aee63a86aded47cbada9ce7012f59896dcc0a61621cd619a62a04de4aa96ef3b",
     "schemas/addon-manifest.v1.schema.json": "effb7a2775a2b753146bd272d4856bd6b8b0fee4fef4da6c4d2fed29638e679c",
     "schemas/addon-manifest.v2.schema.json": "152112923460a84e2121c6d96368c2ed44981324f51826f3ca9388d9e4240d46",
-    "schemas/addon-manifest.v3.schema.json": "62860e6c65cdd316b115fdc2ea41ff378f7774089134eaa18db36ce1f6e57b39",
+    "schemas/addon-manifest.v3.schema.json": "ad92e7da2f010d914c12b8f05ceffee78d18690c5e914b371986c898c8e6c61c",
     "src/adapters/electron/config-reader.js": "0b109b40f977682a36cbb849ed353caf91760e25736d253b2dc496bb8ebf77e3",
     "src/adapters/node-fs-port.js": "8ea275b047432fa89c9c999bb45e657b202989164e3f6912d64bb68c2c05b847",
     "src/core/fs-port.js": "52d6c59df137105734b5256e3d25a329900e8cc664a0b5d08cae00d6c973266f",
@@ -17,7 +17,7 @@
     "src/core/generated/runtime/ucs2length.cjs": "1df012dd3d23fced07255a7204798004509687cb1f431ae0ab976db436bbd890",
     "src/core/generated/validate-v1.cjs": "0648a09ad8a6108fc6c5f4cce3e0577dc67d57757cfd78812895d1b59eaafbc4",
     "src/core/generated/validate-v2.cjs": "a55e071dc8e9fa424b8cf6e4dc3b9508d1c7e55faaea2aae4a9c574b84ee7f32",
-    "src/core/generated/validate-v3.cjs": "0957553b3edc9f81b0352ae9bee95d68916f3e4d0b74d5ca44b0b8eb7769691f",
+    "src/core/generated/validate-v3.cjs": "297951e161bcb4f7d5b921b3f41982a3de1a90332284fc1a1ac6e8dde348b0d0",
     "src/core/host-ports.js": "8e9c257a70c8a9091140962131a361e7e1497daf88cf99840d02c9ba0c30178e",
     "src/core/host-profile-port.js": "d065a3a249f5a77bc8f2ca1cadbdfe3d92ef0529c8ec8e971fda8b7acaf9caaa",
     "src/core/lifecycle-coordinator.js": "f767729b4db9152d9084f2f96ae6af1349346a3b15828134ef39e4f4057e2e85",

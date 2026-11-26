@@ -183,9 +183,9 @@ function createCliApp({
 
   function getHelpText() {
     return [
-      `native-addon-host v${hostVersion}`,
+      `Extenra v${hostVersion}`,
       '',
-      'Usage: addon-host [options] <command>',
+      'Usage: extenra [options] <command>  (alias: addon-host)',
       '',
       'Commands:',
       '  --status                               Read-only JSON status report',

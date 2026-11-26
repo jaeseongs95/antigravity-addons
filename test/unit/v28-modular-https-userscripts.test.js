@@ -248,7 +248,7 @@ test('TC-U7a: buildAddonUserscript & CLI --build-addon-userscript emit determini
     const mjs = fs.readFileSync(built.metaPath, 'utf8');
     assert.ok(
       ujs.includes(
-        '// @require      https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js'
+        '// @require      https://github.com/jaeseongs95/extenra/releases/latest/download/antigravity-remote-host.lib.js'
       )
     );
     assert.ok(ujs.includes('// @inject-into  content'));
@@ -260,7 +260,7 @@ test('TC-U7a: buildAddonUserscript & CLI --build-addon-userscript emit determini
     assert.ok(ujs.includes('// @downloadURL  https://github.com/example/sample-addon/releases/latest/download/sample-remote-addon.user.js'));
     assert.ok(ujs.includes('rt.registerAddon('));
     assert.ok(ujs.includes('rt.bootRemoteWebHost()'));
-    assert.ok(mjs.includes('// @require      https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js'));
+    assert.ok(mjs.includes('// @require      https://github.com/jaeseongs95/extenra/releases/latest/download/antigravity-remote-host.lib.js'));
 
     // Fail-closed URL & @connect validation
     assert.throws(() => normalizeHostLibUrl('http://insecure.example.com/host.lib.js'), /ERR_HOST_LIB_URL_MUST_BE_HTTPS/);

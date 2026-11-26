@@ -1,12 +1,19 @@
-# antigravity-addons
+# Extenra
 
-[![CI](https://github.com/jaeseongs95/antigravity-addons/actions/workflows/ci.yml/badge.svg)](https://github.com/jaeseongs95/antigravity-addons/actions/workflows/ci.yml)
+[![CI](https://github.com/jaeseongs95/extenra/actions/workflows/ci.yml/badge.svg)](https://github.com/jaeseongs95/extenra/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
-> *(Formerly `antigravity-native-addon-host` — existing `addon-host` CLI command, `ADDON_HOST_LOADER_V2` marker, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
+> *(Formerly `antigravity-addons` / `antigravity-native-addon-host` — existing `addon-host` / `antigravity-addons` CLI aliases, `ag-addon` SDK alias, `ADDON_HOST_LOADER_V2` marker, `~/.gemini/antigravity` paths, `ag-bridge-v1:` pairing prefix, remote bundle filenames, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Single, vendor-independent API-First native desktop & universal remote web addon host framework (`v3.1.1`) with Host-Managed Unified Remote Bridge (`ag-bridge-v1:` 1-line Pairing Code + Chrome PNA preflight + 1-click in-app Remote Bundle rebuild), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + trusted `localLoopback`), separate `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+**Extenra (`v3.2.0`) is a vendor-independent, API-First native desktop & universal remote web addon host framework with Host-Managed Unified Remote Bridge (`ag-bridge-v1:` 1-line Pairing Code + Chrome PNA preflight + 1-click in-app Remote Bundle rebuild), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + trusted `localLoopback`), separate `@extenra/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+
+## Key Updates in v3.2.0 (Project Rebranding to Extenra — 100% Backward Compatible)
+
+- **Project & Package Rename (`Extenra`)**:
+  - Renamed the project and packages to **`extenra`** and **`@extenra/sdk`**, added the **`extenra`** and **`extenra-addon`** CLI commands, and updated the GitHub repository URL (`https://github.com/jaeseongs95/extenra`), 1-Click Hub, JSON Schema v3 `$id`, default Userscript `@namespace`/`@require` base URL, and bilingual EN/KO documentation.
+- **100% Backward Compatibility Preserved**:
+  - Existing CLI aliases (`addon-host`, `antigravity-addons`, `ag-addon`), Antigravity host profiles (`antigravity-desktop`, `antigravity-remote-web`), local paths (`~/.gemini/antigravity/...`), ASAR patch marker (`ADDON_HOST_LOADER_V2`), pairing code prefix (`ag-bridge-v1:`), and remote bundle filenames (`antigravity-remote-host.lib.js`, `antigravity-remote.user.js`, `antigravity-curated-all-in-one.user.js`) remain unchanged so all existing plugins work with zero migration.
 
 ## Key Updates in v3.1.1 (Chrome PNA Preflight & Self-Hosted Remote Bridge Guides)
 
@@ -225,6 +232,7 @@ if (rootEl) {
 
 ## Documentation
 
+- [Release Notes (`v3.2.0` EN/KO)](./RELEASE_NOTES_v3.2.0.md)
 - [Release Notes (`v3.1.1` EN/KO)](./RELEASE_NOTES_v3.1.1.md)
 - [Release Notes (`v3.1.0` EN/KO)](./RELEASE_NOTES_v3.1.0.md)
 - [Release Notes (`v2.5.0` EN/KO)](./RELEASE_NOTES_v2.5.0.md)

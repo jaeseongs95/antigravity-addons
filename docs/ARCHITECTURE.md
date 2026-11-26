@@ -1,6 +1,6 @@
 # Architecture & Vendor Independence (`v2.1.0` / `v2.0.0`)
 
-`antigravity-addons` (formerly `antigravity-native-addon-host`) follows a strict hexagonal (Ports & Adapters) design with SOLID ISP/DIP enforcement (`TC-001`–`TC-001d`, `TC-014`, `TC-023`) and a zero-dependency staged runtime (`dist/runtime/` + `runtime/<buildSha8>/`):
+**Extenra** (`extenra`, formerly `antigravity-addons` / `antigravity-native-addon-host`) follows a strict hexagonal (Ports & Adapters) design with SOLID ISP/DIP enforcement (`TC-001`–`TC-001d`, `TC-014`, `TC-023`) and a zero-dependency staged runtime (`dist/runtime/` + `runtime/<buildSha8>/`):
 
 - **`src/core/` (Vendor- & Runtime-Neutral Policy — `TC-001`, `TC-023`)**:
   - `fs-port.js`: runtime-neutral `FileSystemPort` abstraction (`existsSync`, `isFileSync`, `realpathSync`, `resolve`, `normalize`, `relative`, `isAbsolute`, `join`, `sep`) so `src/core/` has zero direct `node:fs` or `node:path` imports.

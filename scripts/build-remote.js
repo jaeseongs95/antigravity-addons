@@ -432,7 +432,7 @@ function buildModularAddonUserscriptMetaHeader({
   updateBaseUrl = null,
   connectHosts = [],
   grantXhr = false,
-  namespace = 'https://github.com/jaeseongs95/antigravity-addons',
+  namespace = 'https://github.com/jaeseongs95/extenra',
 } = {}) {
   const browserProfile = toBrowserRemoteWebProfile(profile);
   const matchLines = (browserProfile.allowedOrigins || []).map((origin) => `// @match        ${origin}/*`);
@@ -481,7 +481,7 @@ function buildAddonUserscript({
   grantXhr = false,
   trustPolicyPath = null,
   allowUnpinnedTrusted = false,
-  namespace = 'https://github.com/jaeseongs95/antigravity-addons',
+  namespace = 'https://github.com/jaeseongs95/extenra',
 } = {}) {
   if (typeof manifestPath !== 'string' || !manifestPath.trim()) {
     throw new Error('ERR_MANIFEST_PATH_REQUIRED');
@@ -720,7 +720,7 @@ function buildUserscriptMetaHeader({
   const lines = [
     '// ==UserScript==',
     `// @name         ${browserProfile.displayName} Addon Host`,
-    `// @namespace    https://github.com/jaeseongs95/antigravity-addons`,
+    `// @namespace    https://github.com/jaeseongs95/extenra`,
     `// @version      ${version}`,
     `// @description  Unified AddonManifest.v2 renderer addon host for ${browserProfile.displayName}`,
     ...matchLines,
@@ -1237,7 +1237,7 @@ function parseCliArgs(argv) {
     connectHosts: [],
     grantXhr: false,
     allowUnpinnedTrusted: false,
-    namespace: 'https://github.com/jaeseongs95/antigravity-addons',
+    namespace: 'https://github.com/jaeseongs95/extenra',
     check: false,
     noAddons: false,
     includeSettingsSnapshots: false,

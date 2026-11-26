@@ -2,7 +2,7 @@
 
 [English Documentation](./REMOTE_WEB.md)
 
-`antigravity-addons` v2.8.0은 공용 렌더러 커널(`src/runtime/renderer/kernel.js`)과 `HostBridgePort` 계약 위에 통합된 **범용 원격 웹 호스트**(`antigravity-remote-web`)를 제공합니다.
+**Extenra** (`extenra`, 구 `antigravity-addons`)는 공용 렌더러 커널(`src/runtime/renderer/kernel.js`)과 `HostBridgePort` 계약 위에 통합된 **범용 원격 웹 호스트**(`antigravity-remote-web`)를 제공합니다.
 
 핵심 목표는 **외부 네트워크(LTE/5G, 타 기기, 사설 IP 불필요)를 포함한 모든 브라우저 환경에서 공개 HTTPS 1클릭 Userscript 설치 및 다중 애드온 공존**입니다. `antigravity-desktop`용으로 개발된 `AddonManifest.v2` 준수 렌더러 플러그인은 `addon-host --build-addon-userscript` 한 번으로 공개 HTTPS `@require` Userscript로 배포할 수 있습니다.
 
@@ -81,7 +81,7 @@ node ./bin/addon-host.js --build-addon-userscript \
 ```
 
 추가 옵션:
-- `--host-lib-url <https-url>`: `@require` 호스트 라이브러리 URL (기본값: `https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js`, HTTPS 전용)
+- `--host-lib-url <https-url>`: `@require` 호스트 라이브러리 URL (기본값: `https://github.com/jaeseongs95/extenra/releases/latest/download/antigravity-remote-host.lib.js`, HTTPS 전용)
 - `--connect <hostname>` (반복 가능) + `--grant-xhr`: `GM_xmlhttpRequest`가 필요한 애드온에 허용 호스트 선언 (와일드카드 `*` 금지)
 - `--check`: 임시 디렉터리 2회 빌드로 결정적 SHA-256 및 AST 위반 0건 검증
 
@@ -94,7 +94,7 @@ node ./bin/addon-host.js --build-addon-userscript \
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
-// @require      https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js
+// @require      https://github.com/jaeseongs95/extenra/releases/latest/download/antigravity-remote-host.lib.js
 // ==/UserScript==
 
 (function () {

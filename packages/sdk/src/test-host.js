@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * `@antigravity-addons/sdk` Real-Kernel Desktop/Remote Parity Test Host (v3.0.0).
+ * `@extenra/sdk` Real-Kernel Desktop/Remote Parity Test Host (v3.2.0).
  *
  * Boots the actual `createRendererKernel` inside a lightweight built-in DOM harness
  * so plugin authors can verify Desktop vs. Remote Web behavior, ISP namespace gating,

@@ -1,6 +1,6 @@
-# AddonManifest.v3 & `AddonContextV3` API 가이드 (v3.0.0)
+# AddonManifest.v3 & `AddonContextV3` API 가이드 (v3.2.0)
 
-`antigravity-addons` v3.0.0은 **API-First 3-Tier 점진적 추상화**와 **ISP 권한 분리** 프레임워크를 도입하며, 기존 v1/v2 플러그인을 위해 `v3.x` 전 기간 동안 `createV2CompatAdapter(v3)` 하위 호환 어댑터를 유지합니다.
+**Extenra** (`extenra`, 구 `antigravity-addons`)는 **API-First 3-Tier 점진적 추상화**와 **ISP 권한 분리** 프레임워크(`v3.0.0+`)를 제공하며, 기존 v1/v2 플러그인을 위해 `v3.x` 전 기간 동안 `createV2CompatAdapter(v3)` 하위 호환 어댑터를 유지합니다.
 
 ## 1. 3-Tier 호스트 UI 구조
 
@@ -19,8 +19,8 @@
     - `permissions.net.localLoopback` (Desktop `trusted` 전용): 명시적 정수 포트(`1024..65535`) 또는 프로필 명명 타깃(`antigravity-sidecar`), `127.0.0.1` 정규화, **리다이렉트 0회**, Remote Web 비노출.
   - `dom`, `configBridge`: 매니페스트 권한 및 신뢰 승인 시에만 노출.
 
-## 3. 별도 개발 SDK (`@antigravity-addons/sdk`) 및 1-Click Hub
+## 3. 별도 개발 SDK (`@extenra/sdk`) 및 1-Click Hub
 
 - `packages/sdk/`에 별도 패키지로 분리되어 런타임 호스트의 신규 npm 의존성 0개 원칙을 지킵니다.
-- `index.d.ts`, `defineAddon()`, `h()`, `createTestHost({ surface: 'desktop' | 'remote-web' })`, `ag-addon init|check|dev|build|pack` CLI, 재사용 GitHub Action 템플릿을 제공합니다.
+- `index.d.ts`, `defineAddon()`, `h()`, `createTestHost({ surface: 'desktop' | 'remote-web' })`, `extenra-addon` / `ag-addon init|check|dev|build|pack` CLI, 재사용 GitHub Action 템플릿을 제공합니다.
 - GitHub Pages 1-Click Hub(`docs/hub/`)는 Safari 환경을 자동 감지해 외부 `@require #sha256=` 대신 공식 큐레이션 올인원 `.user.js`(closed Shadow DOM + `GM_*` 클로저 섀도잉)로 안내합니다.

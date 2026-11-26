@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/jaeseongs95/antigravity-addons/schemas/addon-manifest.v3.schema.json",
+  "$id": "https://github.com/jaeseongs95/extenra/schemas/addon-manifest.v3.schema.json",
   "title": "AddonManifest.v3",
   "description": "Declarative v3 API-First contract with ISP capability permissions, dual-key net allowlists, service bus ACLs, and 3-Tier host UI.",
   "type": "object",
