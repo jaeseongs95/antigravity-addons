@@ -11,23 +11,51 @@
  *   and rejecting functions / circular references / excessive nesting depth.
  */
 
-const WELL_KNOWN_HOST_SERVICES = Object.freeze(['host.statusbar']);
-const WELL_KNOWN_HOST_SERVICE_SET = new Set(WELL_KNOWN_HOST_SERVICES);
+// NEW-BLK-01: Capture JS primordials at module load so shared World 998 prototype tampering cannot bypass policy checks.
+const _ObjectFreeze = Object.freeze;
+const _ObjectKeys = Object.keys;
+const _ObjectCreate = Object.create;
+const _ObjectDefineProperty = Object.defineProperty;
+const _ArrayIsArray = Array.isArray;
+const _NumberIsFinite = Number.isFinite;
+const _Date = Date;
+const _DateGetTime = Function.prototype.call.bind(Date.prototype.getTime);
+const _Set = Set;
+const _SetHas = Function.prototype.call.bind(Set.prototype.has);
+const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
+const _WeakSet = WeakSet;
+const _WeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
+const _WeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+const _WeakSetDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
+const _RegExpTest = Function.prototype.call.bind(RegExp.prototype.test);
+const _StringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
+
+const WELL_KNOWN_HOST_SERVICES = _ObjectFreeze(['host.statusbar']);
+const WELL_KNOWN_HOST_SERVICE_SET = new _Set(WELL_KNOWN_HOST_SERVICES);
 const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9._-]{1,63}\.[a-z0-9][a-z0-9._-]{1,63}$/;
-const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const FORBIDDEN_KEYS = new _Set(['__proto__', 'constructor', 'prototype']);
 const MAX_PAYLOAD_DEPTH = 12;
+
+function defineSafeDataProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.configurable = true;
+  desc.writable = true;
+  _ObjectDefineProperty(target, key, desc);
+}
 
 function validateServiceName(pluginId, serviceName, { allowWellKnownHostServices = false } = {}) {
   if (typeof pluginId !== 'string' || !pluginId) {
     return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
   }
-  if (typeof serviceName !== 'string' || !SERVICE_NAME_RE.test(serviceName)) {
+  if (typeof serviceName !== 'string' || !_RegExpTest(SERVICE_NAME_RE, serviceName)) {
     return { ok: false, reason: 'ERR_INVALID_SERVICE_NAME' };
   }
-  if (serviceName.startsWith(`${pluginId}.`)) {
+  if (_StringStartsWith(serviceName, `${pluginId}.`)) {
     return { ok: true, serviceName, isWellKnownHostService: false };
   }
-  if (allowWellKnownHostServices && WELL_KNOWN_HOST_SERVICE_SET.has(serviceName)) {
+  if (allowWellKnownHostServices && _SetHas(WELL_KNOWN_HOST_SERVICE_SET, serviceName)) {
     return { ok: true, serviceName, isWellKnownHostService: true };
   }
   return { ok: false, reason: 'ERR_SERVICE_NAMESPACE_MISMATCH' };
@@ -36,7 +64,7 @@ function validateServiceName(pluginId, serviceName, { allowWellKnownHostServices
 function isCallerAllowed(providerPluginId, callerPluginId, allowedCallers) {
   if (typeof callerPluginId !== 'string' || !callerPluginId) return false;
   if (callerPluginId === providerPluginId) return true;
-  if (!Array.isArray(allowedCallers) || allowedCallers.length === 0) {
+  if (!_ArrayIsArray(allowedCallers) || allowedCallers.length === 0) {
     return false; // Default-deny
   }
   for (let i = 0; i < allowedCallers.length; i += 1) {
@@ -48,7 +76,7 @@ function isCallerAllowed(providerPluginId, callerPluginId, allowedCallers) {
 }
 
 function sanitizeBusPayload(value, maxDepth = MAX_PAYLOAD_DEPTH) {
-  const seen = new WeakSet();
+  const seen = new _WeakSet();
 
   function clone(val, depth) {
     if (depth > maxDepth) {
@@ -58,44 +86,44 @@ function sanitizeBusPayload(value, maxDepth = MAX_PAYLOAD_DEPTH) {
       return val;
     }
     if (typeof val === 'number') {
-      return Number.isFinite(val) ? val : null;
+      return _NumberIsFinite(val) ? val : null;
     }
     if (typeof val === 'function' || typeof val === 'symbol' || typeof val === 'bigint') {
       throw new Error('ERR_BUS_PAYLOAD_NON_SERIALIZABLE');
     }
     if (typeof val === 'object') {
-      if (seen.has(val)) {
+      if (_WeakSetHas(seen, val)) {
         throw new Error('ERR_BUS_PAYLOAD_CIRCULAR');
       }
       // Reject DOM nodes or host objects cleanly
       if (typeof val.nodeType === 'number' && typeof val.nodeName === 'string') {
         throw new Error('ERR_BUS_PAYLOAD_DOM_NODE_FORBIDDEN');
       }
-      seen.add(val);
+      _WeakSetAdd(seen, val);
       try {
-        if (Array.isArray(val)) {
+        if (_ArrayIsArray(val)) {
           const arr = [];
           for (let i = 0; i < val.length; i += 1) {
-            arr.push(clone(val[i], depth + 1));
+            defineSafeDataProp(arr, i, clone(val[i], depth + 1));
           }
           return arr;
         }
-        if (val instanceof Date) {
-          return new Date(val.getTime());
+        if (val instanceof _Date) {
+          return new _Date(_DateGetTime(val));
         }
-        const out = Object.create(null);
-        const keys = Object.keys(val);
+        const out = {};
+        const keys = _ObjectKeys(val);
         for (let i = 0; i < keys.length; i += 1) {
           const k = keys[i];
-          if (FORBIDDEN_KEYS.has(k)) continue;
+          if (_SetHas(FORBIDDEN_KEYS, k)) continue;
           const clonedVal = clone(val[k], depth + 1);
           if (clonedVal !== undefined) {
-            out[k] = clonedVal;
+            defineSafeDataProp(out, k, clonedVal);
           }
         }
-        return Object.assign({}, out);
+        return out;
       } finally {
-        seen.delete(val);
+        _WeakSetDelete(seen, val);
       }
     }
     return undefined;
@@ -108,45 +136,53 @@ function validateServicePermissions(pluginId, servicesPerm) {
   if (servicesPerm === null || servicesPerm === undefined) {
     return { ok: true, provide: [], consume: [] };
   }
-  if (typeof servicesPerm !== 'object' || Array.isArray(servicesPerm)) {
+  if (typeof servicesPerm !== 'object' || _ArrayIsArray(servicesPerm)) {
     return { ok: false, reason: 'ERR_INVALID_SERVICE_PERMISSIONS', errors: ['permissions.services must be an object'] };
   }
   const errors = [];
   const provide = [];
-  const seenProvide = new Set();
+  const seenProvide = new _Set();
 
-  if (Array.isArray(servicesPerm.provide)) {
+  if (_ArrayIsArray(servicesPerm.provide)) {
     for (let i = 0; i < servicesPerm.provide.length; i += 1) {
       const entry = servicesPerm.provide[i];
       if (!entry || typeof entry !== 'object') {
-        errors.push(`permissions.services.provide[${i}] must be an object`);
+        errors[errors.length] = `permissions.services.provide[${i}] must be an object`;
         continue;
       }
       const check = validateServiceName(pluginId, entry.name, { allowWellKnownHostServices: true });
       if (!check.ok) {
-        errors.push(`permissions.services.provide[${i}].name "${String(entry.name)}": ${check.reason}`);
+        errors[errors.length] = `permissions.services.provide[${i}].name "${String(entry.name)}": ${check.reason}`;
         continue;
       }
-      if (seenProvide.has(entry.name)) {
-        errors.push(`Duplicate provided service "${entry.name}"`);
+      if (_SetHas(seenProvide, entry.name)) {
+        errors[errors.length] = `Duplicate provided service "${entry.name}"`;
         continue;
       }
-      seenProvide.add(entry.name);
-      provide.push({
+      _SetAdd(seenProvide, entry.name);
+      const callersCopy = [];
+      if (_ArrayIsArray(entry.allowedCallers)) {
+        for (let j = 0; j < entry.allowedCallers.length; j += 1) {
+          callersCopy[callersCopy.length] = entry.allowedCallers[j];
+        }
+      }
+      provide[provide.length] = {
         name: entry.name,
-        allowedCallers: Array.isArray(entry.allowedCallers) ? entry.allowedCallers.slice() : [],
-      });
+        allowedCallers: callersCopy,
+      };
     }
   }
 
   const consume = [];
-  if (Array.isArray(servicesPerm.consume)) {
+  const seenConsume = new _Set();
+  if (_ArrayIsArray(servicesPerm.consume)) {
     for (let i = 0; i < servicesPerm.consume.length; i += 1) {
       const name = servicesPerm.consume[i];
-      if (typeof name !== 'string' || !SERVICE_NAME_RE.test(name)) {
-        errors.push(`Invalid consumed service name "${String(name)}"`);
-      } else if (!consume.includes(name)) {
-        consume.push(name);
+      if (typeof name !== 'string' || !_RegExpTest(SERVICE_NAME_RE, name)) {
+        errors[errors.length] = `Invalid consumed service name "${String(name)}"`;
+      } else if (!_SetHas(seenConsume, name)) {
+        _SetAdd(seenConsume, name);
+        consume[consume.length] = name;
       }
     }
   }

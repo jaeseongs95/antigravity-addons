@@ -158,7 +158,7 @@ test(
         'utf8'
       );
 
-      const res = spawnSync(ELECTRON_BIN, [mainScript], {
+      const res = spawnSync(ELECTRON_BIN, ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', mainScript], {
         encoding: 'utf8',
         timeout: 30000,
         env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' },

@@ -658,7 +658,7 @@ function createRemoteHostBridge({
             const maxBytes = Number.isFinite(Number(init.maxResponseBytes))
               ? Math.min(4 * 1024 * 1024, Math.max(1024, Number(init.maxResponseBytes)))
               : 2 * 1024 * 1024;
-            if (bodyText.length > maxBytes) {
+            if (utf8ByteLength(bodyText) > maxBytes) {
               resolve({ ok: false, reason: 'ERR_NET_RESPONSE_TOO_LARGE' });
               return;
             }

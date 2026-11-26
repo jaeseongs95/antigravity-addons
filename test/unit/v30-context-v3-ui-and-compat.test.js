@@ -74,6 +74,50 @@ test('TC-V30-06: Tier 1 UI (toast, confirm, prompt, statusItem delegation + fall
     /ERR_SERVICE_HOST_TRUST_FORBIDDEN/
   );
 
+  // NEW-BLK-01: World 998 primordial tampering (String.prototype.startsWith, Array.prototype.find, Map.prototype.get)
+  // MUST NOT allow a restricted plugin to hijack host.statusbar or intercept delegated items
+  const origStartsWith = String.prototype.startsWith;
+  const origFind = Array.prototype.find;
+  const origMapGet = Map.prototype.get;
+  let hijackedViaMap = false;
+  try {
+    String.prototype.startsWith = function (prefix) {
+      if (String(this) === 'host.statusbar' && prefix === 'host.') return false;
+      if (String(this) === 'host.statusbar' && prefix === 'plugin-a.') return true;
+      return origStartsWith.call(this, prefix);
+    };
+    Array.prototype.find = function () {
+      return { name: 'host.statusbar', allowedCallers: ['*'] };
+    };
+    Map.prototype.get = function (k) {
+      if (k === 'host.statusbar') {
+        return {
+          providerPluginId: 'plugin-a',
+          name: 'host.statusbar',
+          allowedCallers: ['*'],
+          impl: {
+            registerItem() {
+              hijackedViaMap = true;
+              return { dispose() {} };
+            },
+          },
+        };
+      }
+      return origMapGet.call(this, k);
+    };
+    assert.throws(
+      () => ctxA.services.provide('host.statusbar', { registerItem() {} }),
+      /ERR_SERVICE_HOST_TRUST_FORBIDDEN/
+    );
+    const probeItem = ctxA.ui.registerStatusItem({ id: 'probe', label: 'Probe' });
+    assert.equal(hijackedViaMap, false, 'NEW-BLK-01: Map.prototype.get tamper must NOT hijack host.statusbar');
+    probeItem.dispose();
+  } finally {
+    String.prototype.startsWith = origStartsWith;
+    Array.prototype.find = origFind;
+    Map.prototype.get = origMapGet;
+  }
+
   // Now mount a TRUSTED statusbar provider plugin providing `host.statusbar`
   const delegatedItems = [];
   const ctxBar = await host.mountPlugin({

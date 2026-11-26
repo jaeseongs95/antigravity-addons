@@ -227,23 +227,51 @@ module.exports = {
  *   and rejecting functions / circular references / excessive nesting depth.
  */
 
-const WELL_KNOWN_HOST_SERVICES = Object.freeze(['host.statusbar']);
-const WELL_KNOWN_HOST_SERVICE_SET = new Set(WELL_KNOWN_HOST_SERVICES);
+// NEW-BLK-01: Capture JS primordials at module load so shared World 998 prototype tampering cannot bypass policy checks.
+const _ObjectFreeze = Object.freeze;
+const _ObjectKeys = Object.keys;
+const _ObjectCreate = Object.create;
+const _ObjectDefineProperty = Object.defineProperty;
+const _ArrayIsArray = Array.isArray;
+const _NumberIsFinite = Number.isFinite;
+const _Date = Date;
+const _DateGetTime = Function.prototype.call.bind(Date.prototype.getTime);
+const _Set = Set;
+const _SetHas = Function.prototype.call.bind(Set.prototype.has);
+const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
+const _WeakSet = WeakSet;
+const _WeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
+const _WeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+const _WeakSetDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
+const _RegExpTest = Function.prototype.call.bind(RegExp.prototype.test);
+const _StringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
+
+const WELL_KNOWN_HOST_SERVICES = _ObjectFreeze(['host.statusbar']);
+const WELL_KNOWN_HOST_SERVICE_SET = new _Set(WELL_KNOWN_HOST_SERVICES);
 const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9._-]{1,63}\.[a-z0-9][a-z0-9._-]{1,63}$/;
-const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const FORBIDDEN_KEYS = new _Set(['__proto__', 'constructor', 'prototype']);
 const MAX_PAYLOAD_DEPTH = 12;
+
+function defineSafeDataProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.configurable = true;
+  desc.writable = true;
+  _ObjectDefineProperty(target, key, desc);
+}
 
 function validateServiceName(pluginId, serviceName, { allowWellKnownHostServices = false } = {}) {
   if (typeof pluginId !== 'string' || !pluginId) {
     return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
   }
-  if (typeof serviceName !== 'string' || !SERVICE_NAME_RE.test(serviceName)) {
+  if (typeof serviceName !== 'string' || !_RegExpTest(SERVICE_NAME_RE, serviceName)) {
     return { ok: false, reason: 'ERR_INVALID_SERVICE_NAME' };
   }
-  if (serviceName.startsWith(`${pluginId}.`)) {
+  if (_StringStartsWith(serviceName, `${pluginId}.`)) {
     return { ok: true, serviceName, isWellKnownHostService: false };
   }
-  if (allowWellKnownHostServices && WELL_KNOWN_HOST_SERVICE_SET.has(serviceName)) {
+  if (allowWellKnownHostServices && _SetHas(WELL_KNOWN_HOST_SERVICE_SET, serviceName)) {
     return { ok: true, serviceName, isWellKnownHostService: true };
   }
   return { ok: false, reason: 'ERR_SERVICE_NAMESPACE_MISMATCH' };
@@ -252,7 +280,7 @@ function validateServiceName(pluginId, serviceName, { allowWellKnownHostServices
 function isCallerAllowed(providerPluginId, callerPluginId, allowedCallers) {
   if (typeof callerPluginId !== 'string' || !callerPluginId) return false;
   if (callerPluginId === providerPluginId) return true;
-  if (!Array.isArray(allowedCallers) || allowedCallers.length === 0) {
+  if (!_ArrayIsArray(allowedCallers) || allowedCallers.length === 0) {
     return false; // Default-deny
   }
   for (let i = 0; i < allowedCallers.length; i += 1) {
@@ -264,7 +292,7 @@ function isCallerAllowed(providerPluginId, callerPluginId, allowedCallers) {
 }
 
 function sanitizeBusPayload(value, maxDepth = MAX_PAYLOAD_DEPTH) {
-  const seen = new WeakSet();
+  const seen = new _WeakSet();
 
   function clone(val, depth) {
     if (depth > maxDepth) {
@@ -274,44 +302,44 @@ function sanitizeBusPayload(value, maxDepth = MAX_PAYLOAD_DEPTH) {
       return val;
     }
     if (typeof val === 'number') {
-      return Number.isFinite(val) ? val : null;
+      return _NumberIsFinite(val) ? val : null;
     }
     if (typeof val === 'function' || typeof val === 'symbol' || typeof val === 'bigint') {
       throw new Error('ERR_BUS_PAYLOAD_NON_SERIALIZABLE');
     }
     if (typeof val === 'object') {
-      if (seen.has(val)) {
+      if (_WeakSetHas(seen, val)) {
         throw new Error('ERR_BUS_PAYLOAD_CIRCULAR');
       }
       // Reject DOM nodes or host objects cleanly
       if (typeof val.nodeType === 'number' && typeof val.nodeName === 'string') {
         throw new Error('ERR_BUS_PAYLOAD_DOM_NODE_FORBIDDEN');
       }
-      seen.add(val);
+      _WeakSetAdd(seen, val);
       try {
-        if (Array.isArray(val)) {
+        if (_ArrayIsArray(val)) {
           const arr = [];
           for (let i = 0; i < val.length; i += 1) {
-            arr.push(clone(val[i], depth + 1));
+            defineSafeDataProp(arr, i, clone(val[i], depth + 1));
           }
           return arr;
         }
-        if (val instanceof Date) {
-          return new Date(val.getTime());
+        if (val instanceof _Date) {
+          return new _Date(_DateGetTime(val));
         }
-        const out = Object.create(null);
-        const keys = Object.keys(val);
+        const out = {};
+        const keys = _ObjectKeys(val);
         for (let i = 0; i < keys.length; i += 1) {
           const k = keys[i];
-          if (FORBIDDEN_KEYS.has(k)) continue;
+          if (_SetHas(FORBIDDEN_KEYS, k)) continue;
           const clonedVal = clone(val[k], depth + 1);
           if (clonedVal !== undefined) {
-            out[k] = clonedVal;
+            defineSafeDataProp(out, k, clonedVal);
           }
         }
-        return Object.assign({}, out);
+        return out;
       } finally {
-        seen.delete(val);
+        _WeakSetDelete(seen, val);
       }
     }
     return undefined;
@@ -324,45 +352,53 @@ function validateServicePermissions(pluginId, servicesPerm) {
   if (servicesPerm === null || servicesPerm === undefined) {
     return { ok: true, provide: [], consume: [] };
   }
-  if (typeof servicesPerm !== 'object' || Array.isArray(servicesPerm)) {
+  if (typeof servicesPerm !== 'object' || _ArrayIsArray(servicesPerm)) {
     return { ok: false, reason: 'ERR_INVALID_SERVICE_PERMISSIONS', errors: ['permissions.services must be an object'] };
   }
   const errors = [];
   const provide = [];
-  const seenProvide = new Set();
+  const seenProvide = new _Set();
 
-  if (Array.isArray(servicesPerm.provide)) {
+  if (_ArrayIsArray(servicesPerm.provide)) {
     for (let i = 0; i < servicesPerm.provide.length; i += 1) {
       const entry = servicesPerm.provide[i];
       if (!entry || typeof entry !== 'object') {
-        errors.push(`permissions.services.provide[${i}] must be an object`);
+        errors[errors.length] = `permissions.services.provide[${i}] must be an object`;
         continue;
       }
       const check = validateServiceName(pluginId, entry.name, { allowWellKnownHostServices: true });
       if (!check.ok) {
-        errors.push(`permissions.services.provide[${i}].name "${String(entry.name)}": ${check.reason}`);
+        errors[errors.length] = `permissions.services.provide[${i}].name "${String(entry.name)}": ${check.reason}`;
         continue;
       }
-      if (seenProvide.has(entry.name)) {
-        errors.push(`Duplicate provided service "${entry.name}"`);
+      if (_SetHas(seenProvide, entry.name)) {
+        errors[errors.length] = `Duplicate provided service "${entry.name}"`;
         continue;
       }
-      seenProvide.add(entry.name);
-      provide.push({
+      _SetAdd(seenProvide, entry.name);
+      const callersCopy = [];
+      if (_ArrayIsArray(entry.allowedCallers)) {
+        for (let j = 0; j < entry.allowedCallers.length; j += 1) {
+          callersCopy[callersCopy.length] = entry.allowedCallers[j];
+        }
+      }
+      provide[provide.length] = {
         name: entry.name,
-        allowedCallers: Array.isArray(entry.allowedCallers) ? entry.allowedCallers.slice() : [],
-      });
+        allowedCallers: callersCopy,
+      };
     }
   }
 
   const consume = [];
-  if (Array.isArray(servicesPerm.consume)) {
+  const seenConsume = new _Set();
+  if (_ArrayIsArray(servicesPerm.consume)) {
     for (let i = 0; i < servicesPerm.consume.length; i += 1) {
       const name = servicesPerm.consume[i];
-      if (typeof name !== 'string' || !SERVICE_NAME_RE.test(name)) {
-        errors.push(`Invalid consumed service name "${String(name)}"`);
-      } else if (!consume.includes(name)) {
-        consume.push(name);
+      if (typeof name !== 'string' || !_RegExpTest(SERVICE_NAME_RE, name)) {
+        errors[errors.length] = `Invalid consumed service name "${String(name)}"`;
+      } else if (!_SetHas(seenConsume, name)) {
+        _SetAdd(seenConsume, name);
+        consume[consume.length] = name;
       }
     }
   }
@@ -5010,8 +5046,35 @@ const {
   sanitizeBusPayload,
 } = require('../../core/service-bus-policy');
 
+// NEW-BLK-01: Capture JS primordials at module load so shared World 998 prototype tampering cannot hijack host.statusbar or ACLs.
+const _Error = Error;
+const _ObjectFreeze = Object.freeze;
+const _ObjectKeys = Object.keys;
+const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+const _ArrayIsArray = Array.isArray;
+const _Map = Map;
+const _MapGet = Function.prototype.call.bind(Map.prototype.get);
+const _MapSet = Function.prototype.call.bind(Map.prototype.set);
+const _MapHas = Function.prototype.call.bind(Map.prototype.has);
+const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
+const _MapForEach = Function.prototype.call.bind(Map.prototype.forEach);
+const _Set = Set;
+const _SetHas = Function.prototype.call.bind(Set.prototype.has);
+const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
+const _StringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
+const _ReflectApply = Reflect.apply;
+
+function copyArrayPlain(src) {
+  const out = [];
+  if (!_ArrayIsArray(src)) return out;
+  for (let i = 0; i < src.length; i += 1) {
+    out[out.length] = src[i];
+  }
+  return out;
+}
+
 function createServiceBus({ onServiceRegistryChange = null } = {}) {
-  const services = new Map(); // serviceName -> { providerPluginId, name, allowedCallers, impl }
+  const services = new _Map(); // serviceName -> { providerPluginId, name, allowedCallers, impl }
 
   function notifyChange(serviceName, action) {
     if (typeof onServiceRegistryChange === 'function') {
@@ -5024,59 +5087,75 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
   function provide(pluginMeta, serviceName, impl, opts = {}) {
     const pluginId = pluginMeta && pluginMeta.pluginId;
     const trustLevel = (pluginMeta && pluginMeta.trustLevel) || 'restricted';
-    const isV3 = Boolean(pluginMeta && (pluginMeta.sourceSchemaVersion === 3 || pluginMeta.apiVersion === 3));
+    const isV3 = !!(pluginMeta && (pluginMeta.sourceSchemaVersion === 3 || pluginMeta.apiVersion === 3));
     const declaredProvide =
       pluginMeta &&
       pluginMeta.permissions &&
       pluginMeta.permissions.services &&
-      Array.isArray(pluginMeta.permissions.services.provide)
+      _ArrayIsArray(pluginMeta.permissions.services.provide)
         ? pluginMeta.permissions.services.provide
         : [];
-    const declaredEntry = declaredProvide.find((p) => p && p.name === serviceName) || null;
-    const isHostWellKnown = typeof serviceName === 'string' && serviceName.startsWith('host.');
+    let declaredEntry = null;
+    for (let i = 0; i < declaredProvide.length; i += 1) {
+      const p = declaredProvide[i];
+      if (p && p.name === serviceName) {
+        declaredEntry = p;
+        break;
+      }
+    }
+    const isHostWellKnown = typeof serviceName === 'string' && _StringStartsWith(serviceName, 'host.');
 
     // BLK-01: Well-known `host.*` services strictly require trusted + manifest declaration.
     // Never honor plugin-supplied `opts.allowWellKnownHostServices`.
     if (isHostWellKnown && (trustLevel !== 'trusted' || !declaredEntry)) {
-      throw new Error(`ERR_SERVICE_HOST_TRUST_FORBIDDEN:${serviceName}`);
+      throw new _Error(`ERR_SERVICE_HOST_TRUST_FORBIDDEN:${serviceName}`);
     }
-    const allowWellKnown = isHostWellKnown && trustLevel === 'trusted' && Boolean(declaredEntry);
+    const allowWellKnown = isHostWellKnown && trustLevel === 'trusted' && !!declaredEntry;
 
     const nameCheck = validateServiceName(pluginId, serviceName, { allowWellKnownHostServices: allowWellKnown });
     if (!nameCheck.ok) {
-      throw new Error(`${nameCheck.reason}:${serviceName}`);
+      throw new _Error(`${nameCheck.reason}:${serviceName}`);
     }
-    // Enforce manifest declaration when permissions.services.provide is used or on v3 manifests
+    // Enforce manifest declaration on v3 manifests
     if (isV3 && !declaredEntry) {
-      throw new Error(`ERR_SERVICE_NOT_DECLARED:${serviceName}`);
+      throw new _Error(`ERR_SERVICE_NOT_DECLARED:${serviceName}`);
     }
     if (!impl || typeof impl !== 'object') {
-      throw new Error('ERR_INVALID_SERVICE_IMPL');
+      throw new _Error('ERR_INVALID_SERVICE_IMPL');
     }
-    if (services.has(serviceName) && services.get(serviceName).providerPluginId !== pluginId) {
-      throw new Error(`ERR_SERVICE_ALREADY_PROVIDED:${serviceName}`);
+    if (_MapHas(services, serviceName) && _MapGet(services, serviceName).providerPluginId !== pluginId) {
+      throw new _Error(`ERR_SERVICE_ALREADY_PROVIDED:${serviceName}`);
     }
 
     // Runtime opts.allowedCallers may only narrow (never widen) manifest-declared allowedCallers
     const manifestCallers =
-      declaredEntry && Array.isArray(declaredEntry.allowedCallers) ? declaredEntry.allowedCallers.slice() : [];
+      declaredEntry && _ArrayIsArray(declaredEntry.allowedCallers) ? copyArrayPlain(declaredEntry.allowedCallers) : [];
     let allowedCallers;
     if (declaredEntry) {
-      if (Array.isArray(opts && opts.allowedCallers)) {
-        if (manifestCallers.includes('*')) {
-          allowedCallers = opts.allowedCallers.slice();
+      if (_ArrayIsArray(opts && opts.allowedCallers)) {
+        let hasWildcard = false;
+        const allowedSet = new _Set();
+        for (let i = 0; i < manifestCallers.length; i += 1) {
+          if (manifestCallers[i] === '*') hasWildcard = true;
+          _SetAdd(allowedSet, manifestCallers[i]);
+        }
+        if (hasWildcard) {
+          allowedCallers = copyArrayPlain(opts.allowedCallers);
         } else {
-          const allowedSet = new Set(manifestCallers);
-          allowedCallers = opts.allowedCallers.filter((c) => allowedSet.has(c));
+          allowedCallers = [];
+          for (let i = 0; i < opts.allowedCallers.length; i += 1) {
+            const c = opts.allowedCallers[i];
+            if (_SetHas(allowedSet, c)) allowedCallers[allowedCallers.length] = c;
+          }
         }
       } else {
         allowedCallers = manifestCallers;
       }
     } else {
-      allowedCallers = Array.isArray(opts && opts.allowedCallers) ? opts.allowedCallers.slice() : [];
+      allowedCallers = _ArrayIsArray(opts && opts.allowedCallers) ? copyArrayPlain(opts.allowedCallers) : [];
     }
 
-    services.set(serviceName, {
+    _MapSet(services, serviceName, {
       providerPluginId: pluginId,
       name: serviceName,
       allowedCallers,
@@ -5084,12 +5163,12 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
     });
     notifyChange(serviceName, 'provide');
 
-    return Object.freeze({
+    return _ObjectFreeze({
       name: serviceName,
       dispose() {
-        const cur = services.get(serviceName);
+        const cur = _MapGet(services, serviceName);
         if (cur && cur.providerPluginId === pluginId) {
-          services.delete(serviceName);
+          _MapDelete(services, serviceName);
           notifyChange(serviceName, 'dispose');
         }
       },
@@ -5097,44 +5176,52 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
   }
 
   function has(callerPluginId, serviceName) {
-    const rec = services.get(serviceName);
+    const rec = _MapGet(services, serviceName);
     if (!rec) return false;
     return isCallerAllowed(rec.providerPluginId, callerPluginId, rec.allowedCallers);
   }
 
   function list(callerPluginId) {
     const out = [];
-    for (const rec of services.values()) {
+    _MapForEach(services, (rec) => {
       if (isCallerAllowed(rec.providerPluginId, callerPluginId, rec.allowedCallers)) {
-        out.push(
-          Object.freeze({
-            name: rec.name,
-            providerPluginId: rec.providerPluginId,
-            methods: Object.freeze(Object.keys(rec.impl).filter((k) => typeof rec.impl[k] === 'function')),
-          })
-        );
+        const keys = _ObjectKeys(rec.impl);
+        const methods = [];
+        for (let i = 0; i < keys.length; i += 1) {
+          if (typeof rec.impl[keys[i]] === 'function') {
+            methods[methods.length] = keys[i];
+          }
+        }
+        out[out.length] = _ObjectFreeze({
+          name: rec.name,
+          providerPluginId: rec.providerPluginId,
+          methods: _ObjectFreeze(methods),
+        });
       }
-    }
-    return Object.freeze(out);
+    });
+    return _ObjectFreeze(out);
   }
 
-  function call(callerPluginId, serviceName, methodName, ...args) {
-    const rec = services.get(serviceName);
+  function call(callerPluginId, serviceName, methodName) {
+    const rec = _MapGet(services, serviceName);
     if (!rec) {
-      throw new Error(`ERR_SERVICE_NOT_FOUND:${serviceName}`);
+      throw new _Error(`ERR_SERVICE_NOT_FOUND:${serviceName}`);
     }
     if (!isCallerAllowed(rec.providerPluginId, callerPluginId, rec.allowedCallers)) {
-      throw new Error(`ERR_SERVICE_CALLER_FORBIDDEN:${callerPluginId}:${serviceName}`);
+      throw new _Error(`ERR_SERVICE_CALLER_FORBIDDEN:${callerPluginId}:${serviceName}`);
     }
     if (typeof methodName !== 'string' || !methodName || methodName === '__proto__' || methodName === 'constructor') {
-      throw new Error(`ERR_SERVICE_METHOD_INVALID:${String(methodName)}`);
+      throw new _Error(`ERR_SERVICE_METHOD_INVALID:${String(methodName)}`);
     }
-    const fn = Object.prototype.hasOwnProperty.call(rec.impl, methodName) ? rec.impl[methodName] : null;
+    const fn = _ObjectHasOwn(rec.impl, methodName) ? rec.impl[methodName] : null;
     if (typeof fn !== 'function') {
-      throw new Error(`ERR_SERVICE_METHOD_NOT_FOUND:${serviceName}.${methodName}`);
+      throw new _Error(`ERR_SERVICE_METHOD_NOT_FOUND:${serviceName}.${methodName}`);
     }
-    const cleanArgs = args.map((a) => sanitizeBusPayload(a));
-    const ret = fn.apply(undefined, cleanArgs);
+    const cleanArgs = [];
+    for (let i = 3; i < arguments.length; i += 1) {
+      cleanArgs[cleanArgs.length] = sanitizeBusPayload(arguments[i]);
+    }
+    const ret = _ReflectApply(fn, undefined, cleanArgs);
     if (ret && typeof ret.then === 'function') {
       return ret.then((resolved) => sanitizeBusPayload(resolved));
     }
@@ -5142,19 +5229,23 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
   }
 
   function getInternalService(serviceName) {
-    return services.get(serviceName) || null;
+    return _MapGet(services, serviceName) || null;
   }
 
   function disposePlugin(pluginId) {
-    for (const [name, rec] of Array.from(services.entries())) {
+    const toRemove = [];
+    _MapForEach(services, (rec, name) => {
       if (rec.providerPluginId === pluginId) {
-        services.delete(name);
-        notifyChange(name, 'dispose');
+        toRemove[toRemove.length] = name;
       }
+    });
+    for (let i = 0; i < toRemove.length; i += 1) {
+      _MapDelete(services, toRemove[i]);
+      notifyChange(toRemove[i], 'dispose');
     }
   }
 
-  return Object.freeze({
+  return _ObjectFreeze({
     provide,
     has,
     list,
@@ -5539,9 +5630,19 @@ const FALLBACK_BAR_CSS = `
 }
 `;
 
+// NEW-BLK-01: Capture JS primordials at module load so World 998 Map/Object prototype tampering cannot hijack statusbar delegation.
+const _ObjectFreeze = Object.freeze;
+const _Map = Map;
+const _MapGet = Function.prototype.call.bind(Map.prototype.get);
+const _MapSet = Function.prototype.call.bind(Map.prototype.set);
+const _MapHas = Function.prototype.call.bind(Map.prototype.has);
+const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
+const _MapClear = Function.prototype.call.bind(Map.prototype.clear);
+const _MapForEach = Function.prototype.call.bind(Map.prototype.forEach);
+
 function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
-  const itemsByKey = new Map(); // `${pluginId}:${itemId}` -> itemRecord
-  const delegatedByKey = new Map(); // `${pluginId}:${itemId}` -> { unregister }
+  const itemsByKey = new _Map(); // `${pluginId}:${itemId}` -> itemRecord
+  const delegatedByKey = new _Map(); // `${pluginId}:${itemId}` -> { unregister }
   let fallbackHostEl = null;
   let fallbackBarEl = null;
 
@@ -5596,13 +5697,13 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   }
 
   function buildClickPayload(record, ev, anchorEl) {
-    return Object.freeze({
+    return _ObjectFreeze({
       pluginId: record.pluginId,
       itemId: record.id,
-      shiftKey: Boolean(ev && ev.shiftKey),
-      ctrlKey: Boolean(ev && ev.ctrlKey),
-      metaKey: Boolean(ev && ev.metaKey),
-      altKey: Boolean(ev && ev.altKey),
+      shiftKey: !!(ev && ev.shiftKey),
+      ctrlKey: !!(ev && ev.ctrlKey),
+      metaKey: !!(ev && ev.metaKey),
+      altKey: !!(ev && ev.altKey),
       anchorEl: anchorEl || null,
     });
   }
@@ -5617,7 +5718,11 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
       return;
     }
 
-    const sorted = Array.from(itemsByKey.values()).sort((a, b) => {
+    const sorted = [];
+    _MapForEach(itemsByKey, (rec) => {
+      sorted[sorted.length] = rec;
+    });
+    sorted.sort((a, b) => {
       if (a.priority !== b.priority) return a.priority - b.priority;
       return a.key < b.key ? -1 : 1;
     });
@@ -5667,13 +5772,13 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     const svc = getDelegatedService();
     if (!svc) {
       // Clear any stale delegation handles and fall back to host bar
-      delegatedByKey.clear();
+      _MapClear(delegatedByKey);
       renderFallbackItems();
       return;
     }
     // Delegate every active item that is not yet delegated
-    for (const [key, rec] of itemsByKey.entries()) {
-      if (!delegatedByKey.has(key)) {
+    _MapForEach(itemsByKey, (rec, key) => {
+      if (!_MapHas(delegatedByKey, key)) {
         try {
           const res = svc.registerItem({
             pluginId: rec.pluginId,
@@ -5690,10 +5795,10 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
               }
             },
           });
-          delegatedByKey.set(key, res || { delegated: true });
+          _MapSet(delegatedByKey, key, res || { delegated: true });
         } catch (_e) {}
       }
-    }
+    });
     renderFallbackItems();
   }
 
@@ -5715,7 +5820,7 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
       priority: Number.isFinite(Number(spec.priority)) ? Number(spec.priority) : 100,
       onClick: typeof spec.onClick === 'function' ? spec.onClick : null,
     };
-    itemsByKey.set(key, record);
+    _MapSet(itemsByKey, key, record);
 
     const svc = getDelegatedService();
     if (svc) {
@@ -5735,16 +5840,16 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
             }
           },
         });
-        delegatedByKey.set(key, res || { delegated: true });
+        _MapSet(delegatedByKey, key, res || { delegated: true });
       } catch (_e) {}
     } else {
       renderFallbackItems();
     }
 
-    return Object.freeze({
+    return _ObjectFreeze({
       id,
       update(patch = {}) {
-        if (!itemsByKey.has(key) || !patch || typeof patch !== 'object') return;
+        if (!_MapHas(itemsByKey, key) || !patch || typeof patch !== 'object') return;
         if (patch.label !== undefined) record.label = String(patch.label);
         if (patch.icon !== undefined) record.icon = String(patch.icon || '');
         if (patch.tooltip !== undefined) record.tooltip = String(patch.tooltip || '');
@@ -5768,10 +5873,10 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
         }
       },
       dispose() {
-        if (!itemsByKey.has(key)) return;
-        itemsByKey.delete(key);
-        const del = delegatedByKey.get(key);
-        delegatedByKey.delete(key);
+        if (!_MapHas(itemsByKey, key)) return;
+        _MapDelete(itemsByKey, key);
+        const del = _MapGet(delegatedByKey, key);
+        _MapDelete(delegatedByKey, key);
         if (del && typeof del.dispose === 'function') {
           try {
             del.dispose();
@@ -5790,8 +5895,9 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   }
 
   function listStatusItems() {
-    return Array.from(itemsByKey.values()).map((r) =>
-      Object.freeze({
+    const out = [];
+    _MapForEach(itemsByKey, (r) => {
+      out[out.length] = _ObjectFreeze({
         pluginId: r.pluginId,
         id: r.id,
         label: r.label,
@@ -5800,13 +5906,14 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
         badge: r.badge,
         align: r.align,
         priority: r.priority,
-        delegated: delegatedByKey.has(r.key),
-      })
-    );
+        delegated: _MapHas(delegatedByKey, r.key),
+      });
+    });
+    return out;
   }
 
   function invokeStatusItem(pluginId, itemId, clickEvent = {}) {
-    const rec = itemsByKey.get(`${pluginId}:${itemId}`);
+    const rec = _MapGet(itemsByKey, `${pluginId}:${itemId}`);
     if (!rec || typeof rec.onClick !== 'function') {
       return { ok: false, reason: 'ERR_STATUS_ITEM_NOT_FOUND' };
     }
@@ -5815,11 +5922,15 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   }
 
   function disposePlugin(pluginId) {
-    for (const [key, rec] of Array.from(itemsByKey.entries())) {
-      if (rec.pluginId !== pluginId) continue;
-      itemsByKey.delete(key);
-      const del = delegatedByKey.get(key);
-      delegatedByKey.delete(key);
+    const toRemove = [];
+    _MapForEach(itemsByKey, (rec, key) => {
+      if (rec.pluginId === pluginId) toRemove[toRemove.length] = key;
+    });
+    for (let i = 0; i < toRemove.length; i += 1) {
+      const key = toRemove[i];
+      _MapDelete(itemsByKey, key);
+      const del = _MapGet(delegatedByKey, key);
+      _MapDelete(delegatedByKey, key);
       if (del && typeof del.dispose === 'function') {
         try {
           del.dispose();
@@ -5829,12 +5940,12 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     renderFallbackItems();
   }
 
-  return Object.freeze({
+  return _ObjectFreeze({
     registerStatusItem,
     listStatusItems,
     invokeStatusItem,
     syncDelegation,
-    isDelegated: () => Boolean(getDelegatedService()),
+    isDelegated: () => !!getDelegatedService(),
     disposePlugin,
   });
 }

@@ -53,9 +53,19 @@ const FALLBACK_BAR_CSS = `
 }
 `;
 
+// NEW-BLK-01: Capture JS primordials at module load so World 998 Map/Object prototype tampering cannot hijack statusbar delegation.
+const _ObjectFreeze = Object.freeze;
+const _Map = Map;
+const _MapGet = Function.prototype.call.bind(Map.prototype.get);
+const _MapSet = Function.prototype.call.bind(Map.prototype.set);
+const _MapHas = Function.prototype.call.bind(Map.prototype.has);
+const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
+const _MapClear = Function.prototype.call.bind(Map.prototype.clear);
+const _MapForEach = Function.prototype.call.bind(Map.prototype.forEach);
+
 function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
-  const itemsByKey = new Map(); // `${pluginId}:${itemId}` -> itemRecord
-  const delegatedByKey = new Map(); // `${pluginId}:${itemId}` -> { unregister }
+  const itemsByKey = new _Map(); // `${pluginId}:${itemId}` -> itemRecord
+  const delegatedByKey = new _Map(); // `${pluginId}:${itemId}` -> { unregister }
   let fallbackHostEl = null;
   let fallbackBarEl = null;
 
@@ -110,13 +120,13 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   }
 
   function buildClickPayload(record, ev, anchorEl) {
-    return Object.freeze({
+    return _ObjectFreeze({
       pluginId: record.pluginId,
       itemId: record.id,
-      shiftKey: Boolean(ev && ev.shiftKey),
-      ctrlKey: Boolean(ev && ev.ctrlKey),
-      metaKey: Boolean(ev && ev.metaKey),
-      altKey: Boolean(ev && ev.altKey),
+      shiftKey: !!(ev && ev.shiftKey),
+      ctrlKey: !!(ev && ev.ctrlKey),
+      metaKey: !!(ev && ev.metaKey),
+      altKey: !!(ev && ev.altKey),
       anchorEl: anchorEl || null,
     });
   }
@@ -131,7 +141,11 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
       return;
     }
 
-    const sorted = Array.from(itemsByKey.values()).sort((a, b) => {
+    const sorted = [];
+    _MapForEach(itemsByKey, (rec) => {
+      sorted[sorted.length] = rec;
+    });
+    sorted.sort((a, b) => {
       if (a.priority !== b.priority) return a.priority - b.priority;
       return a.key < b.key ? -1 : 1;
     });
@@ -181,13 +195,13 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     const svc = getDelegatedService();
     if (!svc) {
       // Clear any stale delegation handles and fall back to host bar
-      delegatedByKey.clear();
+      _MapClear(delegatedByKey);
       renderFallbackItems();
       return;
     }
     // Delegate every active item that is not yet delegated
-    for (const [key, rec] of itemsByKey.entries()) {
-      if (!delegatedByKey.has(key)) {
+    _MapForEach(itemsByKey, (rec, key) => {
+      if (!_MapHas(delegatedByKey, key)) {
         try {
           const res = svc.registerItem({
             pluginId: rec.pluginId,
@@ -204,10 +218,10 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
               }
             },
           });
-          delegatedByKey.set(key, res || { delegated: true });
+          _MapSet(delegatedByKey, key, res || { delegated: true });
         } catch (_e) {}
       }
-    }
+    });
     renderFallbackItems();
   }
 
@@ -229,7 +243,7 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
       priority: Number.isFinite(Number(spec.priority)) ? Number(spec.priority) : 100,
       onClick: typeof spec.onClick === 'function' ? spec.onClick : null,
     };
-    itemsByKey.set(key, record);
+    _MapSet(itemsByKey, key, record);
 
     const svc = getDelegatedService();
     if (svc) {
@@ -249,16 +263,16 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
             }
           },
         });
-        delegatedByKey.set(key, res || { delegated: true });
+        _MapSet(delegatedByKey, key, res || { delegated: true });
       } catch (_e) {}
     } else {
       renderFallbackItems();
     }
 
-    return Object.freeze({
+    return _ObjectFreeze({
       id,
       update(patch = {}) {
-        if (!itemsByKey.has(key) || !patch || typeof patch !== 'object') return;
+        if (!_MapHas(itemsByKey, key) || !patch || typeof patch !== 'object') return;
         if (patch.label !== undefined) record.label = String(patch.label);
         if (patch.icon !== undefined) record.icon = String(patch.icon || '');
         if (patch.tooltip !== undefined) record.tooltip = String(patch.tooltip || '');
@@ -282,10 +296,10 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
         }
       },
       dispose() {
-        if (!itemsByKey.has(key)) return;
-        itemsByKey.delete(key);
-        const del = delegatedByKey.get(key);
-        delegatedByKey.delete(key);
+        if (!_MapHas(itemsByKey, key)) return;
+        _MapDelete(itemsByKey, key);
+        const del = _MapGet(delegatedByKey, key);
+        _MapDelete(delegatedByKey, key);
         if (del && typeof del.dispose === 'function') {
           try {
             del.dispose();
@@ -304,8 +318,9 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   }
 
   function listStatusItems() {
-    return Array.from(itemsByKey.values()).map((r) =>
-      Object.freeze({
+    const out = [];
+    _MapForEach(itemsByKey, (r) => {
+      out[out.length] = _ObjectFreeze({
         pluginId: r.pluginId,
         id: r.id,
         label: r.label,
@@ -314,13 +329,14 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
         badge: r.badge,
         align: r.align,
         priority: r.priority,
-        delegated: delegatedByKey.has(r.key),
-      })
-    );
+        delegated: _MapHas(delegatedByKey, r.key),
+      });
+    });
+    return out;
   }
 
   function invokeStatusItem(pluginId, itemId, clickEvent = {}) {
-    const rec = itemsByKey.get(`${pluginId}:${itemId}`);
+    const rec = _MapGet(itemsByKey, `${pluginId}:${itemId}`);
     if (!rec || typeof rec.onClick !== 'function') {
       return { ok: false, reason: 'ERR_STATUS_ITEM_NOT_FOUND' };
     }
@@ -329,11 +345,15 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   }
 
   function disposePlugin(pluginId) {
-    for (const [key, rec] of Array.from(itemsByKey.entries())) {
-      if (rec.pluginId !== pluginId) continue;
-      itemsByKey.delete(key);
-      const del = delegatedByKey.get(key);
-      delegatedByKey.delete(key);
+    const toRemove = [];
+    _MapForEach(itemsByKey, (rec, key) => {
+      if (rec.pluginId === pluginId) toRemove[toRemove.length] = key;
+    });
+    for (let i = 0; i < toRemove.length; i += 1) {
+      const key = toRemove[i];
+      _MapDelete(itemsByKey, key);
+      const del = _MapGet(delegatedByKey, key);
+      _MapDelete(delegatedByKey, key);
       if (del && typeof del.dispose === 'function') {
         try {
           del.dispose();
@@ -343,12 +363,12 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
     renderFallbackItems();
   }
 
-  return Object.freeze({
+  return _ObjectFreeze({
     registerStatusItem,
     listStatusItems,
     invokeStatusItem,
     syncDelegation,
-    isDelegated: () => Boolean(getDelegatedService()),
+    isDelegated: () => !!getDelegatedService(),
     disposePlugin,
   });
 }
