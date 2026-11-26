@@ -19,6 +19,13 @@ const {
 } = require('../../core/ui-schema-validator');
 
 const SCHEMA_UI_CSS = `
+:host {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+  min-height: 0;
+  width: 100%;
+}
 :host, .ag-ui-shell {
   box-sizing: border-box;
   font-family: var(--ag-font, system-ui, -apple-system, sans-serif);
@@ -35,7 +42,9 @@ const SCHEMA_UI_CSS = `
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  width: 100%;
   max-height: inherit;
+  min-height: 0;
 }
 .ag-ui-header {
   display: flex;
@@ -44,6 +53,7 @@ const SCHEMA_UI_CSS = `
   gap: 8px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--ag-border, rgba(255, 255, 255, 0.14));
+  flex: 0 0 auto;
 }
 .ag-ui-header-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .ag-ui-title { font-weight: 700; font-size: 14px; color: var(--ag-text, #f0f6fc); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -71,7 +81,7 @@ const SCHEMA_UI_CSS = `
   font-size: 14px;
 }
 .ag-ui-close:hover { color: var(--ag-text, #f0f6fc); }
-.ag-ui-body { padding: 12px 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.ag-ui-body { padding: 12px 14px; overflow-y: auto; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
 .ag-stack { display: flex; flex-direction: column; gap: 8px; }
 .ag-row { display: flex; flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ag-section { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.12)); border-radius: 8px; background: var(--ag-surface-elevated, rgba(255,255,255,0.03)); }

@@ -209,12 +209,23 @@ function createAddonContextV3({
       el.style.padding = '0';
       el.style.border = 'none';
       el.style.background = 'transparent';
-      el.style.overflow = 'visible';
+      el.style.overflow = 'hidden';
+      el.style.boxSizing = 'border-box';
       el.style.zIndex = String(2147483200 + activeOverlays.size + 1);
     }
 
     const shadowHost = isModal ? doc.createElement('div') : el;
-    if (isModal) el.appendChild(shadowHost);
+    if (isModal) {
+      if (shadowHost.style) {
+        shadowHost.style.width = '100%';
+        shadowHost.style.maxHeight = 'inherit';
+        shadowHost.style.display = 'flex';
+        shadowHost.style.flexDirection = 'column';
+        shadowHost.style.overflow = 'hidden';
+        shadowHost.style.boxSizing = 'border-box';
+      }
+      el.appendChild(shadowHost);
+    }
     const sr = typeof shadowHost.attachShadow === 'function' ? shadowHost.attachShadow({ mode: 'open' }) : shadowHost;
 
     let closed = false;
