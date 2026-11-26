@@ -6,6 +6,9 @@ const trustPolicyPort = require('./core/trust-policy-port');
 const fsPort = require('./core/fs-port');
 const manifestNormalizer = require('./core/manifest-normalizer');
 const manifestValidator = require('./core/manifest-validator');
+const netPolicy = require('./core/net-policy');
+const uiSchemaValidator = require('./core/ui-schema-validator');
+const serviceBusPolicy = require('./core/service-bus-policy');
 const slotRegistry = require('./core/slot-registry');
 const lifecycleCoordinator = require('./core/lifecycle-coordinator');
 const nodeFsPort = require('./adapters/node-fs-port');
@@ -45,6 +48,9 @@ module.exports = {
   ...fsPort,
   ...manifestNormalizer,
   ...manifestValidator,
+  ...netPolicy,
+  ...uiSchemaValidator,
+  ...serviceBusPolicy,
   ...slotRegistry,
   ...lifecycleCoordinator,
   ...nodeFsPort,

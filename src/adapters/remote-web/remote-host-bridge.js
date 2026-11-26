@@ -17,6 +17,8 @@
  * callers or kernel code.
  */
 
+const { evaluateNetRequest } = require('../../core/net-policy');
+
 const DEFAULT_MAX_SETTINGS_BYTES = 65536;
 const MIN_SETTINGS_BYTES = 1024;
 const MAX_SETTINGS_BYTES = 262144;
@@ -273,7 +275,10 @@ function createRemoteHostBridge({
   storageNamespace = 'remote-addon-host:v2',
   storage = null,
   remoteTransport = null,
+  netTransport = null,
+  forbiddenNetHosts = [],
   settingsBindings = null,
+  netBindings = null,
   configScopeSnapshots = null,
   onSettingsSaved = null,
   onError = null,
@@ -286,7 +291,18 @@ function createRemoteHostBridge({
   const activePortalClaims = new Set();
   const recordedErrors = [];
   const allowedSettings = new Map(); // pluginId -> { maxBytes, revision }
+  const allowedNet = new Map(); // pluginId -> { httpsHosts: string[] }
   const packedConfigScopes = new Map(); // `${pluginId}:${scopeId}` -> snapshot
+
+  if (netBindings && typeof netBindings === 'object') {
+    const entries = netBindings instanceof Map ? Array.from(netBindings.entries()) : Object.entries(netBindings);
+    for (let i = 0; i < entries.length; i += 1) {
+      const [pid, spec] = entries[i];
+      if (typeof pid === 'string' && PLUGIN_ID_RE.test(pid) && spec && Array.isArray(spec.httpsHosts)) {
+        allowedNet.set(pid, { httpsHosts: spec.httpsHosts.slice() });
+      }
+    }
+  }
 
   if (settingsBindings && typeof settingsBindings === 'object') {
     const entries = settingsBindings instanceof Map ? Array.from(settingsBindings.entries()) : Object.entries(settingsBindings);
@@ -575,6 +591,78 @@ function createRemoteHostBridge({
     });
   }
 
+  function bindNetPlugin(pluginId, spec = {}) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) return false;
+    const httpsHosts = Array.isArray(spec && spec.httpsHosts) ? spec.httpsHosts.slice() : [];
+    allowedNet.set(pluginId, { httpsHosts });
+    return true;
+  }
+
+  function detectGmXhr() {
+    if (typeof netTransport === 'function') return netTransport;
+    if (win && typeof win.GM_xmlhttpRequest === 'function') return win.GM_xmlhttpRequest;
+    if (typeof globalThis !== 'undefined' && typeof globalThis.GM_xmlhttpRequest === 'function') {
+      return globalThis.GM_xmlhttpRequest;
+    }
+    if (win && win.GM && typeof win.GM.xmlHttpRequest === 'function') return win.GM.xmlHttpRequest;
+    return null;
+  }
+
+  function netFetch(pluginId, rawUrl, init = {}) {
+    if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+      return Promise.resolve({ ok: false, reason: 'ERR_INVALID_PLUGIN_ID' });
+    }
+    const binding = allowedNet.get(pluginId);
+    if (!binding || binding.httpsHosts.length === 0) {
+      return Promise.resolve({ ok: false, reason: 'ERR_NET_NOT_DECLARED' });
+    }
+    // Remote Web strictly forbids localLoopback (`allowLoopback: false`)
+    const plan = evaluateNetRequest(rawUrl, init, {
+      httpsHosts: binding.httpsHosts,
+      localLoopback: [],
+      forbiddenHosts: Array.isArray(forbiddenNetHosts) ? forbiddenNetHosts : [],
+      allowLoopback: false,
+    });
+    if (!plan.ok) {
+      return Promise.resolve({ ok: false, reason: plan.reason });
+    }
+    const xhrFn = detectGmXhr();
+    if (!xhrFn) {
+      return Promise.resolve({ ok: false, reason: 'ERR_REMOTE_NET_TRANSPORT_UNAVAILABLE' });
+    }
+    return new Promise((resolve) => {
+      try {
+        xhrFn({
+          method: plan.method,
+          url: plan.url,
+          headers: plan.headers,
+          data: typeof init.body === 'string' ? init.body : undefined,
+          anonymous: true,
+          timeout: Number.isFinite(Number(init.timeoutMs)) ? Math.min(30000, Math.max(500, Number(init.timeoutMs))) : 15000,
+          onload(resp) {
+            resolve({
+              ok: true,
+              status: Number(resp && resp.status) || 0,
+              statusText: String((resp && resp.statusText) || ''),
+              headers: {},
+              bodyText: String((resp && resp.responseText) || ''),
+              url: plan.url,
+              channel: 'https',
+            });
+          },
+          onerror() {
+            resolve({ ok: false, reason: 'ERR_REMOTE_NET_REQUEST_FAILED' });
+          },
+          ontimeout() {
+            resolve({ ok: false, reason: 'ERR_NET_TIMEOUT' });
+          },
+        });
+      } catch (err) {
+        resolve({ ok: false, reason: `ERR_REMOTE_NET_REQUEST_FAILED:${err && err.message ? err.message : String(err)}` });
+      }
+    });
+  }
+
   const port = Object.freeze({
     docGenId: Number(docGenId) || 1,
     profileId: String(profileId || 'remote-web'),
@@ -584,6 +672,7 @@ function createRemoteHostBridge({
     ping,
     readConfigScope,
     writeConfigScope,
+    netFetch,
   });
 
   function dispose() {
@@ -594,6 +683,7 @@ function createRemoteHostBridge({
   return Object.freeze({
     port,
     bindSettingsPlugin,
+    bindNetPlugin,
     hydrateSettings,
     loadPersistedSettings,
     getErrors: () => recordedErrors.slice(),

@@ -2,6 +2,810 @@
 // Auto-generated World 998 Renderer Kernel Bundle (zero external dependencies).
 (function() {
   const __mods = {
+  "../../core/ui-schema-validator.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Pure vendor- & runtime-neutral Tier-2 Declarative UI Schema Validator &
+ * Static JSON Predicate Evaluator (v3.0.0 — SOLID #0).
+ *
+ * - Closed set of 16 semantic UI primitives (zero raw HTML, zero script tags, zero eval).
+ * - Static JSON `visibleWhen` / `disabledWhen` predicates (`{ field, eq | neq | in | truthy }`
+ *   plus bounded `{ all }` / `{ any }` combinators).
+ * - Enforces max tree depth (12) and max node count (256) to prevent DoS.
+ */
+
+const ALLOWED_UI_NODE_TYPES = Object.freeze([
+  'stack',
+  'row',
+  'section',
+  'heading',
+  'text',
+  'badge',
+  'divider',
+  'alert',
+  'button',
+  'toggle',
+  'input',
+  'textarea',
+  'select',
+  'slider',
+  'progress',
+  'list',
+]);
+
+const ALLOWED_UI_NODE_TYPE_SET = new Set(ALLOWED_UI_NODE_TYPES);
+const CONTAINER_NODE_TYPES = new Set(['stack', 'row', 'section']);
+const MAX_TREE_DEPTH = 12;
+const MAX_TREE_NODES = 256;
+const MAX_CONDITION_DEPTH = 4;
+const SAFE_NODE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/;
+const FORBIDDEN_STATE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function readStateField(state, fieldPath) {
+  if (!state || typeof state !== 'object' || typeof fieldPath !== 'string' || !fieldPath) {
+    return undefined;
+  }
+  const parts = fieldPath.split('.');
+  let cur = state;
+  for (let i = 0; i < parts.length; i += 1) {
+    const key = parts[i];
+    if (!key || FORBIDDEN_STATE_KEYS.has(key)) return undefined;
+    if (cur === null || typeof cur !== 'object' || !Object.prototype.hasOwnProperty.call(cur, key)) {
+      return undefined;
+    }
+    cur = cur[key];
+  }
+  return cur;
+}
+
+function validateUiCondition(cond, depth = 0) {
+  if (cond === undefined || cond === null) return { ok: true };
+  if (typeof cond !== 'object' || Array.isArray(cond)) {
+    return { ok: false, reason: 'ERR_UI_CONDITION_INVALID' };
+  }
+  if (depth > MAX_CONDITION_DEPTH) {
+    return { ok: false, reason: 'ERR_UI_CONDITION_TOO_DEEP' };
+  }
+  if (Array.isArray(cond.all)) {
+    for (let i = 0; i < cond.all.length; i += 1) {
+      const r = validateUiCondition(cond.all[i], depth + 1);
+      if (!r.ok) return r;
+    }
+    return { ok: true };
+  }
+  if (Array.isArray(cond.any)) {
+    for (let i = 0; i < cond.any.length; i += 1) {
+      const r = validateUiCondition(cond.any[i], depth + 1);
+      if (!r.ok) return r;
+    }
+    return { ok: true };
+  }
+  if (typeof cond.field !== 'string' || !cond.field.trim()) {
+    return { ok: false, reason: 'ERR_UI_CONDITION_FIELD_REQUIRED' };
+  }
+  const hasEq = Object.prototype.hasOwnProperty.call(cond, 'eq');
+  const hasNeq = Object.prototype.hasOwnProperty.call(cond, 'neq');
+  const hasIn = Object.prototype.hasOwnProperty.call(cond, 'in');
+  const hasTruthy = Object.prototype.hasOwnProperty.call(cond, 'truthy');
+  const opsCount = (hasEq ? 1 : 0) + (hasNeq ? 1 : 0) + (hasIn ? 1 : 0) + (hasTruthy ? 1 : 0);
+  if (opsCount !== 1) {
+    return { ok: false, reason: 'ERR_UI_CONDITION_SINGLE_OPERATOR_REQUIRED' };
+  }
+  if (hasIn && !Array.isArray(cond.in)) {
+    return { ok: false, reason: 'ERR_UI_CONDITION_IN_MUST_BE_ARRAY' };
+  }
+  if (hasTruthy && typeof cond.truthy !== 'boolean') {
+    return { ok: false, reason: 'ERR_UI_CONDITION_TRUTHY_MUST_BE_BOOLEAN' };
+  }
+  return { ok: true };
+}
+
+function evaluateUiCondition(cond, state, depth = 0) {
+  if (cond === undefined || cond === null) return true;
+  if (typeof cond !== 'object' || Array.isArray(cond) || depth > MAX_CONDITION_DEPTH) return false;
+  if (Array.isArray(cond.all)) {
+    for (let i = 0; i < cond.all.length; i += 1) {
+      if (!evaluateUiCondition(cond.all[i], state, depth + 1)) return false;
+    }
+    return true;
+  }
+  if (Array.isArray(cond.any)) {
+    for (let i = 0; i < cond.any.length; i += 1) {
+      if (evaluateUiCondition(cond.any[i], state, depth + 1)) return true;
+    }
+    return false;
+  }
+  const val = readStateField(state, cond.field);
+  if (Object.prototype.hasOwnProperty.call(cond, 'eq')) return val === cond.eq;
+  if (Object.prototype.hasOwnProperty.call(cond, 'neq')) return val !== cond.neq;
+  if (Object.prototype.hasOwnProperty.call(cond, 'in')) {
+    return Array.isArray(cond.in) && cond.in.includes(val);
+  }
+  if (Object.prototype.hasOwnProperty.call(cond, 'truthy')) {
+    return Boolean(val) === cond.truthy;
+  }
+  return false;
+}
+
+function validateUiTree(tree) {
+  if (!tree || typeof tree !== 'object' || Array.isArray(tree)) {
+    return { ok: false, reason: 'ERR_UI_TREE_INVALID', errors: ['UI tree root must be an object'] };
+  }
+  const errors = [];
+  let nodeCount = 0;
+  const seenIds = new Set();
+
+  function walk(node, depth, pathLabel) {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) {
+      errors.push(`${pathLabel}: node must be an object`);
+      return;
+    }
+    nodeCount += 1;
+    if (nodeCount > MAX_TREE_NODES) {
+      errors.push(`ERR_UI_TREE_MAX_NODES_EXCEEDED (${MAX_TREE_NODES})`);
+      return;
+    }
+    if (depth > MAX_TREE_DEPTH) {
+      errors.push(`${pathLabel}: ERR_UI_TREE_MAX_DEPTH_EXCEEDED (${MAX_TREE_DEPTH})`);
+      return;
+    }
+    if (typeof node.type !== 'string' || !ALLOWED_UI_NODE_TYPE_SET.has(node.type)) {
+      errors.push(`${pathLabel}: unsupported node type "${String(node.type)}"`);
+      return;
+    }
+    if (node.id !== undefined) {
+      if (typeof node.id !== 'string' || !SAFE_NODE_ID_RE.test(node.id)) {
+        errors.push(`${pathLabel}: invalid node id "${String(node.id)}"`);
+      } else if (seenIds.has(node.id)) {
+        errors.push(`${pathLabel}: duplicate node id "${node.id}"`);
+      } else {
+        seenIds.add(node.id);
+      }
+    }
+    if (node.visibleWhen !== undefined) {
+      const r = validateUiCondition(node.visibleWhen);
+      if (!r.ok) errors.push(`${pathLabel}.visibleWhen: ${r.reason}`);
+    }
+    if (node.disabledWhen !== undefined) {
+      const r = validateUiCondition(node.disabledWhen);
+      if (!r.ok) errors.push(`${pathLabel}.disabledWhen: ${r.reason}`);
+    }
+    if (node.type === 'select') {
+      if (!Array.isArray(node.options)) {
+        errors.push(`${pathLabel}: select node requires options array`);
+      }
+    }
+    if (node.type === 'list') {
+      if (node.items !== undefined && !Array.isArray(node.items)) {
+        errors.push(`${pathLabel}: list node items must be an array`);
+      }
+    }
+    if (node.children !== undefined) {
+      if (!CONTAINER_NODE_TYPES.has(node.type)) {
+        errors.push(`${pathLabel}: non-container node "${node.type}" cannot have children`);
+      } else if (!Array.isArray(node.children)) {
+        errors.push(`${pathLabel}: children must be an array`);
+      } else {
+        for (let i = 0; i < node.children.length; i += 1) {
+          walk(node.children[i], depth + 1, `${pathLabel}.children[${i}]`);
+        }
+      }
+    }
+  }
+
+  walk(tree, 0, 'root');
+  if (errors.length > 0) {
+    return { ok: false, reason: 'ERR_UI_SCHEMA_INVALID', errors };
+  }
+  return { ok: true, nodeCount };
+}
+
+module.exports = {
+  ALLOWED_UI_NODE_TYPES,
+  CONTAINER_NODE_TYPES,
+  MAX_TREE_DEPTH,
+  MAX_TREE_NODES,
+  readStateField,
+  validateUiCondition,
+  evaluateUiCondition,
+  validateUiTree,
+};
+
+  },
+  "../../core/service-bus-policy.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Pure vendor- & runtime-neutral Service Bus & Event Bus Security Policy (v3.0.0 — SOLID #0).
+ *
+ * - Enforces `<pluginId>.<name>` service naming (plus explicit well-known host service slots
+ *   such as `host.statusbar` when declared in manifest `permissions.services.provide`).
+ * - Default-deny `allowedCallers`: omitting `allowedCallers` permits ONLY the provider itself;
+ *   explicit caller pluginIds or `'*'` are required for cross-plugin calls.
+ * - Deep plain-data structured clone stripping `__proto__`, `constructor`, `prototype`,
+ *   and rejecting functions / circular references / excessive nesting depth.
+ */
+
+const WELL_KNOWN_HOST_SERVICES = Object.freeze(['host.statusbar']);
+const WELL_KNOWN_HOST_SERVICE_SET = new Set(WELL_KNOWN_HOST_SERVICES);
+const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9._-]{1,63}\.[a-z0-9][a-z0-9._-]{1,63}$/;
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const MAX_PAYLOAD_DEPTH = 12;
+
+function validateServiceName(pluginId, serviceName, { allowWellKnownHostServices = false } = {}) {
+  if (typeof pluginId !== 'string' || !pluginId) {
+    return { ok: false, reason: 'ERR_INVALID_PLUGIN_ID' };
+  }
+  if (typeof serviceName !== 'string' || !SERVICE_NAME_RE.test(serviceName)) {
+    return { ok: false, reason: 'ERR_INVALID_SERVICE_NAME' };
+  }
+  if (serviceName.startsWith(`${pluginId}.`)) {
+    return { ok: true, serviceName, isWellKnownHostService: false };
+  }
+  if (allowWellKnownHostServices && WELL_KNOWN_HOST_SERVICE_SET.has(serviceName)) {
+    return { ok: true, serviceName, isWellKnownHostService: true };
+  }
+  return { ok: false, reason: 'ERR_SERVICE_NAMESPACE_MISMATCH' };
+}
+
+function isCallerAllowed(providerPluginId, callerPluginId, allowedCallers) {
+  if (typeof callerPluginId !== 'string' || !callerPluginId) return false;
+  if (callerPluginId === providerPluginId) return true;
+  if (!Array.isArray(allowedCallers) || allowedCallers.length === 0) {
+    return false; // Default-deny
+  }
+  for (let i = 0; i < allowedCallers.length; i += 1) {
+    if (allowedCallers[i] === '*' || allowedCallers[i] === callerPluginId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function sanitizeBusPayload(value, maxDepth = MAX_PAYLOAD_DEPTH) {
+  const seen = new WeakSet();
+
+  function clone(val, depth) {
+    if (depth > maxDepth) {
+      throw new Error('ERR_BUS_PAYLOAD_TOO_DEEP');
+    }
+    if (val === null || val === undefined || typeof val === 'boolean' || typeof val === 'string') {
+      return val;
+    }
+    if (typeof val === 'number') {
+      return Number.isFinite(val) ? val : null;
+    }
+    if (typeof val === 'function' || typeof val === 'symbol' || typeof val === 'bigint') {
+      throw new Error('ERR_BUS_PAYLOAD_NON_SERIALIZABLE');
+    }
+    if (typeof val === 'object') {
+      if (seen.has(val)) {
+        throw new Error('ERR_BUS_PAYLOAD_CIRCULAR');
+      }
+      // Reject DOM nodes or host objects cleanly
+      if (typeof val.nodeType === 'number' && typeof val.nodeName === 'string') {
+        throw new Error('ERR_BUS_PAYLOAD_DOM_NODE_FORBIDDEN');
+      }
+      seen.add(val);
+      try {
+        if (Array.isArray(val)) {
+          const arr = [];
+          for (let i = 0; i < val.length; i += 1) {
+            arr.push(clone(val[i], depth + 1));
+          }
+          return arr;
+        }
+        if (val instanceof Date) {
+          return new Date(val.getTime());
+        }
+        const out = Object.create(null);
+        const keys = Object.keys(val);
+        for (let i = 0; i < keys.length; i += 1) {
+          const k = keys[i];
+          if (FORBIDDEN_KEYS.has(k)) continue;
+          const clonedVal = clone(val[k], depth + 1);
+          if (clonedVal !== undefined) {
+            out[k] = clonedVal;
+          }
+        }
+        return Object.assign({}, out);
+      } finally {
+        seen.delete(val);
+      }
+    }
+    return undefined;
+  }
+
+  return clone(value, 0);
+}
+
+function validateServicePermissions(pluginId, servicesPerm) {
+  if (servicesPerm === null || servicesPerm === undefined) {
+    return { ok: true, provide: [], consume: [] };
+  }
+  if (typeof servicesPerm !== 'object' || Array.isArray(servicesPerm)) {
+    return { ok: false, reason: 'ERR_INVALID_SERVICE_PERMISSIONS', errors: ['permissions.services must be an object'] };
+  }
+  const errors = [];
+  const provide = [];
+  const seenProvide = new Set();
+
+  if (Array.isArray(servicesPerm.provide)) {
+    for (let i = 0; i < servicesPerm.provide.length; i += 1) {
+      const entry = servicesPerm.provide[i];
+      if (!entry || typeof entry !== 'object') {
+        errors.push(`permissions.services.provide[${i}] must be an object`);
+        continue;
+      }
+      const check = validateServiceName(pluginId, entry.name, { allowWellKnownHostServices: true });
+      if (!check.ok) {
+        errors.push(`permissions.services.provide[${i}].name "${String(entry.name)}": ${check.reason}`);
+        continue;
+      }
+      if (seenProvide.has(entry.name)) {
+        errors.push(`Duplicate provided service "${entry.name}"`);
+        continue;
+      }
+      seenProvide.add(entry.name);
+      provide.push({
+        name: entry.name,
+        allowedCallers: Array.isArray(entry.allowedCallers) ? entry.allowedCallers.slice() : [],
+      });
+    }
+  }
+
+  const consume = [];
+  if (Array.isArray(servicesPerm.consume)) {
+    for (let i = 0; i < servicesPerm.consume.length; i += 1) {
+      const name = servicesPerm.consume[i];
+      if (typeof name !== 'string' || !SERVICE_NAME_RE.test(name)) {
+        errors.push(`Invalid consumed service name "${String(name)}"`);
+      } else if (!consume.includes(name)) {
+        consume.push(name);
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, reason: 'ERR_INVALID_SERVICE_PERMISSIONS', errors };
+  }
+  return { ok: true, provide, consume };
+}
+
+module.exports = {
+  WELL_KNOWN_HOST_SERVICES,
+  SERVICE_NAME_RE,
+  MAX_PAYLOAD_DEPTH,
+  validateServiceName,
+  isCallerAllowed,
+  sanitizeBusPayload,
+  validateServicePermissions,
+};
+
+  },
+  "../../core/net-policy.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Pure vendor- & runtime-neutral Dual-Key Network Policy Engine (v3.0.0 — SOLID #0).
+ *
+ * ZERO Node.js built-in imports, ZERO vendor literals.
+ *
+ * Enforces the locked deliberation contract:
+ * 1. `permissions.net.httpsHosts` (Desktop + Remote Web):
+ *    - Public HTTPS FQDN only (`<= 253` chars, no wildcards, no raw IPv4/IPv6,
+ *      no `localhost`, no internal suffixes, no profile-forbidden auth/host origins).
+ *    - `credentials: 'omit'`, forbidden headers stripped (`Cookie`, `Host`, `Origin`, `Referer`).
+ *    - Manual redirects up to `MAX_HTTPS_REDIRECTS` (3), re-validating every hop.
+ *    - DNS pre-resolution IP classifier blocks RFC1918, loopback, link-local, IMDS (`169.254.169.254`),
+ *      CGNAT, multicast, and IPv4-mapped IPv6 equivalents.
+ * 2. `permissions.net.localLoopback` (Desktop `trusted` ONLY):
+ *    - Explicit integer ports (`1024..65535`) or profile-resolved named targets (no wildcards).
+ *    - Normalizes `localhost` -> `127.0.0.1` literal.
+ *    - ZERO redirects (`MAX_LOOPBACK_REDIRECTS = 0`).
+ *    - Strictly omitted / denied on Remote Web.
+ */
+
+const MAX_FQDN_LENGTH = 253;
+const PUBLIC_FQDN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+const NAMED_LOOPBACK_TARGET_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
+const MAX_HTTPS_REDIRECTS = 3;
+const MAX_LOOPBACK_REDIRECTS = 0;
+
+const FORBIDDEN_INTERNAL_SUFFIXES = Object.freeze([
+  '.local',
+  '.internal',
+  '.localhost',
+  '.localdomain',
+  '.lan',
+  '.home',
+  '.corp',
+  '.intranet',
+  '.arpa',
+  '.home.arpa',
+]);
+
+const FORBIDDEN_REQUEST_HEADERS = Object.freeze([
+  'cookie',
+  'cookie2',
+  'host',
+  'origin',
+  'referer',
+  'proxy-authorization',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-real-ip',
+]);
+
+const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+
+function normalizeHostName(raw) {
+  if (typeof raw !== 'string') return '';
+  let s = raw.trim().toLowerCase();
+  if (s.endsWith('.')) s = s.slice(0, -1);
+  return s;
+}
+
+function isForbiddenHostMatch(host, forbiddenHosts = []) {
+  if (!host) return true;
+  if (host === 'localhost') return true;
+  for (let i = 0; i < FORBIDDEN_INTERNAL_SUFFIXES.length; i += 1) {
+    if (host.endsWith(FORBIDDEN_INTERNAL_SUFFIXES[i])) return true;
+  }
+  if (Array.isArray(forbiddenHosts)) {
+    for (let i = 0; i < forbiddenHosts.length; i += 1) {
+      const f = normalizeHostName(forbiddenHosts[i]);
+      if (!f) continue;
+      if (host === f || host.endsWith(`.${f}`)) return true;
+    }
+  }
+  return false;
+}
+
+function isPublicFqdnHost(rawHost, { forbiddenHosts = [] } = {}) {
+  const host = normalizeHostName(rawHost);
+  if (!host || host.length > MAX_FQDN_LENGTH) return false;
+  if (host.includes('*') || host.includes(':') || host.includes('/') || host.includes('@')) return false;
+  if (!PUBLIC_FQDN_RE.test(host)) return false;
+  if (isForbiddenHostMatch(host, forbiddenHosts)) return false;
+  return true;
+}
+
+function parseIpv4Octets(ip) {
+  const parts = String(ip || '').trim().split('.');
+  if (parts.length !== 4) return null;
+  const out = [];
+  for (let i = 0; i < 4; i += 1) {
+    if (!/^\d{1,3}$/.test(parts[i])) return null;
+    if (parts[i].length > 1 && parts[i].startsWith('0')) return null;
+    const n = Number(parts[i]);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+    out.push(n);
+  }
+  return out;
+}
+
+function isPrivateOrReservedIpv4Octets(octets) {
+  if (!octets || octets.length !== 4) return true;
+  const [a, b] = octets;
+  if (a === 0) return true; // 0.0.0.0/8
+  if (a === 10) return true; // 10.0.0.0/8 (RFC1918)
+  if (a === 127) return true; // 127.0.0.0/8 (Loopback)
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 (CGNAT)
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 (Link-local & Cloud IMDS 169.254.169.254)
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12 (RFC1918)
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16 (RFC1918)
+  if (a === 192 && b === 0 && (octets[2] === 0 || octets[2] === 2)) return true; // IETF / TEST-NET-1
+  if (a === 198 && (b === 18 || b === 19)) return true; // Benchmarking
+  if (a === 198 && b === 51 && octets[2] === 100) return true; // TEST-NET-2
+  if (a === 203 && b === 0 && octets[2] === 113) return true; // TEST-NET-3
+  if (a >= 224) return true; // Multicast & Reserved (224.0.0.0/4, 240.0.0.0/4, broadcast)
+  return false;
+}
+
+function expandIpv6Groups(rawIp) {
+  let ip = String(rawIp || '').trim().toLowerCase();
+  if (ip.startsWith('[') && ip.endsWith(']')) ip = ip.slice(1, -1);
+  const zoneIdx = ip.indexOf('%');
+  if (zoneIdx !== -1) ip = ip.slice(0, zoneIdx);
+  if (!ip.includes(':')) return null;
+
+  // Handle embedded IPv4 tail (e.g. ::ffff:127.0.0.1)
+  const lastColon = ip.lastIndexOf(':');
+  const tail = ip.slice(lastColon + 1);
+  if (tail.includes('.')) {
+    const v4 = parseIpv4Octets(tail);
+    if (!v4) return null;
+    const hi = ((v4[0] << 8) | v4[1]).toString(16);
+    const lo = ((v4[2] << 8) | v4[3]).toString(16);
+    ip = `${ip.slice(0, lastColon)}:${hi}:${lo}`;
+  }
+
+  const halves = ip.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = halves.length === 2 ? 8 - (left.length + right.length) : 0;
+  if (missing < 0 || (halves.length === 1 && left.length !== 8)) return null;
+
+  const groups = [...left, ...new Array(missing).fill('0'), ...right];
+  if (groups.length !== 8) return null;
+  const nums = [];
+  for (let i = 0; i < 8; i += 1) {
+    if (!/^[0-9a-f]{1,4}$/.test(groups[i])) return null;
+    nums.push(parseInt(groups[i], 16));
+  }
+  return nums;
+}
+
+/**
+ * Returns true if the IP address is private, loopback, link-local, IMDS, multicast,
+ * reserved, IPv4-mapped private IPv6, or unparseable (fail-closed).
+ */
+function isPrivateOrReservedIp(rawIp) {
+  if (typeof rawIp !== 'string' || !rawIp.trim()) return true;
+  const trimmed = rawIp.trim();
+  const v4 = parseIpv4Octets(trimmed);
+  if (v4) {
+    return isPrivateOrReservedIpv4Octets(v4);
+  }
+  const v6 = expandIpv6Groups(trimmed);
+  if (!v6) return true; // Fail-closed on unparseable IP
+
+  const allZeroPrefix6 = v6[0] === 0 && v6[1] === 0 && v6[2] === 0 && v6[3] === 0 && v6[4] === 0;
+  // Unspecified :: and Loopback ::1
+  if (allZeroPrefix6 && v6[5] === 0 && v6[6] === 0 && (v6[7] === 0 || v6[7] === 1)) {
+    return true;
+  }
+  // IPv4-mapped ::ffff:0:0/96 or IPv4-compatible ::/96 or NAT64 64:ff9b::/96
+  const isV4Mapped = allZeroPrefix6 && (v6[5] === 0xffff || v6[5] === 0);
+  const isNat64 = v6[0] === 0x0064 && v6[1] === 0xff9b && v6[2] === 0 && v6[3] === 0 && v6[4] === 0 && v6[5] === 0;
+  if (isV4Mapped || isNat64) {
+    const mappedOctets = [(v6[6] >> 8) & 0xff, v6[6] & 0xff, (v6[7] >> 8) & 0xff, v6[7] & 0xff];
+    return isPrivateOrReservedIpv4Octets(mappedOctets);
+  }
+  // Unique Local fc00::/7
+  if ((v6[0] & 0xfe00) === 0xfc00) return true;
+  // Link-Local fe80::/10
+  if ((v6[0] & 0xffc0) === 0xfe80) return true;
+  // Site-Local (deprecated) fec0::/10
+  if ((v6[0] & 0xffc0) === 0xfec0) return true;
+  // Multicast ff00::/8
+  if ((v6[0] & 0xff00) === 0xff00) return true;
+  // Documentation 2001:db8::/32
+  if (v6[0] === 0x2001 && v6[1] === 0x0db8) return true;
+  return false;
+}
+
+function normalizeLoopbackTarget(entry) {
+  if (typeof entry === 'number' && Number.isInteger(entry) && entry >= 1024 && entry <= 65535) {
+    return { kind: 'port', port: entry };
+  }
+  if (typeof entry === 'string') {
+    const trimmed = entry.trim();
+    if (NAMED_LOOPBACK_TARGET_RE.test(trimmed)) {
+      return { kind: 'named', name: trimmed };
+    }
+  }
+  return null;
+}
+
+function validateNetPermissions(netPerm, { trustLevel = 'restricted', forbiddenHosts = [] } = {}) {
+  if (netPerm === null || netPerm === undefined) {
+    return { ok: true, httpsHosts: [], localLoopback: [] };
+  }
+  if (typeof netPerm !== 'object' || Array.isArray(netPerm)) {
+    return { ok: false, reason: 'ERR_INVALID_NET_PERMISSIONS', errors: ['permissions.net must be an object'] };
+  }
+  const errors = [];
+  const httpsHosts = [];
+  const seenHosts = new Set();
+  if (netPerm.httpsHosts !== undefined) {
+    if (!Array.isArray(netPerm.httpsHosts)) {
+      errors.push('permissions.net.httpsHosts must be an array');
+    } else {
+      for (let i = 0; i < netPerm.httpsHosts.length; i += 1) {
+        const raw = netPerm.httpsHosts[i];
+        const norm = normalizeHostName(raw);
+        if (!isPublicFqdnHost(norm, { forbiddenHosts })) {
+          errors.push(`Invalid or forbidden httpsHost "${String(raw)}"`);
+        } else if (!seenHosts.has(norm)) {
+          seenHosts.add(norm);
+          httpsHosts.push(norm);
+        }
+      }
+    }
+  }
+
+  const localLoopback = [];
+  const seenLoopback = new Set();
+  if (netPerm.localLoopback !== undefined) {
+    if (!Array.isArray(netPerm.localLoopback)) {
+      errors.push('permissions.net.localLoopback must be an array');
+    } else {
+      if (netPerm.localLoopback.length > 0 && trustLevel !== 'trusted') {
+        return {
+          ok: false,
+          reason: 'ERR_RESTRICTED_LOCAL_LOOPBACK_FORBIDDEN',
+          errors: ['permissions.net.localLoopback requires trustLevel: "trusted" and Desktop host trust approval'],
+        };
+      }
+      for (let i = 0; i < netPerm.localLoopback.length; i += 1) {
+        const parsed = normalizeLoopbackTarget(netPerm.localLoopback[i]);
+        if (!parsed) {
+          errors.push(`Invalid localLoopback target "${String(netPerm.localLoopback[i])}" (must be port 1024..65535 or named target)`);
+        } else {
+          const key = parsed.kind === 'port' ? `port:${parsed.port}` : `named:${parsed.name}`;
+          if (!seenLoopback.has(key)) {
+            seenLoopback.add(key);
+            localLoopback.push(parsed.kind === 'port' ? parsed.port : parsed.name);
+          }
+        }
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, reason: 'ERR_INVALID_NET_PERMISSIONS', errors };
+  }
+  return { ok: true, httpsHosts, localLoopback };
+}
+
+function sanitizeNetHeaders(rawHeaders) {
+  const clean = {};
+  if (!rawHeaders || typeof rawHeaders !== 'object') return clean;
+  const entries = Array.isArray(rawHeaders) ? rawHeaders : Object.entries(rawHeaders);
+  for (let i = 0; i < entries.length; i += 1) {
+    const pair = entries[i];
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const rawName = String(pair[0] || '').trim();
+    const lower = rawName.toLowerCase();
+    if (!rawName || !/^[a-z0-9-]+$/i.test(rawName)) continue;
+    if (FORBIDDEN_REQUEST_HEADERS.includes(lower) || lower.startsWith('sec-fetch-') || lower.startsWith('proxy-')) {
+      continue;
+    }
+    const rawVal = String(pair[1] === undefined || pair[1] === null ? '' : pair[1]);
+    if (/[\r\n\0]/.test(rawVal)) continue;
+    clean[rawName] = rawVal;
+  }
+  return clean;
+}
+
+/**
+ * Classifies and authorizes a single `net.fetch(url, init)` target against a plugin's
+ * validated dual-key net policy.
+ *
+ * @param {string} rawUrl
+ * @param {object} init
+ * @param {{
+ *   httpsHosts?: string[],
+ *   localLoopback?: Array<number|string>,
+ *   namedLoopbackPorts?: Record<string, number>,
+ *   forbiddenHosts?: string[],
+ *   allowLoopback?: boolean,
+ * }} policy
+ */
+function evaluateNetRequest(rawUrl, init = {}, policy = {}) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    return { ok: false, reason: 'ERR_NET_INVALID_URL' };
+  }
+  let parsed;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch (_e) {
+    return { ok: false, reason: 'ERR_NET_INVALID_URL' };
+  }
+  if (parsed.username || parsed.password) {
+    return { ok: false, reason: 'ERR_NET_CREDENTIALS_IN_URL_FORBIDDEN' };
+  }
+
+  const method = String((init && init.method) || 'GET').trim().toUpperCase();
+  if (!ALLOWED_METHODS.has(method)) {
+    return { ok: false, reason: `ERR_NET_METHOD_FORBIDDEN:${method}` };
+  }
+
+  const headers = sanitizeNetHeaders(init && init.headers);
+  const rawHost = normalizeHostName(parsed.hostname);
+  const isLoopbackHost = rawHost === 'localhost' || rawHost === '127.0.0.1' || rawHost === '[::1]' || rawHost === '::1';
+
+  if (isLoopbackHost) {
+    if (policy.allowLoopback !== true) {
+      return { ok: false, reason: 'ERR_NET_LOOPBACK_NOT_SUPPORTED' };
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return { ok: false, reason: 'ERR_NET_SCHEME_FORBIDDEN' };
+    }
+    const explicitPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+    if (!Number.isInteger(explicitPort) || explicitPort < 1024 || explicitPort > 65535) {
+      return { ok: false, reason: 'ERR_NET_LOOPBACK_PORT_FORBIDDEN' };
+    }
+    const allowedPorts = new Set();
+    const declared = Array.isArray(policy.localLoopback) ? policy.localLoopback : [];
+    const namedMap = policy.namedLoopbackPorts && typeof policy.namedLoopbackPorts === 'object' ? policy.namedLoopbackPorts : {};
+    for (let i = 0; i < declared.length; i += 1) {
+      const entry = declared[i];
+      if (typeof entry === 'number' && Number.isInteger(entry) && entry >= 1024 && entry <= 65535) {
+        allowedPorts.add(entry);
+      } else if (typeof entry === 'string' && Object.prototype.hasOwnProperty.call(namedMap, entry)) {
+        const resolvedPort = Number(namedMap[entry]);
+        if (Number.isInteger(resolvedPort) && resolvedPort >= 1024 && resolvedPort <= 65535) {
+          allowedPorts.add(resolvedPort);
+        }
+      }
+    }
+    if (!allowedPorts.has(explicitPort)) {
+      return { ok: false, reason: `ERR_NET_LOOPBACK_PORT_NOT_ALLOWED:${explicitPort}` };
+    }
+    // Always normalize localhost / ::1 -> 127.0.0.1 literal, 0 redirects
+    const normalizedUrl = `${parsed.protocol}//127.0.0.1:${explicitPort}${parsed.pathname}${parsed.search}`;
+    return {
+      ok: true,
+      channel: 'localLoopback',
+      method,
+      url: normalizedUrl,
+      hostname: '127.0.0.1',
+      port: explicitPort,
+      protocol: parsed.protocol,
+      path: `${parsed.pathname}${parsed.search}`,
+      headers,
+      maxRedirects: MAX_LOOPBACK_REDIRECTS,
+      credentials: 'omit',
+    };
+  }
+
+  // Public HTTPS FQDN channel
+  if (parsed.protocol !== 'https:') {
+    return { ok: false, reason: 'ERR_NET_HTTPS_REQUIRED' };
+  }
+  const port = parsed.port ? Number(parsed.port) : 443;
+  if (!Number.isInteger(port) || port !== 443) {
+    return { ok: false, reason: 'ERR_NET_NON_STANDARD_HTTPS_PORT_FORBIDDEN' };
+  }
+  const forbiddenHosts = Array.isArray(policy.forbiddenHosts) ? policy.forbiddenHosts : [];
+  if (!isPublicFqdnHost(rawHost, { forbiddenHosts })) {
+    return { ok: false, reason: `ERR_NET_HOST_FORBIDDEN:${rawHost}` };
+  }
+  const allowSet = new Set(
+    (Array.isArray(policy.httpsHosts) ? policy.httpsHosts : []).map((h) => normalizeHostName(h)).filter(Boolean)
+  );
+  if (!allowSet.has(rawHost)) {
+    return { ok: false, reason: `ERR_NET_HOST_NOT_ALLOWED:${rawHost}` };
+  }
+
+  return {
+    ok: true,
+    channel: 'https',
+    method,
+    url: parsed.href,
+    hostname: rawHost,
+    port: 443,
+    protocol: 'https:',
+    path: `${parsed.pathname}${parsed.search}`,
+    headers,
+    maxRedirects: MAX_HTTPS_REDIRECTS,
+    credentials: 'omit',
+  };
+}
+
+module.exports = {
+  MAX_FQDN_LENGTH,
+  PUBLIC_FQDN_RE,
+  NAMED_LOOPBACK_TARGET_RE,
+  MAX_HTTPS_REDIRECTS,
+  MAX_LOOPBACK_REDIRECTS,
+  FORBIDDEN_INTERNAL_SUFFIXES,
+  FORBIDDEN_REQUEST_HEADERS,
+  normalizeHostName,
+  isPublicFqdnHost,
+  isPrivateOrReservedIp,
+  normalizeLoopbackTarget,
+  validateNetPermissions,
+  sanitizeNetHeaders,
+  evaluateNetRequest,
+};
+
+  },
   "./ignore-guard.js": function(module, exports, require) {
 'use strict';
 
@@ -1840,6 +2644,375 @@ module.exports = {
 };
 
   },
+  "./placement-engine.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Overlay Placement Engine for Tier-2 UI (v3.0.0 — SOLID #0).
+ *
+ * Computes deterministic, viewport-safe coordinates from a plugin's declarative
+ * `PlacementSpec`:
+ * - `zone`: `'anchor' | 'surface-center' | 'corner' | 'sheet' | 'drawer'`
+ * - Flip on primary axis when overflowing viewport (`bottom` <-> `top`, `right` <-> `left`)
+ * - Shift clamping on cross axis within safe viewport insets
+ * - Automatic mobile bottom-sheet switch when `viewport.width <= mobileBreakpointPx` (default 640)
+ * - Live `resize` + `scroll` repositioning with deterministic disposer cleanup.
+ */
+
+const DEFAULT_OFFSET_PX = 8;
+const DEFAULT_VIEWPORT_MARGIN_PX = 8;
+const DEFAULT_MOBILE_BREAKPOINT_PX = 640;
+
+function toFiniteNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function clamp(val, min, max) {
+  if (max < min) return min;
+  return Math.max(min, Math.min(max, val));
+}
+
+function parsePrefer(rawPrefer) {
+  const raw = typeof rawPrefer === 'string' ? rawPrefer.trim().toLowerCase() : 'bottom-start';
+  const [sideRaw, alignRaw] = raw.split('-');
+  const side = ['top', 'bottom', 'left', 'right'].includes(sideRaw) ? sideRaw : 'bottom';
+  const align = ['start', 'center', 'end'].includes(alignRaw) ? alignRaw : 'start';
+  return { side, align };
+}
+
+function computeAnchoredPosition({ anchorRect, boxWidth, boxHeight, bounds, prefer, offset, margin }) {
+  const { side, align } = parsePrefer(prefer);
+  const minLeft = bounds.left + margin;
+  const maxLeft = Math.max(minLeft, bounds.right - margin - boxWidth);
+  const minTop = bounds.top + margin;
+  const maxTop = Math.max(minTop, bounds.bottom - margin - boxHeight);
+
+  let resolvedSide = side;
+  let flipped = false;
+
+  const spaceTop = anchorRect.top - (bounds.top + margin);
+  const spaceBottom = bounds.bottom - margin - anchorRect.bottom;
+  const spaceLeft = anchorRect.left - (bounds.left + margin);
+  const spaceRight = bounds.right - margin - anchorRect.right;
+
+  if (side === 'bottom' && spaceBottom < boxHeight + offset && spaceTop > spaceBottom) {
+    resolvedSide = 'top';
+    flipped = true;
+  } else if (side === 'top' && spaceTop < boxHeight + offset && spaceBottom > spaceTop) {
+    resolvedSide = 'bottom';
+    flipped = true;
+  } else if (side === 'right' && spaceRight < boxWidth + offset && spaceLeft > spaceRight) {
+    resolvedSide = 'left';
+    flipped = true;
+  } else if (side === 'left' && spaceLeft < boxWidth + offset && spaceRight > spaceLeft) {
+    resolvedSide = 'right';
+    flipped = true;
+  }
+
+  let rawLeft = minLeft;
+  let rawTop = minTop;
+
+  if (resolvedSide === 'bottom' || resolvedSide === 'top') {
+    rawTop = resolvedSide === 'bottom' ? anchorRect.bottom + offset : anchorRect.top - offset - boxHeight;
+    if (align === 'end') {
+      rawLeft = anchorRect.right - boxWidth;
+    } else if (align === 'center') {
+      rawLeft = anchorRect.left + (anchorRect.width - boxWidth) / 2;
+    } else {
+      rawLeft = anchorRect.left;
+    }
+  } else {
+    rawLeft = resolvedSide === 'right' ? anchorRect.right + offset : anchorRect.left - offset - boxWidth;
+    if (align === 'end') {
+      rawTop = anchorRect.bottom - boxHeight;
+    } else if (align === 'center') {
+      rawTop = anchorRect.top + (anchorRect.height - boxHeight) / 2;
+    } else {
+      rawTop = anchorRect.top;
+    }
+  }
+
+  const left = clamp(rawLeft, minLeft, maxLeft);
+  const top = clamp(rawTop, minTop, maxTop);
+  const shifted = Math.abs(left - rawLeft) > 0.5 || Math.abs(top - rawTop) > 0.5;
+
+  return {
+    left: Math.round(left),
+    top: Math.round(top),
+    resolvedSide,
+    flipped,
+    shifted,
+  };
+}
+
+function createPlacementEngine(doc, win, { surfaceGeometry = null, uiAnchors = {} } = {}) {
+  function resolveAnchorElement(spec) {
+    if (!spec || typeof spec !== 'object') return null;
+    if (spec.anchorEl && typeof spec.anchorEl.getBoundingClientRect === 'function') {
+      return spec.anchorEl;
+    }
+    if (typeof spec.anchorKey === 'string' && spec.anchorKey && uiAnchors && Array.isArray(uiAnchors[spec.anchorKey])) {
+      const sels = uiAnchors[spec.anchorKey];
+      for (let i = 0; i < sels.length; i += 1) {
+        try {
+          const el = doc && typeof doc.querySelector === 'function' ? doc.querySelector(sels[i]) : null;
+          if (el && typeof el.getBoundingClientRect === 'function') return el;
+        } catch (_e) {}
+      }
+    }
+    return null;
+  }
+
+  function getSurfaceRect(spec, anchorEl) {
+    if (surfaceGeometry && typeof surfaceGeometry.getSurfaceBounds === 'function') {
+      const surfaceArg = spec && typeof spec.surface === 'string' && spec.surface ? spec.surface : 'auto';
+      const b = surfaceGeometry.getSurfaceBounds(anchorEl ? { surface: surfaceArg, anchorEl } : surfaceArg);
+      if (b && b.viewport && b.viewport.width > 0 && b.viewport.height > 0) {
+        return b;
+      }
+    }
+    const vw = toFiniteNumber(win && win.innerWidth, 1280) || 1280;
+    const vh = toFiniteNumber(win && win.innerHeight, 800) || 800;
+    return {
+      surfaceId: 'viewport',
+      left: 0,
+      top: 0,
+      right: vw,
+      bottom: vh,
+      width: vw,
+      height: vh,
+      centerX: vw / 2,
+      centerY: vh / 2,
+      viewport: { width: vw, height: vh },
+    };
+  }
+
+  function computePlacement(spec = {}, overlaySize = {}) {
+    const requestedZone = typeof spec.zone === 'string' ? spec.zone.trim().toLowerCase() : 'surface-center';
+    const margin = Math.max(0, toFiniteNumber(spec.margin, DEFAULT_VIEWPORT_MARGIN_PX));
+    const offset = Math.max(0, toFiniteNumber(spec.offset, DEFAULT_OFFSET_PX));
+    const mobileBp = Math.max(0, toFiniteNumber(spec.mobileBreakpointPx, DEFAULT_MOBILE_BREAKPOINT_PX));
+    const anchorEl = resolveAnchorElement(spec);
+    const bounds = getSurfaceRect(spec, anchorEl);
+    const vw = bounds.viewport.width;
+    const vh = bounds.viewport.height;
+
+    const maxW = Math.max(200, Math.min(toFiniteNumber(spec.maxWidth, vw - margin * 2), vw - margin * 2));
+    const maxH = Math.max(120, Math.min(toFiniteNumber(spec.maxHeight, vh - margin * 2), vh - margin * 2));
+    const explicitW = Number.isFinite(Number(spec.width)) && Number(spec.width) > 0 ? Number(spec.width) : null;
+    const explicitH = Number.isFinite(Number(spec.height)) && Number(spec.height) > 0 ? Number(spec.height) : null;
+    const boxWidth = Math.min(maxW, Math.max(160, explicitW || toFiniteNumber(overlaySize.width, 320)));
+    const boxHeight = Math.min(maxH, Math.max(80, explicitH || toFiniteNumber(overlaySize.height, 220)));
+
+    // Responsive mobile bottom-sheet auto-switch
+    const isMobileViewport = vw > 0 && vw <= mobileBp && spec.disableMobileSheet !== true;
+    if (requestedZone === 'sheet' || (isMobileViewport && (requestedZone === 'anchor' || requestedZone === 'corner' || requestedZone === 'drawer'))) {
+      return Object.freeze({
+        zone: 'sheet',
+        requestedZone,
+        autoMobileSheet: requestedZone !== 'sheet',
+        surfaceId: bounds.surfaceId,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        top: null,
+        width: vw,
+        maxWidth: vw,
+        maxHeight: Math.round(vh * 0.85),
+        flipped: false,
+        shifted: false,
+      });
+    }
+
+    if (requestedZone === 'drawer') {
+      const side = spec.side === 'left' ? 'left' : 'right';
+      const drawerWidth = Math.min(Math.max(260, toFiniteNumber(spec.width, 380)), Math.max(260, vw - 24));
+      return Object.freeze({
+        zone: 'drawer',
+        requestedZone,
+        autoMobileSheet: false,
+        side,
+        surfaceId: bounds.surfaceId,
+        left: side === 'left' ? Math.round(bounds.left) : Math.round(bounds.right - drawerWidth),
+        top: Math.round(bounds.top),
+        width: Math.round(drawerWidth),
+        height: Math.round(bounds.height),
+        maxWidth: Math.round(drawerWidth),
+        maxHeight: Math.round(bounds.height),
+        flipped: false,
+        shifted: false,
+      });
+    }
+
+    if (requestedZone === 'corner') {
+      const corner = typeof spec.corner === 'string' ? spec.corner.toLowerCase() : 'bottom-right';
+      const isLeft = corner.includes('left');
+      const isTop = corner.includes('top');
+      const left = isLeft ? bounds.left + margin : bounds.right - margin - boxWidth;
+      const top = isTop ? bounds.top + margin : bounds.bottom - margin - boxHeight;
+      return Object.freeze({
+        zone: 'corner',
+        requestedZone,
+        autoMobileSheet: false,
+        corner,
+        surfaceId: bounds.surfaceId,
+        left: Math.round(clamp(left, bounds.left + margin, bounds.right - margin - boxWidth)),
+        top: Math.round(clamp(top, bounds.top + margin, bounds.bottom - margin - boxHeight)),
+        maxWidth: Math.round(maxW),
+        maxHeight: Math.round(maxH),
+        flipped: false,
+        shifted: false,
+      });
+    }
+
+    if (requestedZone === 'anchor' && anchorEl) {
+      let rect = null;
+      try {
+        rect = anchorEl.getBoundingClientRect();
+      } catch (_e) {}
+      if (rect && Number.isFinite(Number(rect.left)) && Number.isFinite(Number(rect.top))) {
+        const anchorRect = {
+          left: Number(rect.left),
+          top: Number(rect.top),
+          width: Math.max(0, Number(rect.width) || 0),
+          height: Math.max(0, Number(rect.height) || 0),
+          right: Number.isFinite(Number(rect.right)) ? Number(rect.right) : Number(rect.left) + (Number(rect.width) || 0),
+          bottom: Number.isFinite(Number(rect.bottom)) ? Number(rect.bottom) : Number(rect.top) + (Number(rect.height) || 0),
+        };
+        const pos = computeAnchoredPosition({
+          anchorRect,
+          boxWidth,
+          boxHeight,
+          bounds,
+          prefer: spec.prefer,
+          offset,
+          margin,
+        });
+        return Object.freeze({
+          zone: 'anchor',
+          requestedZone,
+          autoMobileSheet: false,
+          surfaceId: bounds.surfaceId,
+          left: pos.left,
+          top: pos.top,
+          width: explicitW ? Math.round(boxWidth) : undefined,
+          resolvedSide: pos.resolvedSide,
+          flipped: pos.flipped,
+          shifted: pos.shifted,
+          maxWidth: Math.round(maxW),
+          maxHeight: Math.round(maxH),
+        });
+      }
+    }
+
+    // Default: surface-center
+    const centerLeft = clamp(bounds.centerX - boxWidth / 2, bounds.left + margin, bounds.right - margin - boxWidth);
+    const centerTop = clamp(bounds.centerY - boxHeight / 2, bounds.top + margin, bounds.bottom - margin - boxHeight);
+    return Object.freeze({
+      zone: 'surface-center',
+      requestedZone,
+      autoMobileSheet: false,
+      surfaceId: bounds.surfaceId,
+      left: Math.round(centerLeft),
+      top: Math.round(centerTop),
+      maxWidth: Math.round(maxW),
+      maxHeight: Math.round(maxH),
+      flipped: false,
+      shifted: false,
+    });
+  }
+
+  function applyPlacementStyles(el, placement) {
+    if (!el || !el.style || !placement) return placement;
+    el.style.position = 'fixed';
+    el.style.margin = '0';
+    el.setAttribute('data-addon-host-placement-zone', placement.zone);
+    if (placement.zone === 'sheet') {
+      el.style.left = '0px';
+      el.style.right = '0px';
+      el.style.bottom = '0px';
+      el.style.top = 'auto';
+      el.style.width = '100vw';
+      el.style.maxWidth = '100vw';
+      el.style.maxHeight = `${placement.maxHeight}px`;
+    } else {
+      el.style.left = `${placement.left}px`;
+      el.style.top = `${placement.top}px`;
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+      if (placement.width) {
+        el.style.width = `${placement.width}px`;
+      }
+      if (placement.zone === 'drawer' && placement.height) {
+        el.style.height = `${placement.height}px`;
+      }
+      el.style.maxWidth = `${placement.maxWidth}px`;
+      el.style.maxHeight = `${placement.maxHeight}px`;
+    }
+    return placement;
+  }
+
+  function trackElementPlacement(el, spec = {}, onUpdate = null) {
+    let disposed = false;
+    const sync = () => {
+      if (disposed) return null;
+      let measured = {};
+      try {
+        if (el && typeof el.getBoundingClientRect === 'function') {
+          const r = el.getBoundingClientRect();
+          if (r && r.width > 0 && r.height > 0) {
+            measured = { width: r.width, height: r.height };
+          }
+        }
+      } catch (_e) {}
+      const placement = computePlacement(spec, measured);
+      applyPlacementStyles(el, placement);
+      if (typeof onUpdate === 'function') {
+        try {
+          onUpdate(placement);
+        } catch (_e) {}
+      }
+      return placement;
+    };
+
+    const initial = sync();
+    if (win && typeof win.addEventListener === 'function') {
+      win.addEventListener('resize', sync);
+      win.addEventListener('scroll', sync, true);
+    }
+
+    return Object.freeze({
+      initial,
+      reposition: sync,
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        if (win && typeof win.removeEventListener === 'function') {
+          try {
+            win.removeEventListener('resize', sync);
+            win.removeEventListener('scroll', sync, true);
+          } catch (_e) {}
+        }
+      },
+    });
+  }
+
+  return Object.freeze({
+    computePlacement,
+    applyPlacementStyles,
+    trackElementPlacement,
+  });
+}
+
+module.exports = {
+  DEFAULT_OFFSET_PX,
+  DEFAULT_VIEWPORT_MARGIN_PX,
+  DEFAULT_MOBILE_BREAKPOINT_PX,
+  createPlacementEngine,
+};
+
+  },
   "./modal-portal.js": function(module, exports, require) {
 'use strict';
 
@@ -2475,6 +3648,2937 @@ module.exports = {
 };
 
   },
+  "./theme-i18n.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Theme & i18n Provider for AddonContextV3 (v3.0.0 — SOLID #0).
+ *
+ * - Provides semantic `--ag-*` CSS custom properties synced to dark/light mode.
+ * - Detects active locale from `document.documentElement.lang` / `navigator.language`.
+ * - Zero vendor literals, zero Node built-ins.
+ */
+
+const _ObjectFreeze = Object.freeze;
+const _ObjectKeys = Object.keys;
+const _Set = Set;
+const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
+const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
+const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
+const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
+
+const DARK_TOKENS = _ObjectFreeze({
+  '--ag-bg': '#0f131a',
+  '--ag-surface': '#161b24',
+  '--ag-surface-elevated': '#1e2532',
+  '--ag-border': 'rgba(255, 255, 255, 0.14)',
+  '--ag-text': '#f0f6fc',
+  '--ag-text-muted': '#8b949e',
+  '--ag-accent': '#38bdf8',
+  '--ag-accent-fg': '#082f49',
+  '--ag-danger': '#f87171',
+  '--ag-success': '#4ade80',
+  '--ag-warning': '#fbbf24',
+  '--ag-radius': '10px',
+  '--ag-shadow': '0 12px 32px rgba(0, 0, 0, 0.52)',
+  '--ag-font': 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif',
+});
+
+const LIGHT_TOKENS = Object.freeze({
+  '--ag-bg': '#ffffff',
+  '--ag-surface': '#f8fafc',
+  '--ag-surface-elevated': '#ffffff',
+  '--ag-border': 'rgba(15, 23, 42, 0.14)',
+  '--ag-text': '#0f172a',
+  '--ag-text-muted': '#475569',
+  '--ag-accent': '#0284c7',
+  '--ag-accent-fg': '#ffffff',
+  '--ag-danger': '#dc2626',
+  '--ag-success': '#16a34a',
+  '--ag-warning': '#d97706',
+  '--ag-radius': '10px',
+  '--ag-shadow': '0 12px 32px rgba(15, 23, 42, 0.16)',
+  '--ag-font': 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif',
+});
+
+function buildTokenCss(mode) {
+  const tokens = mode === 'light' ? LIGHT_TOKENS : DARK_TOKENS;
+  const keys = _ObjectKeys(tokens);
+  const lines = [];
+  for (let i = 0; i < keys.length; i += 1) {
+    lines[lines.length] = `  ${keys[i]}: ${tokens[keys[i]]};`;
+  }
+  return `:host {\n${lines.join('\n')}\n}`;
+}
+
+function createThemeAndI18n(doc, win) {
+  const listeners = new _Set();
+
+  function detectMode() {
+    try {
+      const docEl = doc && doc.documentElement;
+      const explicit =
+        docEl && typeof docEl.getAttribute === 'function'
+          ? String(docEl.getAttribute('data-theme') || docEl.getAttribute('data-color-scheme') || '').toLowerCase()
+          : '';
+      if (explicit === 'light' || explicit === 'dark') return explicit;
+      if (docEl && docEl.className && typeof docEl.className === 'string') {
+        if (/\blight\b/i.test(docEl.className) && !/\bdark\b/i.test(docEl.className)) return 'light';
+        if (/\bdark\b/i.test(docEl.className)) return 'dark';
+      }
+      if (win && typeof win.matchMedia === 'function') {
+        const mq = win.matchMedia('(prefers-color-scheme: light)');
+        if (mq && mq.matches) return 'light';
+      }
+    } catch (_e) {}
+    return 'dark';
+  }
+
+  let currentMode = detectMode();
+  let mediaQuery = null;
+  const handleMediaChange = () => {
+    const next = detectMode();
+    if (next === currentMode) return;
+    currentMode = next;
+    const snap = getSnapshot();
+    _SetForEach(listeners, (cb) => {
+      try {
+        cb(snap);
+      } catch (_e) {}
+    });
+  };
+
+  try {
+    if (win && typeof win.matchMedia === 'function') {
+      mediaQuery = win.matchMedia('(prefers-color-scheme: light)');
+      if (mediaQuery && typeof mediaQuery.addEventListener === 'function') {
+        mediaQuery.addEventListener('change', handleMediaChange);
+      }
+    }
+  } catch (_e) {}
+
+  function getSnapshot() {
+    const mode = detectMode();
+    currentMode = mode;
+    return _ObjectFreeze({
+      mode,
+      tokens: mode === 'light' ? LIGHT_TOKENS : DARK_TOKENS,
+    });
+  }
+
+  function getLocale() {
+    try {
+      const docLang =
+        doc && doc.documentElement && typeof doc.documentElement.lang === 'string'
+          ? doc.documentElement.lang.trim()
+          : '';
+      if (docLang) return docLang;
+      const navLang =
+        win && win.navigator && typeof win.navigator.language === 'string'
+          ? win.navigator.language.trim()
+          : '';
+      if (navLang) return navLang;
+    } catch (_e) {}
+    return 'en';
+  }
+
+  function translate(key, dictOrParams = null, params = null) {
+    const locale = getLocale().toLowerCase();
+    const shortLocale = locale.split('-')[0];
+    let template = String(key || '');
+    let vars = params;
+    if (dictOrParams && typeof dictOrParams === 'object' && !Array.isArray(dictOrParams)) {
+      if (typeof dictOrParams[locale] === 'string') {
+        template = dictOrParams[locale];
+      } else if (typeof dictOrParams[shortLocale] === 'string') {
+        template = dictOrParams[shortLocale];
+      } else if (typeof dictOrParams.en === 'string') {
+        template = dictOrParams.en;
+      } else {
+        vars = dictOrParams;
+      }
+    }
+    if (vars && typeof vars === 'object') {
+      template = template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, k) => {
+        if (Object.prototype.hasOwnProperty.call(vars, k) && vars[k] !== undefined && vars[k] !== null) {
+          return String(vars[k]);
+        }
+        return '';
+      });
+    }
+    return template;
+  }
+
+  function createThemeHandle(registerDisposer) {
+    return _ObjectFreeze({
+      getMode: () => getSnapshot().mode,
+      getTokens: () => getSnapshot().tokens,
+      getTokenCss: () => buildTokenCss(getSnapshot().mode),
+      onDidChange(cb) {
+        if (typeof cb !== 'function') throw new Error('ERR_INVALID_THEME_LISTENER');
+        _SetAdd(listeners, cb);
+        const unsub = () => _SetDelete(listeners, cb);
+        if (typeof registerDisposer === 'function') registerDisposer(unsub);
+        return unsub;
+      },
+    });
+  }
+
+  function createI18nHandle() {
+    return _ObjectFreeze({
+      getLocale,
+      t: translate,
+    });
+  }
+
+  function dispose() {
+    _SetClear(listeners);
+    try {
+      if (mediaQuery && typeof mediaQuery.removeEventListener === 'function') {
+        mediaQuery.removeEventListener('change', handleMediaChange);
+      }
+    } catch (_e) {}
+  }
+
+  return _ObjectFreeze({
+    getSnapshot,
+    buildTokenCss,
+    getLocale,
+    t: translate,
+    createThemeHandle,
+    createI18nHandle,
+    dispose,
+  });
+}
+
+module.exports = {
+  DARK_TOKENS,
+  LIGHT_TOKENS,
+  buildTokenCss,
+  createThemeAndI18n,
+};
+
+  },
+  "./ui-schema-renderer.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Tier-2 Declarative UI Schema Renderer & ID-based Patch Engine (v3.0.0 — SOLID #0).
+ *
+ * - Strictly ZERO HTML sinks (`innerHTML`, `outerHTML`, `insertAdjacentHTML` = 0).
+ * - Strictly ZERO `eval` / `new Function`.
+ * - Renders validated 16-primitive JSON trees using `--ag-*` semantic CSS tokens.
+ * - Supports static JSON `visibleWhen` / `disabledWhen` predicates evaluated against current state.
+ * - Supports `update(nextTree, nextState)` with ID-based in-place DOM patching so focused inputs
+ *   and scroll positions are preserved across updates.
+ * - Enforces `ev.isTrusted !== false` on user actions and IME-safe Enter handling.
+ */
+
+const {
+  validateUiTree,
+  evaluateUiCondition,
+  readStateField,
+} = require('../../core/ui-schema-validator');
+
+const SCHEMA_UI_CSS = `
+:host, .ag-ui-shell {
+  box-sizing: border-box;
+  font-family: var(--ag-font, system-ui, -apple-system, sans-serif);
+  color: var(--ag-text, #f0f6fc);
+  font-size: 13px;
+  line-height: 1.45;
+}
+*, *::before, *::after { box-sizing: border-box; }
+.ag-ui-shell {
+  background: var(--ag-surface, #161b24);
+  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.14));
+  border-radius: var(--ag-radius, 10px);
+  box-shadow: var(--ag-shadow, 0 12px 32px rgba(0, 0, 0, 0.52));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  max-height: inherit;
+}
+.ag-ui-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--ag-border, rgba(255, 255, 255, 0.14));
+}
+.ag-ui-header-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ag-ui-title { font-weight: 700; font-size: 14px; color: var(--ag-text, #f0f6fc); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-ui-attribution {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--ag-accent, #38bdf8);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  flex-shrink: 0;
+}
+.ag-ui-close {
+  appearance: none;
+  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.14));
+  background: transparent;
+  color: var(--ag-text-muted, #8b949e);
+  border-radius: 6px;
+  min-width: 28px;
+  min-height: 28px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.ag-ui-close:hover { color: var(--ag-text, #f0f6fc); }
+.ag-ui-body { padding: 12px 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.ag-stack { display: flex; flex-direction: column; gap: 8px; }
+.ag-row { display: flex; flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ag-section { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.12)); border-radius: 8px; background: var(--ag-surface-elevated, rgba(255,255,255,0.03)); }
+.ag-section-title { font-weight: 600; font-size: 12px; color: var(--ag-text-muted, #8b949e); text-transform: uppercase; letter-spacing: 0.03em; }
+.ag-heading { margin: 0; font-weight: 700; color: var(--ag-text, #f0f6fc); }
+.ag-text { margin: 0; color: var(--ag-text, #f0f6fc); }
+.ag-text[data-tone="muted"] { color: var(--ag-text-muted, #8b949e); font-size: 12px; }
+.ag-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; background: rgba(148, 163, 184, 0.18); color: var(--ag-text, #f0f6fc); }
+.ag-badge[data-variant="success"] { background: rgba(74, 222, 128, 0.16); color: var(--ag-success, #4ade80); }
+.ag-badge[data-variant="warning"] { background: rgba(251, 191, 36, 0.16); color: var(--ag-warning, #fbbf24); }
+.ag-badge[data-variant="danger"] { background: rgba(248, 113, 113, 0.16); color: var(--ag-danger, #f87171); }
+.ag-divider { border: 0; border-top: 1px solid var(--ag-border, rgba(255, 255, 255, 0.12)); margin: 4px 0; }
+.ag-alert { padding: 8px 10px; border-radius: 8px; font-size: 12px; border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.16)); }
+.ag-alert[data-variant="danger"] { border-color: var(--ag-danger, #f87171); color: var(--ag-danger, #f87171); }
+.ag-alert[data-variant="warning"] { border-color: var(--ag-warning, #fbbf24); color: var(--ag-warning, #fbbf24); }
+.ag-alert[data-variant="success"] { border-color: var(--ag-success, #4ade80); color: var(--ag-success, #4ade80); }
+.ag-btn {
+  appearance: none;
+  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.18));
+  background: var(--ag-surface-elevated, rgba(255, 255, 255, 0.08));
+  color: var(--ag-text, #f0f6fc);
+  border-radius: 7px;
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ag-btn[data-variant="primary"] { background: var(--ag-accent, #38bdf8); color: var(--ag-accent-fg, #082f49); border-color: transparent; }
+.ag-btn[data-variant="danger"] { background: var(--ag-danger, #f87171); color: #ffffff; border-color: transparent; }
+.ag-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ag-field { display: flex; flex-direction: column; gap: 4px; }
+.ag-field-label { font-size: 12px; font-weight: 600; color: var(--ag-text, #f0f6fc); }
+.ag-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; }
+.ag-input, .ag-textarea, .ag-select {
+  width: 100%;
+  background: var(--ag-bg, #0f131a);
+  color: var(--ag-text, #f0f6fc);
+  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.18));
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.ag-progress { width: 100%; height: 8px; }
+.ag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ag-list-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.1)); }
+[hidden] { display: none !important; }
+`;
+
+function setStateField(state, fieldPath, nextVal) {
+  if (!state || typeof state !== 'object' || typeof fieldPath !== 'string' || !fieldPath) return;
+  const parts = fieldPath.split('.');
+  let cur = state;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const k = parts[i];
+    if (!k || k === '__proto__' || k === 'constructor' || k === 'prototype') return;
+    if (!cur[k] || typeof cur[k] !== 'object') cur[k] = {};
+    cur = cur[k];
+  }
+  const last = parts[parts.length - 1];
+  if (!last || last === '__proto__' || last === 'constructor' || last === 'prototype') return;
+  cur[last] = nextVal;
+}
+
+function createSchemaUiController(doc, containerEl, {
+  tree,
+  state = {},
+  onChange = null,
+  onAction = null,
+} = {}) {
+  const validation = validateUiTree(tree);
+  if (!validation.ok) {
+    throw new Error(`${validation.reason}: ${(validation.errors || []).join('; ')}`);
+  }
+
+  let currentTree = tree;
+  let currentState = state && typeof state === 'object' ? { ...state } : {};
+  const elementsById = new Map(); // nodeId -> { nodeType, wrapperEl, controlEl, labelEl }
+
+  function emitChange(field, value) {
+    if (field) {
+      setStateField(currentState, field, value);
+    }
+    if (typeof onChange === 'function') {
+      try {
+        onChange({ field, value, state: { ...currentState } });
+      } catch (_e) {}
+    }
+    // Re-evaluate visibleWhen / disabledWhen across all mounted nodes in place
+    syncVisibilityAndDisabled(currentTree);
+  }
+
+  function emitAction(actionId, payload) {
+    if (typeof onAction === 'function') {
+      try {
+        onAction({ actionId, payload, state: { ...currentState } });
+      } catch (_e) {}
+    }
+  }
+
+  function applyCommonFlags(wrapperEl, controlEl, node) {
+    const visible = node.visibleWhen ? evaluateUiCondition(node.visibleWhen, currentState) : true;
+    const disabled = Boolean(node.disabled) || (node.disabledWhen ? evaluateUiCondition(node.disabledWhen, currentState) : false);
+    if (visible) {
+      if (typeof wrapperEl.removeAttribute === 'function') wrapperEl.removeAttribute('hidden');
+      wrapperEl.hidden = false;
+    } else {
+      if (typeof wrapperEl.setAttribute === 'function') wrapperEl.setAttribute('hidden', 'true');
+      wrapperEl.hidden = true;
+    }
+    if (controlEl && 'disabled' in controlEl) {
+      controlEl.disabled = disabled;
+    }
+  }
+
+  function syncVisibilityAndDisabled(node) {
+    if (!node || typeof node !== 'object') return;
+    if (node.id && elementsById.has(node.id)) {
+      const ref = elementsById.get(node.id);
+      applyCommonFlags(ref.wrapperEl, ref.controlEl, node);
+    }
+    if (Array.isArray(node.children)) {
+      for (let i = 0; i < node.children.length; i += 1) {
+        syncVisibilityAndDisabled(node.children[i]);
+      }
+    }
+  }
+
+  function patchExistingNode(ref, node) {
+    if (!ref || ref.nodeType !== node.type) return false;
+    applyCommonFlags(ref.wrapperEl, ref.controlEl, node);
+    const val = node.field ? readStateField(currentState, node.field) : node.value;
+
+    switch (node.type) {
+      case 'heading':
+      case 'text':
+      case 'badge':
+      case 'alert':
+        ref.wrapperEl.textContent = String(node.text !== undefined ? node.text : node.label || '');
+        if (node.variant) ref.wrapperEl.setAttribute('data-variant', String(node.variant));
+        if (node.tone) ref.wrapperEl.setAttribute('data-tone', String(node.tone));
+        return true;
+      case 'button':
+        ref.controlEl.textContent = String(node.label || node.text || 'Action');
+        if (node.variant) ref.controlEl.setAttribute('data-variant', String(node.variant));
+        return true;
+      case 'toggle':
+        if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
+        if (ref.controlEl) ref.controlEl.checked = Boolean(val);
+        return true;
+      case 'input':
+      case 'textarea':
+        if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
+        if (ref.controlEl && doc.activeElement !== ref.controlEl) {
+          ref.controlEl.value = val !== undefined && val !== null ? String(val) : '';
+        }
+        if (node.placeholder !== undefined && ref.controlEl) {
+          ref.controlEl.setAttribute('placeholder', String(node.placeholder));
+        }
+        return true;
+      case 'select':
+        if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
+        if (ref.controlEl) {
+          // Rebuild options only when changed
+          const optSig = JSON.stringify(node.options || []);
+          if (ref.optSig !== optSig) {
+            while (ref.controlEl.firstChild) ref.controlEl.removeChild(ref.controlEl.firstChild);
+            const opts = Array.isArray(node.options) ? node.options : [];
+            for (let i = 0; i < opts.length; i += 1) {
+              const o = opts[i];
+              const optEl = doc.createElement('option');
+              optEl.value = String(o && typeof o === 'object' ? o.value : o);
+              optEl.textContent = String(o && typeof o === 'object' ? o.label || o.value : o);
+              ref.controlEl.appendChild(optEl);
+            }
+            ref.optSig = optSig;
+          }
+          if (val !== undefined && val !== null) ref.controlEl.value = String(val);
+        }
+        return true;
+      case 'slider':
+        if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
+        if (ref.controlEl && val !== undefined && val !== null) {
+          ref.controlEl.value = String(val);
+        }
+        return true;
+      case 'progress':
+        if (ref.controlEl) {
+          ref.controlEl.value = Number.isFinite(Number(node.value)) ? Number(node.value) : 0;
+          ref.controlEl.max = Number.isFinite(Number(node.max)) ? Number(node.max) : 100;
+        }
+        return true;
+      case 'section':
+        if (ref.labelEl && node.title !== undefined) {
+          ref.labelEl.textContent = String(node.title);
+        }
+        return true;
+      default:
+        return true;
+    }
+  }
+
+  function buildNodeElement(node) {
+    let wrapperEl = null;
+    let controlEl = null;
+    let labelEl = null;
+    let childrenMountEl = null;
+    let optSig = null;
+    const stateVal = node.field ? readStateField(currentState, node.field) : node.value;
+
+    switch (node.type) {
+      case 'stack': {
+        wrapperEl = doc.createElement('div');
+        wrapperEl.className = 'ag-stack';
+        childrenMountEl = wrapperEl;
+        break;
+      }
+      case 'row': {
+        wrapperEl = doc.createElement('div');
+        wrapperEl.className = 'ag-row';
+        childrenMountEl = wrapperEl;
+        break;
+      }
+      case 'section': {
+        wrapperEl = doc.createElement('section');
+        wrapperEl.className = 'ag-section';
+        if (node.title) {
+          labelEl = doc.createElement('div');
+          labelEl.className = 'ag-section-title';
+          labelEl.textContent = String(node.title);
+          wrapperEl.appendChild(labelEl);
+        }
+        childrenMountEl = wrapperEl;
+        break;
+      }
+      case 'heading': {
+        const level = Number.isInteger(node.level) && node.level >= 1 && node.level <= 6 ? node.level : 3;
+        wrapperEl = doc.createElement(`h${level}`);
+        wrapperEl.className = 'ag-heading';
+        wrapperEl.textContent = String(node.text || '');
+        break;
+      }
+      case 'text': {
+        wrapperEl = doc.createElement('p');
+        wrapperEl.className = 'ag-text';
+        if (node.tone) wrapperEl.setAttribute('data-tone', String(node.tone));
+        wrapperEl.textContent = String(node.text || '');
+        break;
+      }
+      case 'badge': {
+        wrapperEl = doc.createElement('span');
+        wrapperEl.className = 'ag-badge';
+        if (node.variant) wrapperEl.setAttribute('data-variant', String(node.variant));
+        wrapperEl.textContent = String(node.text || '');
+        break;
+      }
+      case 'divider': {
+        wrapperEl = doc.createElement('hr');
+        wrapperEl.className = 'ag-divider';
+        break;
+      }
+      case 'alert': {
+        wrapperEl = doc.createElement('div');
+        wrapperEl.className = 'ag-alert';
+        wrapperEl.setAttribute('role', 'status');
+        if (node.variant) wrapperEl.setAttribute('data-variant', String(node.variant));
+        wrapperEl.textContent = String(node.text || '');
+        break;
+      }
+      case 'button': {
+        controlEl = doc.createElement('button');
+        controlEl.type = 'button';
+        controlEl.className = 'ag-btn';
+        if (node.variant) controlEl.setAttribute('data-variant', String(node.variant));
+        controlEl.textContent = String(node.label || node.text || 'Action');
+        controlEl.addEventListener('click', (ev) => {
+          if (ev && ev.isTrusted === false) return;
+          emitAction(node.actionId || node.id || 'action', node.payload);
+        });
+        wrapperEl = controlEl;
+        break;
+      }
+      case 'toggle': {
+        wrapperEl = doc.createElement('label');
+        wrapperEl.className = 'ag-toggle-row';
+        labelEl = doc.createElement('span');
+        labelEl.className = 'ag-field-label';
+        labelEl.textContent = String(node.label || '');
+        controlEl = doc.createElement('input');
+        controlEl.type = 'checkbox';
+        controlEl.checked = Boolean(stateVal);
+        controlEl.addEventListener('change', (ev) => {
+          if (ev && ev.isTrusted === false) return;
+          emitChange(node.field || node.id, Boolean(controlEl.checked));
+        });
+        wrapperEl.appendChild(labelEl);
+        wrapperEl.appendChild(controlEl);
+        break;
+      }
+      case 'input': {
+        wrapperEl = doc.createElement('label');
+        wrapperEl.className = 'ag-field';
+        if (node.label) {
+          labelEl = doc.createElement('span');
+          labelEl.className = 'ag-field-label';
+          labelEl.textContent = String(node.label);
+          wrapperEl.appendChild(labelEl);
+        }
+        controlEl = doc.createElement('input');
+        controlEl.type = node.inputType === 'password' || node.inputType === 'number' || node.inputType === 'url' ? node.inputType : 'text';
+        controlEl.className = 'ag-input';
+        if (node.placeholder) controlEl.setAttribute('placeholder', String(node.placeholder));
+        controlEl.value = stateVal !== undefined && stateVal !== null ? String(stateVal) : '';
+        controlEl.addEventListener('input', () => {
+          const v = controlEl.type === 'number' && controlEl.value !== '' ? Number(controlEl.value) : controlEl.value;
+          emitChange(node.field || node.id, v);
+        });
+        controlEl.addEventListener('keydown', (ev) => {
+          if (!ev || ev.key !== 'Enter') return;
+          if (ev.isComposing || ev.keyCode === 229) return;
+          if (node.submitActionId) {
+            emitAction(node.submitActionId, { value: controlEl.value });
+          }
+        });
+        wrapperEl.appendChild(controlEl);
+        break;
+      }
+      case 'textarea': {
+        wrapperEl = doc.createElement('label');
+        wrapperEl.className = 'ag-field';
+        if (node.label) {
+          labelEl = doc.createElement('span');
+          labelEl.className = 'ag-field-label';
+          labelEl.textContent = String(node.label);
+          wrapperEl.appendChild(labelEl);
+        }
+        controlEl = doc.createElement('textarea');
+        controlEl.className = 'ag-textarea';
+        if (Number.isInteger(node.rows) && node.rows > 0) controlEl.setAttribute('rows', String(node.rows));
+        if (node.placeholder) controlEl.setAttribute('placeholder', String(node.placeholder));
+        controlEl.value = stateVal !== undefined && stateVal !== null ? String(stateVal) : '';
+        controlEl.addEventListener('input', () => {
+          emitChange(node.field || node.id, controlEl.value);
+        });
+        wrapperEl.appendChild(controlEl);
+        break;
+      }
+      case 'select': {
+        wrapperEl = doc.createElement('label');
+        wrapperEl.className = 'ag-field';
+        if (node.label) {
+          labelEl = doc.createElement('span');
+          labelEl.className = 'ag-field-label';
+          labelEl.textContent = String(node.label);
+          wrapperEl.appendChild(labelEl);
+        }
+        controlEl = doc.createElement('select');
+        controlEl.className = 'ag-select';
+        const opts = Array.isArray(node.options) ? node.options : [];
+        optSig = JSON.stringify(opts);
+        for (let i = 0; i < opts.length; i += 1) {
+          const o = opts[i];
+          const optEl = doc.createElement('option');
+          optEl.value = String(o && typeof o === 'object' ? o.value : o);
+          optEl.textContent = String(o && typeof o === 'object' ? o.label || o.value : o);
+          controlEl.appendChild(optEl);
+        }
+        if (stateVal !== undefined && stateVal !== null) controlEl.value = String(stateVal);
+        controlEl.addEventListener('change', (ev) => {
+          if (ev && ev.isTrusted === false) return;
+          emitChange(node.field || node.id, controlEl.value);
+        });
+        wrapperEl.appendChild(controlEl);
+        break;
+      }
+      case 'slider': {
+        wrapperEl = doc.createElement('label');
+        wrapperEl.className = 'ag-field';
+        if (node.label) {
+          labelEl = doc.createElement('span');
+          labelEl.className = 'ag-field-label';
+          labelEl.textContent = String(node.label);
+          wrapperEl.appendChild(labelEl);
+        }
+        controlEl = doc.createElement('input');
+        controlEl.type = 'range';
+        if (node.min !== undefined) controlEl.setAttribute('min', String(node.min));
+        if (node.max !== undefined) controlEl.setAttribute('max', String(node.max));
+        if (node.step !== undefined) controlEl.setAttribute('step', String(node.step));
+        controlEl.value = stateVal !== undefined && stateVal !== null ? String(stateVal) : String(node.min || 0);
+        controlEl.addEventListener('input', () => {
+          emitChange(node.field || node.id, Number(controlEl.value));
+        });
+        wrapperEl.appendChild(controlEl);
+        break;
+      }
+      case 'progress': {
+        wrapperEl = doc.createElement('div');
+        wrapperEl.className = 'ag-field';
+        if (node.label) {
+          labelEl = doc.createElement('span');
+          labelEl.className = 'ag-field-label';
+          labelEl.textContent = String(node.label);
+          wrapperEl.appendChild(labelEl);
+        }
+        controlEl = doc.createElement('progress');
+        controlEl.className = 'ag-progress';
+        controlEl.value = Number.isFinite(Number(node.value)) ? Number(node.value) : 0;
+        controlEl.max = Number.isFinite(Number(node.max)) ? Number(node.max) : 100;
+        wrapperEl.appendChild(controlEl);
+        break;
+      }
+      case 'list': {
+        wrapperEl = doc.createElement('ul');
+        wrapperEl.className = 'ag-list';
+        const items = Array.isArray(node.items) ? node.items : [];
+        for (let i = 0; i < items.length; i += 1) {
+          const item = items[i];
+          const li = doc.createElement('li');
+          li.className = 'ag-list-item';
+          const textSpan = doc.createElement('span');
+          textSpan.textContent = String(item && typeof item === 'object' ? item.label || item.text || '' : item);
+          li.appendChild(textSpan);
+          if (item && typeof item === 'object' && item.actionId) {
+            const btn = doc.createElement('button');
+            btn.type = 'button';
+            btn.className = 'ag-btn';
+            btn.textContent = String(item.actionLabel || 'Open');
+            btn.addEventListener('click', (ev) => {
+              if (ev && ev.isTrusted === false) return;
+              emitAction(item.actionId, item.payload !== undefined ? item.payload : item.id);
+            });
+            li.appendChild(btn);
+          }
+          wrapperEl.appendChild(li);
+        }
+        break;
+      }
+      default:
+        wrapperEl = doc.createElement('div');
+    }
+
+    if (node.id) {
+      wrapperEl.setAttribute('data-ag-node-id', node.id);
+      elementsById.set(node.id, {
+        nodeType: node.type,
+        wrapperEl,
+        controlEl,
+        labelEl,
+        childrenMountEl,
+        optSig,
+      });
+    }
+    applyCommonFlags(wrapperEl, controlEl, node);
+
+    if (childrenMountEl && Array.isArray(node.children)) {
+      for (let i = 0; i < node.children.length; i += 1) {
+        childrenMountEl.appendChild(buildNodeElement(node.children[i]));
+      }
+    }
+    return wrapperEl;
+  }
+
+  function reconcileNode(node, parentEl, nextSeenIds) {
+    if (node.id && elementsById.has(node.id)) {
+      const ref = elementsById.get(node.id);
+      if (ref.nodeType === node.type) {
+        nextSeenIds.add(node.id);
+        patchExistingNode(ref, node);
+        if (ref.childrenMountEl && Array.isArray(node.children)) {
+          const desiredChildren = [];
+          for (let i = 0; i < node.children.length; i += 1) {
+            desiredChildren.push(reconcileNode(node.children[i], ref.childrenMountEl, nextSeenIds));
+          }
+          syncChildOrder(ref.childrenMountEl, desiredChildren, ref.labelEl);
+        }
+        return ref.wrapperEl;
+      }
+    }
+    const freshEl = buildNodeElement(node);
+    if (node.id) nextSeenIds.add(node.id);
+    if (Array.isArray(node.children)) {
+      collectIds(node, nextSeenIds);
+    }
+    return freshEl;
+  }
+
+  function collectIds(node, outSet) {
+    if (!node || typeof node !== 'object') return;
+    if (node.id) outSet.add(node.id);
+    if (Array.isArray(node.children)) {
+      for (let i = 0; i < node.children.length; i += 1) collectIds(node.children[i], outSet);
+    }
+  }
+
+  function syncChildOrder(mountEl, desiredChildren, keepFirstHeaderEl) {
+    const startIdx = keepFirstHeaderEl && mountEl.firstChild === keepFirstHeaderEl ? 1 : 0;
+    const desiredSet = new Set(desiredChildren);
+    const existing = [];
+    for (let i = startIdx; i < mountEl.childNodes.length; i += 1) {
+      existing.push(mountEl.childNodes[i]);
+    }
+    for (let i = 0; i < existing.length; i += 1) {
+      if (!desiredSet.has(existing[i])) {
+        mountEl.removeChild(existing[i]);
+      }
+    }
+    for (let i = 0; i < desiredChildren.length; i += 1) {
+      const target = desiredChildren[i];
+      const currentAtSlot = mountEl.childNodes[startIdx + i] || null;
+      if (currentAtSlot !== target) {
+        if (typeof mountEl.insertBefore === 'function') {
+          mountEl.insertBefore(target, currentAtSlot);
+        } else {
+          mountEl.appendChild(target);
+        }
+      }
+    }
+  }
+
+  // Initial mount
+  while (containerEl.firstChild) containerEl.removeChild(containerEl.firstChild);
+  const rootEl = buildNodeElement(currentTree);
+  containerEl.appendChild(rootEl);
+
+  function update(nextTree, nextState) {
+    if (nextState && typeof nextState === 'object') {
+      currentState = { ...nextState };
+    }
+    if (nextTree) {
+      const check = validateUiTree(nextTree);
+      if (!check.ok) {
+        throw new Error(`${check.reason}: ${(check.errors || []).join('; ')}`);
+      }
+      const nextSeenIds = new Set();
+      const nextRootEl = reconcileNode(nextTree, containerEl, nextSeenIds);
+      if (nextRootEl !== containerEl.firstChild) {
+        while (containerEl.firstChild) containerEl.removeChild(containerEl.firstChild);
+        containerEl.appendChild(nextRootEl);
+      }
+      for (const oldId of Array.from(elementsById.keys())) {
+        if (!nextSeenIds.has(oldId)) elementsById.delete(oldId);
+      }
+      currentTree = nextTree;
+    } else {
+      syncVisibilityAndDisabled(currentTree);
+    }
+  }
+
+  function getState() {
+    return { ...currentState };
+  }
+
+  function getElementById(nodeId) {
+    const ref = elementsById.get(nodeId);
+    return ref ? ref.controlEl || ref.wrapperEl : null;
+  }
+
+  return Object.freeze({
+    update,
+    getState,
+    getElementById,
+  });
+}
+
+function buildOverlayChrome(doc, shadowRoot, {
+  title,
+  displayName,
+  tokenCss,
+  closable = true,
+  onClose,
+}) {
+  const styleEl = doc.createElement('style');
+  styleEl.textContent = `${tokenCss || ''}\n${SCHEMA_UI_CSS}`;
+  shadowRoot.appendChild(styleEl);
+
+  const shell = doc.createElement('div');
+  shell.className = 'ag-ui-shell';
+
+  const header = doc.createElement('div');
+  header.className = 'ag-ui-header';
+
+  const meta = doc.createElement('div');
+  meta.className = 'ag-ui-header-meta';
+
+  if (title) {
+    const titleEl = doc.createElement('div');
+    titleEl.className = 'ag-ui-title';
+    titleEl.textContent = String(title);
+    meta.appendChild(titleEl);
+  }
+
+  // Non-removable host-owned attribution badge
+  const badge = doc.createElement('span');
+  badge.className = 'ag-ui-attribution';
+  badge.setAttribute('data-addon-host-attribution', '1');
+  badge.textContent = `Addon: ${String(displayName || 'Unknown')}`;
+  meta.appendChild(badge);
+  header.appendChild(meta);
+
+  if (closable) {
+    const closeBtn = doc.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'ag-ui-close';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
+      if (typeof onClose === 'function') onClose();
+    });
+    header.appendChild(closeBtn);
+  }
+
+  const body = doc.createElement('div');
+  body.className = 'ag-ui-body';
+
+  shell.appendChild(header);
+  shell.appendChild(body);
+  shadowRoot.appendChild(shell);
+
+  return { shell, header, body, badge };
+}
+
+module.exports = {
+  SCHEMA_UI_CSS,
+  createSchemaUiController,
+  buildOverlayChrome,
+};
+
+  },
+  "./toast-manager.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Tier-1 Toast, Confirm & Prompt Manager (v3.0.0 — SOLID #0).
+ *
+ * - `showToast`: Shadow DOM live region (`role="status"`, `aria-live="polite"`), auto-dismiss,
+ *   variant styling (`info | success | warning | error`), non-removable `Addon: <displayName>` label.
+ * - `confirm` / `prompt`: Top Layer `<dialog>` with non-removable `Addon: <displayName>` badge,
+ *   LIFO Escape / cancel handling, focus return, IME-safe Enter, and `ev.isTrusted` click check.
+ */
+
+const { buildOverlayChrome } = require('./ui-schema-renderer');
+
+const TOAST_CSS = `
+.ag-toast-host {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483500;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+  font-family: var(--ag-font, system-ui, -apple-system, sans-serif);
+}
+.ag-toast {
+  pointer-events: auto;
+  background: var(--ag-surface, #161b24);
+  color: var(--ag-text, #f0f6fc);
+  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.16));
+  border-radius: 10px;
+  padding: 10px 12px;
+  box-shadow: var(--ag-shadow, 0 12px 32px rgba(0, 0, 0, 0.52));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ag-toast[data-variant="success"] { border-left: 3px solid var(--ag-success, #4ade80); }
+.ag-toast[data-variant="warning"] { border-left: 3px solid var(--ag-warning, #fbbf24); }
+.ag-toast[data-variant="error"] { border-left: 3px solid var(--ag-danger, #f87171); }
+.ag-toast[data-variant="info"] { border-left: 3px solid var(--ag-accent, #38bdf8); }
+.ag-toast-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ag-toast-title { font-weight: 700; font-size: 12px; }
+.ag-toast-badge { font-size: 10px; color: var(--ag-accent, #38bdf8); }
+.ag-toast-msg { font-size: 12px; color: var(--ag-text, #f0f6fc); }
+.ag-toast-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+.ag-toast-btn {
+  appearance: none;
+  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.18));
+  background: transparent;
+  color: var(--ag-text, #f0f6fc);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+`;
+
+function createToastAndDialogManager(doc, win, { themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
+  let toastHostEl = null;
+  let toastShadowRoot = null;
+  let toastListEl = null;
+  const toastsByPlugin = new Map(); // pluginId -> Set<{ dismiss }>
+  const dialogsByPlugin = new Map(); // pluginId -> Set<{ close }>
+  let seq = 0;
+
+  function applyNoTranslate(el) {
+    if (!el || typeof el.setAttribute !== 'function') return;
+    el.setAttribute('translate', 'no');
+    el.setAttribute('data-addon-host-no-translate', 'true');
+    el.setAttribute('data-addon-host-ignore', 'true');
+    for (let i = 0; i < extraNoTranslateAttributes.length; i += 1) {
+      el.setAttribute(extraNoTranslateAttributes[i], 'true');
+    }
+  }
+
+  function ensureToastContainer() {
+    if (toastListEl && toastHostEl && toastHostEl.isConnected !== false) return toastListEl;
+    toastHostEl = doc.createElement('div');
+    toastHostEl.setAttribute('data-addon-host-toast-root', '1');
+    applyNoTranslate(toastHostEl);
+    if (typeof toastHostEl.attachShadow === 'function') {
+      toastShadowRoot = toastHostEl.attachShadow({ mode: 'open' });
+      const styleEl = doc.createElement('style');
+      const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
+      styleEl.textContent = `${tokenCss}\n${TOAST_CSS}`;
+      toastShadowRoot.appendChild(styleEl);
+      toastListEl = doc.createElement('div');
+      toastListEl.className = 'ag-toast-host';
+      toastListEl.setAttribute('role', 'region');
+      toastListEl.setAttribute('aria-label', 'Addon Notifications');
+      toastShadowRoot.appendChild(toastListEl);
+    } else {
+      toastListEl = toastHostEl;
+    }
+    const parent = doc.body || doc.documentElement;
+    if (parent && typeof parent.appendChild === 'function') {
+      parent.appendChild(toastHostEl);
+    }
+    return toastListEl;
+  }
+
+  function showToast(pluginMeta, opts = {}) {
+    const spec = typeof opts === 'string' ? { message: opts } : opts || {};
+    const list = ensureToastContainer();
+    const id = `toast-${++seq}`;
+    const variant = ['info', 'success', 'warning', 'error'].includes(spec.variant) ? spec.variant : 'info';
+
+    const card = doc.createElement('div');
+    card.className = 'ag-toast';
+    card.setAttribute('role', 'status');
+    card.setAttribute('aria-live', variant === 'error' ? 'assertive' : 'polite');
+    card.setAttribute('data-variant', variant);
+    card.setAttribute('data-addon-host-owner', pluginMeta.pluginId);
+    card.setAttribute('data-toast-id', id);
+
+    const top = doc.createElement('div');
+    top.className = 'ag-toast-top';
+    const titleEl = doc.createElement('span');
+    titleEl.className = 'ag-toast-title';
+    titleEl.textContent = String(spec.title || variant.toUpperCase());
+    const badgeEl = doc.createElement('span');
+    badgeEl.className = 'ag-toast-badge';
+    badgeEl.setAttribute('data-addon-host-attribution', '1');
+    badgeEl.textContent = `Addon: ${String(pluginMeta.displayName || pluginMeta.pluginId)}`;
+    top.appendChild(titleEl);
+    top.appendChild(badgeEl);
+    card.appendChild(top);
+
+    const msgEl = doc.createElement('div');
+    msgEl.className = 'ag-toast-msg';
+    msgEl.textContent = String(spec.message || '');
+    card.appendChild(msgEl);
+
+    let timer = null;
+    let dismissed = false;
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (card.parentNode && typeof card.parentNode.removeChild === 'function') {
+        card.parentNode.removeChild(card);
+      }
+      const set = toastsByPlugin.get(pluginMeta.pluginId);
+      if (set) set.delete(handle);
+    };
+
+    const actionsRow = doc.createElement('div');
+    actionsRow.className = 'ag-toast-actions';
+    if (spec.action && typeof spec.action.label === 'string' && typeof spec.action.onClick === 'function') {
+      const actBtn = doc.createElement('button');
+      actBtn.type = 'button';
+      actBtn.className = 'ag-toast-btn';
+      actBtn.textContent = spec.action.label;
+      actBtn.addEventListener('click', (ev) => {
+        if (ev && ev.isTrusted === false) return;
+        try {
+          spec.action.onClick();
+        } catch (_e) {}
+        dismiss();
+      });
+      actionsRow.appendChild(actBtn);
+    }
+    const closeBtn = doc.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'ag-toast-btn';
+    closeBtn.textContent = 'Dismiss';
+    closeBtn.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
+      dismiss();
+    });
+    actionsRow.appendChild(closeBtn);
+    card.appendChild(actionsRow);
+
+    list.appendChild(card);
+
+    const durationMs = Number.isFinite(Number(spec.durationMs)) ? Number(spec.durationMs) : 4000;
+    if (durationMs > 0) {
+      timer = setTimeout(dismiss, durationMs);
+    }
+
+    const handle = Object.freeze({ id, dismiss });
+    let set = toastsByPlugin.get(pluginMeta.pluginId);
+    if (!set) {
+      set = new Set();
+      toastsByPlugin.set(pluginMeta.pluginId, set);
+    }
+    set.add(handle);
+    return handle;
+  }
+
+  function openSimpleDialog(pluginMeta, mode, opts = {}) {
+    return new Promise((resolve) => {
+      const prevFocus = doc.activeElement || null;
+      const dlg = doc.createElement('dialog');
+      dlg.setAttribute('data-addon-host-modal-dialog', '1');
+      dlg.setAttribute('data-addon-host-owner', pluginMeta.pluginId);
+      dlg.setAttribute('role', 'dialog');
+      dlg.setAttribute('aria-modal', 'true');
+      applyNoTranslate(dlg);
+      if (dlg.style) {
+        dlg.style.position = 'fixed';
+        dlg.style.inset = '0';
+        dlg.style.margin = 'auto';
+        dlg.style.padding = '0';
+        dlg.style.border = 'none';
+        dlg.style.background = 'transparent';
+        dlg.style.maxWidth = 'min(420px, calc(100vw - 24px))';
+        dlg.style.zIndex = '2147483400';
+      }
+
+      const wrap = doc.createElement('div');
+      dlg.appendChild(wrap);
+      const sr = typeof wrap.attachShadow === 'function' ? wrap.attachShadow({ mode: 'open' }) : wrap;
+      const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
+
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        const set = dialogsByPlugin.get(pluginMeta.pluginId);
+        if (set) set.delete(tracker);
+        try {
+          if (typeof dlg.close === 'function' && dlg.open) dlg.close();
+        } catch (_e) {}
+        if (dlg.parentNode && typeof dlg.parentNode.removeChild === 'function') {
+          dlg.parentNode.removeChild(dlg);
+        }
+        if (prevFocus && typeof prevFocus.focus === 'function') {
+          try {
+            prevFocus.focus();
+          } catch (_e) {}
+        }
+        resolve(value);
+      };
+
+      const { body } = buildOverlayChrome(doc, sr, {
+        title: String(opts.title || (mode === 'prompt' ? 'Input Required' : 'Confirm')),
+        displayName: pluginMeta.displayName || pluginMeta.pluginId,
+        tokenCss,
+        closable: true,
+        onClose: () => finish(mode === 'prompt' ? null : false),
+      });
+
+      if (opts.message) {
+        const msg = doc.createElement('p');
+        msg.className = 'ag-text';
+        msg.textContent = String(opts.message);
+        body.appendChild(msg);
+      }
+
+      let inputEl = null;
+      if (mode === 'prompt') {
+        inputEl = doc.createElement('input');
+        inputEl.type = opts.inputType === 'password' ? 'password' : 'text';
+        inputEl.className = 'ag-input';
+        inputEl.value = opts.defaultValue !== undefined && opts.defaultValue !== null ? String(opts.defaultValue) : '';
+        if (opts.placeholder) inputEl.setAttribute('placeholder', String(opts.placeholder));
+        inputEl.addEventListener('keydown', (ev) => {
+          if (!ev || ev.key !== 'Enter') return;
+          if (ev.isComposing || ev.keyCode === 229) return;
+          finish(inputEl.value);
+        });
+        body.appendChild(inputEl);
+      }
+
+      const btnRow = doc.createElement('div');
+      btnRow.className = 'ag-row';
+      if (btnRow.style) btnRow.style.justifyContent = 'flex-end';
+
+      const cancelBtn = doc.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'ag-btn';
+      cancelBtn.setAttribute('data-ag-dialog-cancel', '1');
+      cancelBtn.textContent = String(opts.cancelLabel || 'Cancel');
+      cancelBtn.addEventListener('click', (ev) => {
+        if (ev && ev.isTrusted === false) return;
+        finish(mode === 'prompt' ? null : false);
+      });
+
+      const confirmBtn = doc.createElement('button');
+      confirmBtn.type = 'button';
+      confirmBtn.className = 'ag-btn';
+      confirmBtn.setAttribute('data-ag-dialog-confirm', '1');
+      confirmBtn.setAttribute('data-variant', opts.destructive ? 'danger' : 'primary');
+      confirmBtn.textContent = String(opts.confirmLabel || 'OK');
+      confirmBtn.addEventListener('click', (ev) => {
+        if (ev && ev.isTrusted === false) return;
+        finish(mode === 'prompt' ? (inputEl ? inputEl.value : '') : true);
+      });
+
+      btnRow.appendChild(cancelBtn);
+      btnRow.appendChild(confirmBtn);
+      body.appendChild(btnRow);
+
+      if (typeof dlg.addEventListener === 'function') {
+        dlg.addEventListener('cancel', (ev) => {
+          if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+          finish(mode === 'prompt' ? null : false);
+        });
+      }
+
+      const tracker = { close: () => finish(mode === 'prompt' ? null : false) };
+      let set = dialogsByPlugin.get(pluginMeta.pluginId);
+      if (!set) {
+        set = new Set();
+        dialogsByPlugin.set(pluginMeta.pluginId, set);
+      }
+      set.add(tracker);
+
+      const parent = doc.body || doc.documentElement;
+      if (parent && typeof parent.appendChild === 'function') {
+        parent.appendChild(dlg);
+      }
+      if (typeof dlg.showModal === 'function') {
+        try {
+          dlg.showModal();
+        } catch (_e) {}
+      }
+      if (inputEl && typeof inputEl.focus === 'function') {
+        try {
+          inputEl.focus();
+        } catch (_e) {}
+      }
+    });
+  }
+
+  function confirm(pluginMeta, opts) {
+    return openSimpleDialog(pluginMeta, 'confirm', typeof opts === 'string' ? { message: opts } : opts || {});
+  }
+
+  function prompt(pluginMeta, opts) {
+    return openSimpleDialog(pluginMeta, 'prompt', typeof opts === 'string' ? { message: opts } : opts || {});
+  }
+
+  function disposePlugin(pluginId) {
+    const tSet = toastsByPlugin.get(pluginId);
+    if (tSet) {
+      Array.from(tSet).forEach((h) => h.dismiss());
+      toastsByPlugin.delete(pluginId);
+    }
+    const dSet = dialogsByPlugin.get(pluginId);
+    if (dSet) {
+      Array.from(dSet).forEach((d) => d.close());
+      dialogsByPlugin.delete(pluginId);
+    }
+  }
+
+  return Object.freeze({
+    showToast,
+    confirm,
+    prompt,
+    disposePlugin,
+  });
+}
+
+module.exports = {
+  createToastAndDialogManager,
+};
+
+  },
+  "./service-bus.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Typed Service Bus with Default-Deny ACL & Proto-Key Stripping (v3.0.0 — SOLID #0).
+ *
+ * - Enforces `<pluginId>.<name>` namespace (or manifest-declared well-known `host.*` service slot).
+ * - Default-deny `allowedCallers`: cross-plugin calls fail unless explicitly permitted.
+ * - Deep clones and strips `__proto__` / `constructor` / `prototype` on every argument & return value
+ *   (except for internal host-to-service wiring like `host.statusbar` accessed via `getInternalService`).
+ */
+
+const {
+  validateServiceName,
+  isCallerAllowed,
+  sanitizeBusPayload,
+} = require('../../core/service-bus-policy');
+
+function createServiceBus({ onServiceRegistryChange = null } = {}) {
+  const services = new Map(); // serviceName -> { providerPluginId, name, allowedCallers, impl }
+
+  function notifyChange(serviceName, action) {
+    if (typeof onServiceRegistryChange === 'function') {
+      try {
+        onServiceRegistryChange(serviceName, action);
+      } catch (_e) {}
+    }
+  }
+
+  function provide(pluginMeta, serviceName, impl, opts = {}) {
+    const pluginId = pluginMeta && pluginMeta.pluginId;
+    const declaredProvide =
+      pluginMeta &&
+      pluginMeta.permissions &&
+      pluginMeta.permissions.services &&
+      Array.isArray(pluginMeta.permissions.services.provide)
+        ? pluginMeta.permissions.services.provide
+        : null;
+    const declaredEntry = declaredProvide ? declaredProvide.find((p) => p && p.name === serviceName) : null;
+    const allowWellKnown = Boolean(declaredEntry) || Boolean(opts && opts.allowWellKnownHostServices);
+
+    const nameCheck = validateServiceName(pluginId, serviceName, { allowWellKnownHostServices: allowWellKnown });
+    if (!nameCheck.ok) {
+      throw new Error(`${nameCheck.reason}:${serviceName}`);
+    }
+    if (!impl || typeof impl !== 'object') {
+      throw new Error('ERR_INVALID_SERVICE_IMPL');
+    }
+    if (services.has(serviceName) && services.get(serviceName).providerPluginId !== pluginId) {
+      throw new Error(`ERR_SERVICE_ALREADY_PROVIDED:${serviceName}`);
+    }
+
+    const allowedCallers = Array.isArray(opts.allowedCallers)
+      ? opts.allowedCallers.slice()
+      : declaredEntry && Array.isArray(declaredEntry.allowedCallers)
+        ? declaredEntry.allowedCallers.slice()
+        : [];
+
+    services.set(serviceName, {
+      providerPluginId: pluginId,
+      name: serviceName,
+      allowedCallers,
+      impl,
+    });
+    notifyChange(serviceName, 'provide');
+
+    return Object.freeze({
+      name: serviceName,
+      dispose() {
+        const cur = services.get(serviceName);
+        if (cur && cur.providerPluginId === pluginId) {
+          services.delete(serviceName);
+          notifyChange(serviceName, 'dispose');
+        }
+      },
+    });
+  }
+
+  function has(callerPluginId, serviceName) {
+    const rec = services.get(serviceName);
+    if (!rec) return false;
+    return isCallerAllowed(rec.providerPluginId, callerPluginId, rec.allowedCallers);
+  }
+
+  function list(callerPluginId) {
+    const out = [];
+    for (const rec of services.values()) {
+      if (isCallerAllowed(rec.providerPluginId, callerPluginId, rec.allowedCallers)) {
+        out.push(
+          Object.freeze({
+            name: rec.name,
+            providerPluginId: rec.providerPluginId,
+            methods: Object.freeze(Object.keys(rec.impl).filter((k) => typeof rec.impl[k] === 'function')),
+          })
+        );
+      }
+    }
+    return Object.freeze(out);
+  }
+
+  function call(callerPluginId, serviceName, methodName, ...args) {
+    const rec = services.get(serviceName);
+    if (!rec) {
+      throw new Error(`ERR_SERVICE_NOT_FOUND:${serviceName}`);
+    }
+    if (!isCallerAllowed(rec.providerPluginId, callerPluginId, rec.allowedCallers)) {
+      throw new Error(`ERR_SERVICE_CALLER_FORBIDDEN:${callerPluginId}:${serviceName}`);
+    }
+    if (typeof methodName !== 'string' || !methodName || methodName === '__proto__' || methodName === 'constructor') {
+      throw new Error(`ERR_SERVICE_METHOD_INVALID:${String(methodName)}`);
+    }
+    const fn = Object.prototype.hasOwnProperty.call(rec.impl, methodName) ? rec.impl[methodName] : null;
+    if (typeof fn !== 'function') {
+      throw new Error(`ERR_SERVICE_METHOD_NOT_FOUND:${serviceName}.${methodName}`);
+    }
+    const cleanArgs = args.map((a) => sanitizeBusPayload(a));
+    const ret = fn.apply(undefined, cleanArgs);
+    if (ret && typeof ret.then === 'function') {
+      return ret.then((resolved) => sanitizeBusPayload(resolved));
+    }
+    return sanitizeBusPayload(ret);
+  }
+
+  function getInternalService(serviceName) {
+    return services.get(serviceName) || null;
+  }
+
+  function disposePlugin(pluginId) {
+    for (const [name, rec] of Array.from(services.entries())) {
+      if (rec.providerPluginId === pluginId) {
+        services.delete(name);
+        notifyChange(name, 'dispose');
+      }
+    }
+  }
+
+  return Object.freeze({
+    provide,
+    has,
+    list,
+    call,
+    getInternalService,
+    disposePlugin,
+  });
+}
+
+module.exports = {
+  createServiceBus,
+};
+
+  },
+  "./event-bus.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Plugin Event Bus with Payload Sanitization & Auto-Dispose (v3.0.0 — SOLID #0).
+ */
+
+const { sanitizeBusPayload } = require('../../core/service-bus-policy');
+
+function createEventBus({ reportPluginError = () => {} } = {}) {
+  const listenersByTopic = new Map(); // topic -> Set<{ pluginId, handler, once }>
+
+  function on(pluginId, topic, handler, { once = false } = {}) {
+    if (typeof topic !== 'string' || !topic.trim()) throw new Error('ERR_INVALID_EVENT_TOPIC');
+    if (typeof handler !== 'function') throw new Error('ERR_INVALID_EVENT_HANDLER');
+    const cleanTopic = topic.trim();
+    let set = listenersByTopic.get(cleanTopic);
+    if (!set) {
+      set = new Set();
+      listenersByTopic.set(cleanTopic, set);
+    }
+    const entry = { pluginId, handler, once: Boolean(once) };
+    set.add(entry);
+    return () => {
+      set.delete(entry);
+      if (set.size === 0) listenersByTopic.delete(cleanTopic);
+    };
+  }
+
+  function once(pluginId, topic, handler) {
+    return on(pluginId, topic, handler, { once: true });
+  }
+
+  function emit(pluginId, topic, payload) {
+    if (typeof topic !== 'string' || !topic.trim()) throw new Error('ERR_INVALID_EVENT_TOPIC');
+    const cleanTopic = topic.trim();
+    const set = listenersByTopic.get(cleanTopic);
+    if (!set || set.size === 0) return 0;
+    const cleanPayload = payload === undefined ? undefined : sanitizeBusPayload(payload);
+    const snapshot = Array.from(set);
+    let delivered = 0;
+    for (let i = 0; i < snapshot.length; i += 1) {
+      const entry = snapshot[i];
+      if (entry.once) set.delete(entry);
+      delivered += 1;
+      try {
+        const ret = entry.handler(
+          cleanPayload === undefined ? undefined : sanitizeBusPayload(cleanPayload),
+          Object.freeze({ topic: cleanTopic, sourcePluginId: pluginId })
+        );
+        if (ret && typeof ret.then === 'function') {
+          ret.catch((err) => reportPluginError(entry.pluginId, err && err.message ? err.message : String(err)));
+        }
+      } catch (err) {
+        reportPluginError(entry.pluginId, err && err.message ? err.message : String(err));
+      }
+    }
+    if (set.size === 0) listenersByTopic.delete(cleanTopic);
+    return delivered;
+  }
+
+  function disposePlugin(pluginId) {
+    for (const [topic, set] of Array.from(listenersByTopic.entries())) {
+      for (const entry of Array.from(set)) {
+        if (entry.pluginId === pluginId) set.delete(entry);
+      }
+      if (set.size === 0) listenersByTopic.delete(topic);
+    }
+  }
+
+  return Object.freeze({
+    on,
+    once,
+    emit,
+    disposePlugin,
+  });
+}
+
+module.exports = {
+  createEventBus,
+};
+
+  },
+  "./storage-v3.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Plugin-Scoped KV Storage with TTL & `onDidChange` (v3.0.0 — SOLID #0).
+ *
+ * - Strictly scoped per plugin (`storageNamespace`).
+ * - Supports async `get(key)`, `set(key, value, { ttlMs? })`, `delete(key)`, `keys()`, `clear()`,
+ *   and `onDidChange(cb)`.
+ * - Strips/rejects prototype-pollution keys via `sanitizeBusPayload`.
+ * - Persists to `localStorage` when available, with automatic in-memory fallback.
+ */
+
+const { sanitizeBusPayload } = require('../../core/service-bus-policy');
+
+const _ObjectFreeze = Object.freeze;
+const _ObjectEntries = Object.entries;
+const _ArrayIsArray = Array.isArray;
+const _Map = Map;
+const _MapGet = Function.prototype.call.bind(Map.prototype.get);
+const _MapSet = Function.prototype.call.bind(Map.prototype.set);
+const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
+const _MapClear = Function.prototype.call.bind(Map.prototype.clear);
+const _MapForEach = Function.prototype.call.bind(Map.prototype.forEach);
+const _Set = Set;
+const _SetHas = Function.prototype.call.bind(Set.prototype.has);
+const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
+const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
+const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
+const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
+
+const FORBIDDEN_KEYS = new _Set(['__proto__', 'constructor', 'prototype']);
+
+function createStorageV3(win, { namespacePrefix = 'ag-v3-storage' } = {}) {
+  const buckets = new _Map(); // pluginId -> { map: Map<k, { v, exp }>, listeners: Set<fn>, storageKey }
+
+  function resolveBackingStore() {
+    try {
+      if (win && win.localStorage && typeof win.localStorage.getItem === 'function') {
+        return win.localStorage;
+      }
+    } catch (_e) {}
+    return null;
+  }
+
+  function getBucket(pluginId, customNamespace) {
+    let bucket = _MapGet(buckets, pluginId);
+    if (bucket) return bucket;
+    const ns = typeof customNamespace === 'string' && customNamespace ? customNamespace : pluginId;
+    const storageKey = `${namespacePrefix}:${ns}`;
+    const map = new _Map();
+    const store = resolveBackingStore();
+    if (store) {
+      try {
+        const raw = store.getItem(storageKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object' && !_ArrayIsArray(parsed)) {
+            const now = Date.now();
+            const entries = _ObjectEntries(parsed);
+            for (let i = 0; i < entries.length; i += 1) {
+              const k = entries[i][0];
+              const rec = entries[i][1];
+              if (_SetHas(FORBIDDEN_KEYS, k) || !rec || typeof rec !== 'object') continue;
+              if (typeof rec.exp === 'number' && rec.exp <= now) continue;
+              _MapSet(map, k, { v: sanitizeBusPayload(rec.v), exp: typeof rec.exp === 'number' ? rec.exp : null });
+            }
+          }
+        }
+      } catch (_e) {}
+    }
+    bucket = { map, listeners: new _Set(), storageKey };
+    _MapSet(buckets, pluginId, bucket);
+    return bucket;
+  }
+
+  function persistBucket(bucket) {
+    const store = resolveBackingStore();
+    if (!store) return;
+    try {
+      const obj = {};
+      const now = Date.now();
+      const expired = [];
+      _MapForEach(bucket.map, (rec, k) => {
+        if (rec.exp !== null && rec.exp <= now) {
+          expired[expired.length] = k;
+        } else {
+          obj[k] = rec;
+        }
+      });
+      for (let i = 0; i < expired.length; i += 1) {
+        _MapDelete(bucket.map, expired[i]);
+      }
+      store.setItem(bucket.storageKey, JSON.stringify(obj));
+    } catch (_e) {}
+  }
+
+  function emitChange(bucket, change) {
+    const frozen = _ObjectFreeze(change);
+    const cbs = [];
+    _SetForEach(bucket.listeners, (cb) => {
+      cbs[cbs.length] = cb;
+    });
+    for (let i = 0; i < cbs.length; i += 1) {
+      try {
+        cbs[i](frozen);
+      } catch (_e) {}
+    }
+  }
+
+  function createPluginStorage(pluginId, { namespace = null, maxBytes = 65536, assertActive = () => {}, registerDisposer = () => {} } = {}) {
+    const bucket = getBucket(pluginId, namespace);
+
+    return _ObjectFreeze({
+      async get(key) {
+        assertActive();
+        if (typeof key !== 'string' || !key || _SetHas(FORBIDDEN_KEYS, key)) {
+          throw new Error('ERR_INVALID_STORAGE_KEY');
+        }
+        const rec = _MapGet(bucket.map, key);
+        if (!rec) return undefined;
+        if (rec.exp !== null && rec.exp <= Date.now()) {
+          _MapDelete(bucket.map, key);
+          persistBucket(bucket);
+          return undefined;
+        }
+        return sanitizeBusPayload(rec.v);
+      },
+
+      async set(key, value, opts = {}) {
+        assertActive();
+        if (typeof key !== 'string' || !key || _SetHas(FORBIDDEN_KEYS, key)) {
+          throw new Error('ERR_INVALID_STORAGE_KEY');
+        }
+        const cleanVal = sanitizeBusPayload(value);
+        const serialized = JSON.stringify(cleanVal);
+        if (serialized && serialized.length > maxBytes) {
+          throw new Error('ERR_STORAGE_QUOTA_EXCEEDED');
+        }
+        const ttlMs = opts && Number.isFinite(Number(opts.ttlMs)) && Number(opts.ttlMs) > 0 ? Number(opts.ttlMs) : null;
+        const exp = ttlMs ? Date.now() + ttlMs : null;
+        const prevRec = _MapGet(bucket.map, key);
+        const oldValue = prevRec && (prevRec.exp === null || prevRec.exp > Date.now()) ? sanitizeBusPayload(prevRec.v) : undefined;
+        _MapSet(bucket.map, key, { v: cleanVal, exp });
+        persistBucket(bucket);
+        emitChange(bucket, { key, oldValue, newValue: sanitizeBusPayload(cleanVal) });
+        return true;
+      },
+
+      async delete(key) {
+        assertActive();
+        if (typeof key !== 'string' || !key || _SetHas(FORBIDDEN_KEYS, key)) {
+          throw new Error('ERR_INVALID_STORAGE_KEY');
+        }
+        const prev = _MapGet(bucket.map, key);
+        const existed = _MapDelete(bucket.map, key);
+        if (existed) {
+          persistBucket(bucket);
+          emitChange(bucket, { key, oldValue: prev ? sanitizeBusPayload(prev.v) : undefined, newValue: undefined });
+        }
+        return existed;
+      },
+
+      async keys() {
+        assertActive();
+        const now = Date.now();
+        const out = [];
+        const expired = [];
+        _MapForEach(bucket.map, (rec, k) => {
+          if (rec.exp !== null && rec.exp <= now) {
+            expired[expired.length] = k;
+          } else {
+            out[out.length] = k;
+          }
+        });
+        for (let i = 0; i < expired.length; i += 1) {
+          _MapDelete(bucket.map, expired[i]);
+        }
+        if (expired.length > 0) persistBucket(bucket);
+        return out;
+      },
+
+      async clear() {
+        assertActive();
+        _MapClear(bucket.map);
+        persistBucket(bucket);
+        emitChange(bucket, { key: '*', oldValue: undefined, newValue: undefined });
+      },
+
+      onDidChange(cb) {
+        assertActive();
+        if (typeof cb !== 'function') throw new Error('ERR_INVALID_STORAGE_LISTENER');
+        _SetAdd(bucket.listeners, cb);
+        const unsub = () => _SetDelete(bucket.listeners, cb);
+        registerDisposer(unsub);
+        return unsub;
+      },
+    });
+  }
+
+  function disposePlugin(pluginId) {
+    const bucket = _MapGet(buckets, pluginId);
+    if (bucket) {
+      _SetClear(bucket.listeners);
+    }
+  }
+
+  return _ObjectFreeze({
+    createPluginStorage,
+    disposePlugin,
+  });
+}
+
+module.exports = {
+  createStorageV3,
+};
+
+  },
+  "./status-item-registry.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Tier-1 Status Item Registry (v3.0.0 — SOLID #0).
+ *
+ * - Delegates `ui.registerStatusItem` to the installed `'host.statusbar'` service
+ *   (e.g., `antigravity-statusbar`) when available.
+ * - Falls back automatically to a minimal, accessible Shadow-DOM host bar when
+ *   `'host.statusbar'` is not installed.
+ * - Delivers click modifiers `{ shiftKey, ctrlKey, metaKey, altKey, anchorEl, itemId }`
+ *   to `onClick` and enforces `ev.isTrusted !== false`.
+ */
+
+const FALLBACK_BAR_CSS = `
+.ag-fallback-bar {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2147482900;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--ag-surface, rgba(18, 22, 30, 0.92));
+  border: 1px solid var(--ag-border, rgba(255, 255, 255, 0.14));
+  box-shadow: var(--ag-shadow, 0 6px 20px rgba(0, 0, 0, 0.4));
+  font-family: var(--ag-font, system-ui, -apple-system, sans-serif);
+}
+.ag-fallback-bar[hidden] { display: none; }
+.ag-status-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ag-text, #f0f6fc);
+  border-radius: 999px;
+  padding: 4px 9px;
+  min-height: 28px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ag-status-btn:hover { background: rgba(255, 255, 255, 0.08); }
+.ag-status-badge {
+  background: rgba(56, 189, 248, 0.18);
+  color: var(--ag-accent, #38bdf8);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+`;
+
+function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
+  const itemsByKey = new Map(); // `${pluginId}:${itemId}` -> itemRecord
+  const delegatedByKey = new Map(); // `${pluginId}:${itemId}` -> { unregister }
+  let fallbackHostEl = null;
+  let fallbackBarEl = null;
+
+  function getDelegatedService() {
+    if (!serviceBus || typeof serviceBus.getInternalService !== 'function') return null;
+    const svc = serviceBus.getInternalService('host.statusbar');
+    if (svc && svc.impl && typeof svc.impl.registerItem === 'function') {
+      return svc.impl;
+    }
+    return null;
+  }
+
+  function ensureFallbackBar() {
+    if (fallbackBarEl && fallbackHostEl && fallbackHostEl.isConnected !== false) return fallbackBarEl;
+    if (!doc || typeof doc.createElement !== 'function') return null;
+    fallbackHostEl = doc.createElement('div');
+    fallbackHostEl.setAttribute('data-addon-host-fallback-statusbar', '1');
+    fallbackHostEl.setAttribute('data-addon-host-ignore', 'true');
+    fallbackHostEl.setAttribute('translate', 'no');
+    fallbackHostEl.setAttribute('data-addon-host-no-translate', 'true');
+    for (let i = 0; i < extraNoTranslateAttributes.length; i += 1) {
+      fallbackHostEl.setAttribute(extraNoTranslateAttributes[i], 'true');
+    }
+    if (typeof fallbackHostEl.attachShadow === 'function') {
+      const sr = fallbackHostEl.attachShadow({ mode: 'open' });
+      const styleEl = doc.createElement('style');
+      const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
+      styleEl.textContent = `${tokenCss}\n${FALLBACK_BAR_CSS}`;
+      sr.appendChild(styleEl);
+      fallbackBarEl = doc.createElement('div');
+      fallbackBarEl.className = 'ag-fallback-bar';
+      fallbackBarEl.setAttribute('role', 'toolbar');
+      fallbackBarEl.setAttribute('aria-label', 'Addon Status Items');
+      sr.appendChild(fallbackBarEl);
+    } else {
+      fallbackBarEl = fallbackHostEl;
+    }
+    const parent = doc.body || doc.documentElement;
+    if (parent && typeof parent.appendChild === 'function') {
+      parent.appendChild(fallbackHostEl);
+    }
+    return fallbackBarEl;
+  }
+
+  function removeFallbackBarIfEmpty() {
+    if (!fallbackBarEl) return;
+    if (fallbackBarEl.childNodes.length === 0) {
+      if (typeof fallbackBarEl.setAttribute === 'function') {
+        fallbackBarEl.setAttribute('hidden', 'true');
+      }
+    }
+  }
+
+  function buildClickPayload(record, ev, anchorEl) {
+    return Object.freeze({
+      pluginId: record.pluginId,
+      itemId: record.id,
+      shiftKey: Boolean(ev && ev.shiftKey),
+      ctrlKey: Boolean(ev && ev.ctrlKey),
+      metaKey: Boolean(ev && ev.metaKey),
+      altKey: Boolean(ev && ev.altKey),
+      anchorEl: anchorEl || null,
+    });
+  }
+
+  function renderFallbackItems() {
+    const delegatedSvc = getDelegatedService();
+    if (delegatedSvc) {
+      if (fallbackBarEl) {
+        while (fallbackBarEl.firstChild) fallbackBarEl.removeChild(fallbackBarEl.firstChild);
+        if (typeof fallbackBarEl.setAttribute === 'function') fallbackBarEl.setAttribute('hidden', 'true');
+      }
+      return;
+    }
+
+    const sorted = Array.from(itemsByKey.values()).sort((a, b) => {
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      return a.key < b.key ? -1 : 1;
+    });
+    if (sorted.length === 0) {
+      if (fallbackBarEl) {
+        while (fallbackBarEl.firstChild) fallbackBarEl.removeChild(fallbackBarEl.firstChild);
+        removeFallbackBarIfEmpty();
+      }
+      return;
+    }
+
+    const bar = ensureFallbackBar();
+    if (!bar) return;
+    if (typeof bar.removeAttribute === 'function') bar.removeAttribute('hidden');
+    while (bar.firstChild) bar.removeChild(bar.firstChild);
+
+    for (let i = 0; i < sorted.length; i += 1) {
+      const rec = sorted[i];
+      const btn = doc.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ag-status-btn';
+      btn.setAttribute('data-addon-host-owner', rec.pluginId);
+      btn.setAttribute('data-status-item-id', rec.id);
+      if (rec.tooltip) btn.setAttribute('title', rec.tooltip);
+      const labelSpan = doc.createElement('span');
+      labelSpan.textContent = rec.icon ? `${rec.icon} ${rec.label}` : rec.label;
+      btn.appendChild(labelSpan);
+      if (rec.badge) {
+        const badgeSpan = doc.createElement('span');
+        badgeSpan.className = 'ag-status-badge';
+        badgeSpan.textContent = rec.badge;
+        btn.appendChild(badgeSpan);
+      }
+      btn.addEventListener('click', (ev) => {
+        if (ev && ev.isTrusted === false) return;
+        if (typeof rec.onClick === 'function') {
+          try {
+            rec.onClick(buildClickPayload(rec, ev, btn));
+          } catch (_e) {}
+        }
+      });
+      bar.appendChild(btn);
+    }
+  }
+
+  function syncDelegation() {
+    const svc = getDelegatedService();
+    if (!svc) {
+      // Clear any stale delegation handles and fall back to host bar
+      delegatedByKey.clear();
+      renderFallbackItems();
+      return;
+    }
+    // Delegate every active item that is not yet delegated
+    for (const [key, rec] of itemsByKey.entries()) {
+      if (!delegatedByKey.has(key)) {
+        try {
+          const res = svc.registerItem({
+            pluginId: rec.pluginId,
+            id: rec.id,
+            label: rec.label,
+            icon: rec.icon,
+            tooltip: rec.tooltip,
+            badge: rec.badge,
+            align: rec.align,
+            priority: rec.priority,
+            onClick: (ev) => {
+              if (typeof rec.onClick === 'function') {
+                rec.onClick(buildClickPayload(rec, ev, ev && ev.anchorEl ? ev.anchorEl : null));
+              }
+            },
+          });
+          delegatedByKey.set(key, res || { delegated: true });
+        } catch (_e) {}
+      }
+    }
+    renderFallbackItems();
+  }
+
+  function registerStatusItem(pluginId, spec = {}) {
+    if (!spec || typeof spec !== 'object' || typeof spec.id !== 'string' || !spec.id.trim()) {
+      throw new Error('ERR_INVALID_STATUS_ITEM_ID');
+    }
+    const id = spec.id.trim();
+    const key = `${pluginId}:${id}`;
+    const record = {
+      key,
+      pluginId,
+      id,
+      label: String(spec.label || id),
+      icon: typeof spec.icon === 'string' ? spec.icon : '',
+      tooltip: typeof spec.tooltip === 'string' ? spec.tooltip : '',
+      badge: spec.badge !== undefined && spec.badge !== null ? String(spec.badge) : '',
+      align: spec.align === 'left' ? 'left' : 'right',
+      priority: Number.isFinite(Number(spec.priority)) ? Number(spec.priority) : 100,
+      onClick: typeof spec.onClick === 'function' ? spec.onClick : null,
+    };
+    itemsByKey.set(key, record);
+
+    const svc = getDelegatedService();
+    if (svc) {
+      try {
+        const res = svc.registerItem({
+          pluginId: record.pluginId,
+          id: record.id,
+          label: record.label,
+          icon: record.icon,
+          tooltip: record.tooltip,
+          badge: record.badge,
+          align: record.align,
+          priority: record.priority,
+          onClick: (ev) => {
+            if (typeof record.onClick === 'function') {
+              record.onClick(buildClickPayload(record, ev, ev && ev.anchorEl ? ev.anchorEl : null));
+            }
+          },
+        });
+        delegatedByKey.set(key, res || { delegated: true });
+      } catch (_e) {}
+    } else {
+      renderFallbackItems();
+    }
+
+    return Object.freeze({
+      id,
+      update(patch = {}) {
+        if (!itemsByKey.has(key) || !patch || typeof patch !== 'object') return;
+        if (patch.label !== undefined) record.label = String(patch.label);
+        if (patch.icon !== undefined) record.icon = String(patch.icon || '');
+        if (patch.tooltip !== undefined) record.tooltip = String(patch.tooltip || '');
+        if (patch.badge !== undefined) record.badge = patch.badge === null ? '' : String(patch.badge);
+        if (patch.priority !== undefined && Number.isFinite(Number(patch.priority))) {
+          record.priority = Number(patch.priority);
+        }
+        const activeSvc = getDelegatedService();
+        if (activeSvc && typeof activeSvc.updateItem === 'function') {
+          try {
+            activeSvc.updateItem(pluginId, id, {
+              label: record.label,
+              icon: record.icon,
+              tooltip: record.tooltip,
+              badge: record.badge,
+              priority: record.priority,
+            });
+          } catch (_e) {}
+        } else {
+          renderFallbackItems();
+        }
+      },
+      dispose() {
+        if (!itemsByKey.has(key)) return;
+        itemsByKey.delete(key);
+        const del = delegatedByKey.get(key);
+        delegatedByKey.delete(key);
+        if (del && typeof del.dispose === 'function') {
+          try {
+            del.dispose();
+          } catch (_e) {}
+        } else {
+          const activeSvc = getDelegatedService();
+          if (activeSvc && typeof activeSvc.removeItem === 'function') {
+            try {
+              activeSvc.removeItem(pluginId, id);
+            } catch (_e) {}
+          }
+        }
+        renderFallbackItems();
+      },
+    });
+  }
+
+  function listStatusItems() {
+    return Array.from(itemsByKey.values()).map((r) =>
+      Object.freeze({
+        pluginId: r.pluginId,
+        id: r.id,
+        label: r.label,
+        icon: r.icon,
+        tooltip: r.tooltip,
+        badge: r.badge,
+        align: r.align,
+        priority: r.priority,
+        delegated: delegatedByKey.has(r.key),
+      })
+    );
+  }
+
+  function invokeStatusItem(pluginId, itemId, clickEvent = {}) {
+    const rec = itemsByKey.get(`${pluginId}:${itemId}`);
+    if (!rec || typeof rec.onClick !== 'function') {
+      return { ok: false, reason: 'ERR_STATUS_ITEM_NOT_FOUND' };
+    }
+    rec.onClick(buildClickPayload(rec, clickEvent, clickEvent && clickEvent.anchorEl ? clickEvent.anchorEl : null));
+    return { ok: true };
+  }
+
+  function disposePlugin(pluginId) {
+    for (const [key, rec] of Array.from(itemsByKey.entries())) {
+      if (rec.pluginId !== pluginId) continue;
+      itemsByKey.delete(key);
+      const del = delegatedByKey.get(key);
+      delegatedByKey.delete(key);
+      if (del && typeof del.dispose === 'function') {
+        try {
+          del.dispose();
+        } catch (_e) {}
+      }
+    }
+    renderFallbackItems();
+  }
+
+  return Object.freeze({
+    registerStatusItem,
+    listStatusItems,
+    invokeStatusItem,
+    syncDelegation,
+    isDelegated: () => Boolean(getDelegatedService()),
+    disposePlugin,
+  });
+}
+
+module.exports = {
+  createStatusItemRegistry,
+};
+
+  },
+  "./settings-page-coordinator.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Vendor-neutral Unified Settings Page Coordinator for Tier-1 `ui.registerSettingsPage` (v3.0.0 — SOLID #0).
+ *
+ * - Bridges both Desktop Settings sidebar tabs (`settingsTabs`) AND Remote Web Drawer settings tabs
+ *   through a single declarative API.
+ * - Supports either a Tier-2 declarative JSON `schema` (with `state`, `onChange`, `onAction`)
+ *   OR a Tier-3 Shadow-DOM `render(canvasRoot)` callback.
+ * - Opens inside a host-managed modal/panel surface when triggered from Remote Web or Desktop
+ *   without requiring plugins to query or mutate host Settings DOM directly.
+ */
+
+function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = null, openTier3Modal = null } = {}) {
+  const pagesByKey = new Map(); // `${pluginId}:${pageId}` -> record
+
+  function registerSettingsPage(pluginMeta, spec = {}) {
+    if (!spec || typeof spec !== 'object' || typeof spec.id !== 'string' || !spec.id.trim()) {
+      throw new Error('ERR_INVALID_SETTINGS_PAGE_ID');
+    }
+    const pageId = spec.id.trim();
+    const key = `${pluginMeta.pluginId}:${pageId}`;
+    const title = String(spec.title || spec.label || pageId);
+    const hasSchema = Boolean(spec.schema && typeof spec.schema === 'object');
+    const hasRender = typeof spec.render === 'function';
+    if (!hasSchema && !hasRender) {
+      throw new Error('ERR_SETTINGS_PAGE_REQUIRES_SCHEMA_OR_RENDER');
+    }
+
+    let activeModalHandle = null;
+    const openPage = () => {
+      if (activeModalHandle && typeof activeModalHandle.close === 'function') {
+        try {
+          activeModalHandle.close();
+        } catch (_e) {}
+        activeModalHandle = null;
+      }
+      if (hasSchema && typeof openTier2Modal === 'function') {
+        activeModalHandle = openTier2Modal(pluginMeta, {
+          title,
+          placement: { zone: 'surface-center', width: spec.width || 560 },
+          tree: typeof spec.getSchema === 'function' ? spec.getSchema() : spec.schema,
+          state: typeof spec.getState === 'function' ? spec.getState() : spec.state || {},
+          onChange: spec.onChange || null,
+          onAction: spec.onAction || null,
+          onClose: () => {
+            activeModalHandle = null;
+            if (typeof spec.onClose === 'function') spec.onClose();
+          },
+        });
+        return activeModalHandle;
+      }
+      if (hasRender && typeof openTier3Modal === 'function') {
+        activeModalHandle = openTier3Modal(pluginMeta, {
+          title,
+          placement: { zone: 'surface-center', width: spec.width || 560 },
+          onClose: () => {
+            activeModalHandle = null;
+            if (typeof spec.onClose === 'function') spec.onClose();
+          },
+        });
+        if (activeModalHandle && activeModalHandle.bodyEl) {
+          spec.render(activeModalHandle.bodyEl, activeModalHandle);
+        }
+        return activeModalHandle;
+      }
+      return null;
+    };
+
+    let tabHandle = null;
+    if (settingsTabs && typeof settingsTabs.registerSettingsTab === 'function') {
+      tabHandle = settingsTabs.registerSettingsTab(pluginMeta.pluginId, pageId, {
+        label: title,
+        onSelect: () => openPage(),
+      });
+    }
+
+    const record = {
+      key,
+      pluginId: pluginMeta.pluginId,
+      id: pageId,
+      title,
+      order: Number.isFinite(Number(spec.order)) ? Number(spec.order) : 100,
+      kind: hasSchema ? 'schema' : 'canvas',
+      openPage,
+      tabHandle,
+    };
+    pagesByKey.set(key, record);
+
+    return Object.freeze({
+      id: pageId,
+      open: openPage,
+      update(nextSchema, nextState) {
+        if (nextSchema && typeof nextSchema === 'object') spec.schema = nextSchema;
+        if (nextState && typeof nextState === 'object') spec.state = nextState;
+        if (activeModalHandle && typeof activeModalHandle.update === 'function') {
+          activeModalHandle.update(nextSchema || spec.schema, nextState);
+        }
+      },
+      dispose() {
+        if (activeModalHandle && typeof activeModalHandle.close === 'function') {
+          try {
+            activeModalHandle.close();
+          } catch (_e) {}
+          activeModalHandle = null;
+        }
+        if (tabHandle && typeof tabHandle.unregister === 'function') {
+          try {
+            tabHandle.unregister();
+          } catch (_e) {}
+        }
+        pagesByKey.delete(key);
+      },
+    });
+  }
+
+  function listSettingsPages() {
+    return Array.from(pagesByKey.values())
+      .sort((a, b) => (a.order !== b.order ? a.order - b.order : a.key < b.key ? -1 : 1))
+      .map((r) =>
+        Object.freeze({
+          pluginId: r.pluginId,
+          id: r.id,
+          title: r.title,
+          order: r.order,
+          kind: r.kind,
+        })
+      );
+  }
+
+  function openSettingsPage(pluginId, pageId) {
+    const rec = pagesByKey.get(`${pluginId}:${pageId}`);
+    if (!rec) return { ok: false, reason: 'ERR_SETTINGS_PAGE_NOT_FOUND' };
+    const handle = rec.openPage();
+    return { ok: true, handle };
+  }
+
+  function disposePlugin(pluginId) {
+    for (const [key, rec] of Array.from(pagesByKey.entries())) {
+      if (rec.pluginId !== pluginId) continue;
+      if (rec.tabHandle && typeof rec.tabHandle.unregister === 'function') {
+        try {
+          rec.tabHandle.unregister();
+        } catch (_e) {}
+      }
+      pagesByKey.delete(key);
+    }
+  }
+
+  return Object.freeze({
+    registerSettingsPage,
+    listSettingsPages,
+    openSettingsPage,
+    disposePlugin,
+  });
+}
+
+module.exports = {
+  createSettingsPageCoordinator,
+};
+
+  },
+  "./context-v3.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * Clean-Slate ISP-Segregated AddonContextV3 Builder (v3.0.0 — SOLID #0).
+ *
+ * Always-on namespaces:
+ *   `apiVersion: 3`, `meta`, `env` (abstract surface & capabilities — NO raw `hostProfileId`),
+ *   `theme`, `i18n`, `ui` (Tier 1 + Tier 2 + Tier 3), `storage`, `events`, `services`, `lifecycle` (`AbortSignal`)
+ *
+ * Capability-gated namespaces (strictly omitted / `undefined` when undeclared, unapproved, or unsupported):
+ *   `net?`, `dom?`, `configBridge?`
+ */
+
+const { buildOverlayChrome, createSchemaUiController } = require('./ui-schema-renderer');
+const { validateSafeCssText } = require('./style-manager');
+
+const _ObjectFreeze = Object.freeze;
+const _ReflectApply = Reflect.apply;
+const _ArrayIsArray = Array.isArray;
+const _Set = Set;
+const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
+const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
+const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
+const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
+
+function detectLayoutMode(win) {
+  const w = win && Number.isFinite(Number(win.innerWidth)) ? Number(win.innerWidth) : 1280;
+  if (w > 0 && w <= 640) return 'mobile';
+  if (w > 0 && w <= 1024) return 'compact';
+  return 'desktop';
+}
+
+function createAddonContextV3({
+  doc,
+  win,
+  pluginMeta,
+  surface = 'desktop',
+  hostBridge = null,
+  extraNoTranslateAttributes = [],
+  styleManager,
+  slotManager,
+  surfaceGeometry,
+  placementEngine,
+  modalPortal,
+  regionObserver,
+  themeAndI18n,
+  toastManager,
+  statusItemRegistry,
+  settingsPageCoordinator,
+  serviceBus,
+  eventBus,
+  storageV3,
+  registerCommand,
+  listCommands,
+  invokeCommand,
+  isElementInsideIgnored,
+  readConfigScope,
+  writeConfigScope,
+  hasConfigBridge,
+  frozenConfigScopes,
+  hasSettingsBridge,
+  assertActive,
+  addDisposer,
+  disposeSelf,
+  runSafe,
+  addManagedListener,
+}) {
+  const pluginId = pluginMeta.pluginId;
+  const displayName = pluginMeta.displayName || pluginId;
+  const effectiveTrustLevel = pluginMeta.trustLevel || 'restricted';
+  const perms = pluginMeta.permissions && typeof pluginMeta.permissions === 'object' ? pluginMeta.permissions : {};
+  const netPerm = perms.net && typeof perms.net === 'object' ? perms.net : null;
+  const domPerm = perms.dom && typeof perms.dom === 'object' ? perms.dom : null;
+
+  const hasNetHttps = !!(netPerm && _ArrayIsArray(netPerm.httpsHosts) && netPerm.httpsHosts.length > 0);
+  const hasLocalLoopback = !!(
+    surface === 'desktop' &&
+      effectiveTrustLevel === 'trusted' &&
+      netPerm &&
+      _ArrayIsArray(netPerm.localLoopback) &&
+      netPerm.localLoopback.length > 0
+  );
+  const hasNetCapability = !!(
+    (hasNetHttps || hasLocalLoopback) && hostBridge && typeof hostBridge.netFetch === 'function'
+  );
+  const hasDocumentTransform = !!(
+    effectiveTrustLevel === 'trusted' &&
+      (pluginMeta.hasDocumentTransformSlot || (domPerm && domPerm.documentTransform === true))
+  );
+  const hasDomCapability = !!(
+    hasDocumentTransform ||
+      (domPerm && _ArrayIsArray(domPerm.anchors) && domPerm.anchors.length > 0) ||
+      (_ArrayIsArray(pluginMeta.uiSlots) && pluginMeta.uiSlots.length > 0)
+  );
+
+  // Lifecycle AbortController
+  const abortController = typeof AbortController === 'function' ? new AbortController() : null;
+  if (abortController) {
+    addDisposer(() => {
+      try {
+        abortController.abort();
+      } catch (_e) {}
+    });
+  }
+
+  // Helper to mount a Tier-2 or Tier-3 overlay using Top Layer + PlacementEngine + non-removable attribution
+  const activeOverlays = new _Set();
+  addDisposer(() => {
+    const closers = [];
+    _SetForEach(activeOverlays, (fn) => {
+      closers[closers.length] = fn;
+    });
+    for (let i = 0; i < closers.length; i += 1) {
+      try {
+        closers[i]();
+      } catch (_e) {}
+    }
+    _SetClear(activeOverlays);
+  });
+
+  function openPositionedOverlay(kind, opts = {}) {
+    assertActive();
+    const isModal = kind === 'modal';
+    const prevFocus = doc && doc.activeElement ? doc.activeElement : null;
+    const el = doc.createElement(isModal ? 'dialog' : 'div');
+    if (isModal) {
+      el.setAttribute('data-addon-host-modal-dialog', '1');
+      el.setAttribute('aria-modal', 'true');
+    } else {
+      el.setAttribute('popover', 'manual');
+      el.setAttribute('data-addon-host-popover', '1');
+    }
+    el.setAttribute('data-addon-host-v3-overlay', kind);
+    el.setAttribute('data-addon-host-owner', pluginId);
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('translate', 'no');
+    el.setAttribute('data-addon-host-no-translate', 'true');
+    el.setAttribute('data-addon-host-ignore', 'true');
+    for (let i = 0; i < extraNoTranslateAttributes.length; i += 1) {
+      el.setAttribute(extraNoTranslateAttributes[i], 'true');
+    }
+    if (el.style) {
+      el.style.padding = '0';
+      el.style.border = 'none';
+      el.style.background = 'transparent';
+      el.style.overflow = 'visible';
+      el.style.zIndex = String(2147483200 + activeOverlays.size + 1);
+    }
+
+    const shadowHost = isModal ? doc.createElement('div') : el;
+    if (isModal) el.appendChild(shadowHost);
+    const sr = typeof shadowHost.attachShadow === 'function' ? shadowHost.attachShadow({ mode: 'open' }) : shadowHost;
+
+    let closed = false;
+    let tracker = null;
+    let outsideCleanup = null;
+    let escCleanup = null;
+
+    const close = () => {
+      if (closed) return false;
+      closed = true;
+      _SetDelete(activeOverlays, close);
+      if (tracker) {
+        tracker.dispose();
+        tracker = null;
+      }
+      if (outsideCleanup) {
+        outsideCleanup();
+        outsideCleanup = null;
+      }
+      if (escCleanup) {
+        escCleanup();
+        escCleanup = null;
+      }
+      try {
+        if (isModal && typeof el.close === 'function' && el.open) el.close();
+        else if (!isModal && typeof el.hidePopover === 'function') el.hidePopover();
+      } catch (_e) {}
+      if (el.parentNode && typeof el.parentNode.removeChild === 'function') {
+        el.parentNode.removeChild(el);
+      }
+      if (prevFocus && typeof prevFocus.focus === 'function') {
+        try {
+          prevFocus.focus();
+        } catch (_e) {}
+      }
+      if (typeof opts.onClose === 'function') {
+        try {
+          opts.onClose();
+        } catch (_e) {}
+      }
+      return true;
+    };
+
+    const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
+    const { body, badge } = buildOverlayChrome(doc, sr, {
+      title: opts.title || '',
+      displayName,
+      tokenCss,
+      closable: opts.closable !== false,
+      onClose: close,
+    });
+
+    let schemaController = null;
+    if (opts.tree && typeof opts.tree === 'object') {
+      schemaController = createSchemaUiController(doc, body, {
+        tree: opts.tree,
+        state: opts.state || {},
+        onChange: opts.onChange || null,
+        onAction: opts.onAction || null,
+      });
+    }
+
+    const parent = doc.body || doc.documentElement;
+    if (parent && typeof parent.appendChild === 'function') {
+      parent.appendChild(el);
+    }
+
+    if (isModal && typeof el.showModal === 'function') {
+      try {
+        el.showModal();
+      } catch (_e) {}
+    } else if (!isModal && typeof el.showPopover === 'function') {
+      try {
+        el.showPopover();
+      } catch (_e) {}
+    }
+
+    const defaultZone = kind === 'panel' ? 'drawer' : kind === 'modal' ? 'surface-center' : 'anchor';
+    const placementSpec = {
+      zone: defaultZone,
+      ...(opts.placement && typeof opts.placement === 'object' ? opts.placement : {}),
+    };
+    tracker = placementEngine.trackElementPlacement(el, placementSpec);
+
+    if (isModal && typeof el.addEventListener === 'function') {
+      el.addEventListener('cancel', (ev) => {
+        if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+        close();
+      });
+    }
+
+    if (!isModal && opts.closeOnOutsideClick !== false && doc && typeof doc.addEventListener === 'function') {
+      const onPointerDown = (ev) => {
+        if (closed) return;
+        const path = typeof ev.composedPath === 'function' ? ev.composedPath() : [ev.target];
+        if (path.includes(el)) return;
+        const anchor = placementSpec.anchorEl;
+        if (anchor && (path.includes(anchor) || (typeof anchor.contains === 'function' && anchor.contains(ev.target)))) {
+          return;
+        }
+        close();
+      };
+      doc.addEventListener('pointerdown', onPointerDown, true);
+      outsideCleanup = () => doc.removeEventListener('pointerdown', onPointerDown, true);
+    }
+
+    if (win && typeof win.addEventListener === 'function') {
+      const onKeyDown = (ev) => {
+        if (closed || !ev || ev.key !== 'Escape') return;
+        if (ev.isComposing || ev.keyCode === 229 || ev.defaultPrevented) return;
+        if (ev.isTrusted === false) return;
+        if (typeof ev.preventDefault === 'function') ev.preventDefault();
+        close();
+      };
+      win.addEventListener('keydown', onKeyDown, true);
+      escCleanup = () => win.removeEventListener('keydown', onKeyDown, true);
+    }
+
+    _SetAdd(activeOverlays, close);
+
+    return _ObjectFreeze({
+      kind,
+      element: el,
+      bodyEl: opts.tree ? null : body, // Tier-2 schema overlays keep DOM host-owned; Tier-3 canvas overlays expose bodyEl
+      attributionBadge: badge,
+      getPlacement: () => (tracker ? tracker.reposition() : null),
+      reposition: () => (tracker ? tracker.reposition() : null),
+      update(nextTree, nextState) {
+        if (!schemaController) {
+          throw new Error('ERR_OVERLAY_NOT_SCHEMA_DRIVEN');
+        }
+        schemaController.update(nextTree, nextState);
+        if (tracker) tracker.reposition();
+      },
+      getState: () => (schemaController ? schemaController.getState() : null),
+      getElementById: (nodeId) => (schemaController ? schemaController.getElementById(nodeId) : null),
+      close,
+    });
+  }
+
+  function createStyleElementSafe(cssText) {
+    assertActive();
+    const check = validateSafeCssText(cssText, { scope: 'owner' });
+    if (!check.ok) {
+      throw new Error(check.reason || 'ERR_UNSAFE_CSS_CONSTRUCT');
+    }
+    const styleEl = doc.createElement('style');
+    styleEl.setAttribute('data-addon-host-owner', pluginId);
+    styleEl.textContent = String(cssText);
+    return styleEl;
+  }
+
+  function mountCanvas(slotId, opts = {}) {
+    assertActive();
+    const canvasOpts = { ...opts, shadow: true };
+    const slotHandle = slotManager.mountSlot(pluginMeta, slotId, canvasOpts);
+    if (slotHandle && slotHandle.shadowRoot && themeAndI18n) {
+      const tokenStyle = doc.createElement('style');
+      tokenStyle.setAttribute('data-addon-host-tokens', '1');
+      tokenStyle.textContent = themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode);
+      if (typeof slotHandle.shadowRoot.insertBefore === 'function' && slotHandle.shadowRoot.firstChild) {
+        slotHandle.shadowRoot.insertBefore(tokenStyle, slotHandle.shadowRoot.firstChild);
+      } else if (typeof slotHandle.shadowRoot.appendChild === 'function') {
+        slotHandle.shadowRoot.appendChild(tokenStyle);
+      }
+    }
+    return slotHandle;
+  }
+
+  const meta = _ObjectFreeze({
+    pluginId,
+    displayName,
+    version: pluginMeta.version || '0.0.0',
+    trustLevel: effectiveTrustLevel,
+    sourceSchemaVersion: pluginMeta.sourceSchemaVersion || 3,
+  });
+
+  // ISP + SOLID #0: Expose ONLY abstract capabilities and surface — NEVER raw hostProfileId
+  const env = _ObjectFreeze({
+    surface: surface === 'remote-web' ? 'remote-web' : 'desktop',
+    get layoutMode() {
+      return detectLayoutMode(win);
+    },
+    capabilities: _ObjectFreeze({
+      hasLocalLoopback,
+      hasNetHttps,
+      hasConfigBridge: !!hasConfigBridge,
+      hasSettingsBridge: !!hasSettingsBridge,
+      hasDocumentTransform,
+    }),
+  });
+
+  const ui = _ObjectFreeze({
+    // Tier 1: Zero-DOM Semantic Host Surfaces
+    showToast(opts) {
+      assertActive();
+      return toastManager.showToast(pluginMeta, opts);
+    },
+    confirm(opts) {
+      assertActive();
+      return toastManager.confirm(pluginMeta, opts);
+    },
+    prompt(opts) {
+      assertActive();
+      return toastManager.prompt(pluginMeta, opts);
+    },
+    registerCommand(commandId, spec) {
+      assertActive();
+      return registerCommand(commandId, spec);
+    },
+    listCommands() {
+      assertActive();
+      return listCommands();
+    },
+    invokeCommand() {
+      assertActive();
+      return _ReflectApply(invokeCommand, undefined, arguments);
+    },
+    registerStatusItem(spec) {
+      assertActive();
+      const handle = statusItemRegistry.registerStatusItem(pluginId, spec);
+      addDisposer(() => handle.dispose());
+      return handle;
+    },
+    registerSettingsPage(spec) {
+      assertActive();
+      const handle = settingsPageCoordinator.registerSettingsPage(pluginMeta, spec);
+      addDisposer(() => handle.dispose());
+      return handle;
+    },
+
+    // Tier 2: Host-Positioned Overlays + Typed Declarative Schema
+    openPopup(opts) {
+      return openPositionedOverlay('popup', opts);
+    },
+    openModal(opts) {
+      return openPositionedOverlay('modal', opts);
+    },
+    openPanel(opts) {
+      return openPositionedOverlay('panel', opts);
+    },
+
+    // Tier 3: Controlled Escape Hatch
+    mountCanvas,
+    createStyleElementSafe,
+    injectStyle(styleId, cssText, opts) {
+      assertActive();
+      return styleManager.injectStyle(pluginMeta, styleId, cssText, opts);
+    },
+    removeStyle(styleId) {
+      assertActive();
+      return styleManager.removeStyle(pluginId, styleId);
+    },
+    getSurfaceBounds(surfaceIdOrOpts) {
+      assertActive();
+      return surfaceGeometry.getSurfaceBounds(surfaceIdOrOpts);
+    },
+    getActiveSurface() {
+      assertActive();
+      return surfaceGeometry.getActiveSurface();
+    },
+    listSurfaces() {
+      assertActive();
+      return surfaceGeometry.listSurfaces();
+    },
+  });
+
+  const storagePerm = perms.storage && typeof perms.storage === 'object' ? perms.storage : {};
+  const storage = storageV3.createPluginStorage(pluginId, {
+    namespace: storagePerm.namespace || (pluginMeta.isolation && pluginMeta.isolation.storageNamespace) || pluginId,
+    maxBytes: storagePerm.maxBytes || 65536,
+    assertActive,
+    registerDisposer: addDisposer,
+  });
+
+  const events = _ObjectFreeze({
+    on(topic, handler) {
+      assertActive();
+      const unsub = eventBus.on(pluginId, topic, handler);
+      addDisposer(unsub);
+      return unsub;
+    },
+    once(topic, handler) {
+      assertActive();
+      const unsub = eventBus.once(pluginId, topic, handler);
+      addDisposer(unsub);
+      return unsub;
+    },
+    emit(topic, payload) {
+      assertActive();
+      return eventBus.emit(pluginId, topic, payload);
+    },
+  });
+
+  const services = _ObjectFreeze({
+    provide(serviceName, impl, opts) {
+      assertActive();
+      const handle = serviceBus.provide(pluginMeta, serviceName, impl, opts);
+      addDisposer(() => handle.dispose());
+      return handle;
+    },
+    has(serviceName) {
+      assertActive();
+      return serviceBus.has(pluginId, serviceName);
+    },
+    list() {
+      assertActive();
+      return serviceBus.list(pluginId);
+    },
+    call(serviceName, methodName, ...args) {
+      assertActive();
+      return serviceBus.call(pluginId, serviceName, methodName, ...args);
+    },
+  });
+
+  const lifecycle = _ObjectFreeze({
+    signal: abortController ? abortController.signal : null,
+    onDispose(fn) {
+      assertActive();
+      addDisposer(fn);
+    },
+    addManagedListener,
+    runSafe,
+    dispose: disposeSelf,
+  });
+
+  const ctx = {
+    apiVersion: 3,
+    meta,
+    env,
+    theme: themeAndI18n.createThemeHandle(addDisposer),
+    i18n: themeAndI18n.createI18nHandle(),
+    ui,
+    storage,
+    events,
+    services,
+    lifecycle,
+  };
+
+  // Capability-gated namespaces: strictly omitted when not declared/permitted/supported.
+  // Direct own assignment prior to _ObjectFreeze(ctx) avoids Object.defineProperty descriptor
+  // inheritance breaks if a peer plugin pollutes Object.prototype.get/set in World 998.
+  if (hasNetCapability) {
+    ctx.net = _ObjectFreeze({
+      fetch(url, init = {}) {
+        assertActive();
+        return hostBridge.netFetch(pluginId, url, init);
+      },
+    });
+  }
+
+  if (hasDomCapability) {
+    ctx.dom = _ObjectFreeze({
+      observeRegion(selector, callback, opts) {
+        assertActive();
+        return regionObserver.observeRegion(pluginId, selector, callback, opts);
+      },
+      isElementInsideIgnored(nodeOrEvent, opts) {
+        return isElementInsideIgnored(nodeOrEvent, opts);
+      },
+      mountSlot(slotId, opts) {
+        assertActive();
+        return slotManager.mountSlot(pluginMeta, slotId, opts);
+      },
+      unmountSlot(slotId) {
+        assertActive();
+        return slotManager.unmountSlot(pluginId, slotId);
+      },
+    });
+  }
+
+  if (hasConfigBridge) {
+    ctx.configBridge = _ObjectFreeze({
+      scopes: frozenConfigScopes,
+      read(scopeId) {
+        assertActive();
+        return readConfigScope(scopeId);
+      },
+      write(scopeId, nextDataOrRawJson, opts) {
+        assertActive();
+        return writeConfigScope(scopeId, nextDataOrRawJson, opts);
+      },
+    });
+  }
+
+  return _ObjectFreeze(ctx);
+}
+
+module.exports = {
+  createAddonContextV3,
+};
+
+  },
+  "./v2-compat-adapter.js": function(module, exports, require) {
+'use strict';
+
+/**
+ * 1-Major Backward-Compatibility Adapter (`createV2CompatAdapter(v3, legacy)`) — v3.0.0.
+ *
+ * Preserves 100% of the v2.x flat 21-method `addonHost` API contract for existing
+ * AddonManifest v1/v2 plugins throughout `v3.x` (planned removal: `v4.0.0`), while
+ * delegating shared primitives directly to `AddonContextV3`.
+ */
+
+const _ObjectFreeze = Object.freeze;
+const _ReflectApply = Reflect.apply;
+
+function createV2CompatAdapter(v3Context, legacy = {}) {
+  const {
+    hostProfileId = null,
+    hasSettingsBridge = false,
+    hasConfigBridge = false,
+    configScopes = _ObjectFreeze([]),
+    mountSlot,
+    unmountSlot,
+    openModal,
+    openPopover,
+    observeRegion,
+    registerSettingsTab,
+    isElementInsideIgnored,
+    getSettings,
+    onSettingsChange,
+    saveSettings,
+    readConfigScope,
+    writeConfigScope,
+  } = legacy;
+
+  return _ObjectFreeze({
+    pluginId: v3Context.meta.pluginId,
+    version: v3Context.meta.version,
+    trustLevel: v3Context.meta.trustLevel,
+    hostProfileId,
+    schemaVersion: 2,
+    sourceSchemaVersion: v3Context.meta.sourceSchemaVersion,
+    hasSettingsBridge,
+    hasConfigBridge,
+    configScopes,
+    // Opt-in bridge allowing v2 plugins to adopt v3 APIs incrementally during migration
+    v3: v3Context,
+
+    mountSlot(slotId, opts) {
+      return mountSlot(slotId, opts);
+    },
+    unmountSlot(slotId) {
+      return unmountSlot(slotId);
+    },
+    injectStyle(styleId, cssText, opts) {
+      return v3Context.ui.injectStyle(styleId, cssText, opts);
+    },
+    removeStyle(styleId) {
+      return v3Context.ui.removeStyle(styleId);
+    },
+    openModal(slotId, opts) {
+      return openModal(slotId, opts);
+    },
+    openPopover(slotId, opts) {
+      return openPopover(slotId, opts);
+    },
+    getSurfaceBounds(surfaceIdOrOpts) {
+      return v3Context.ui.getSurfaceBounds(surfaceIdOrOpts);
+    },
+    getActiveSurface() {
+      return v3Context.ui.getActiveSurface();
+    },
+    listSurfaces() {
+      return v3Context.ui.listSurfaces();
+    },
+    observeRegion(selector, callback, opts) {
+      return observeRegion(selector, callback, opts);
+    },
+    registerSettingsTab(tabId, opts) {
+      return registerSettingsTab(tabId, opts);
+    },
+    registerAction(actionId, spec) {
+      return v3Context.ui.registerCommand(actionId, spec);
+    },
+    listActions() {
+      return v3Context.ui.listCommands();
+    },
+    invokeAction() {
+      return _ReflectApply(v3Context.ui.invokeCommand, v3Context.ui, arguments);
+    },
+    isElementInsideIgnored(nodeOrEvent, opts) {
+      return isElementInsideIgnored(nodeOrEvent, opts);
+    },
+    getSettings() {
+      return getSettings();
+    },
+    onSettingsChange(callback) {
+      return onSettingsChange(callback);
+    },
+    saveSettings(nextData) {
+      return saveSettings(nextData);
+    },
+    readConfigScope(scopeId) {
+      return readConfigScope(scopeId);
+    },
+    writeConfigScope(scopeId, nextDataOrRawJson, opts) {
+      return writeConfigScope(scopeId, nextDataOrRawJson, opts);
+    },
+    addManagedListener(target, type, listener, opts) {
+      return v3Context.lifecycle.addManagedListener(target, type, listener, opts);
+    },
+    runSafe(fn) {
+      return v3Context.lifecycle.runSafe(fn);
+    },
+    onDispose(fn) {
+      return v3Context.lifecycle.onDispose(fn);
+    },
+    dispose() {
+      return v3Context.lifecycle.dispose();
+    },
+  });
+}
+
+module.exports = {
+  createV2CompatAdapter,
+};
+
+  },
   "./host-bridge-port.js": function(module, exports, require) {
 'use strict';
 
@@ -2507,6 +6611,7 @@ const HOST_BRIDGE_PORT_OPTIONAL_METHODS = _ObjectFreeze([
   'writeConfigScope',
   'getHostAdminState',
   'setRemoteAddonPreference',
+  'netFetch',
 ]);
 
 function isValidHostBridgePort(candidate) {
@@ -2541,6 +6646,7 @@ function wrapHostBridgePort(candidate) {
   const fnGetHostAdminState = typeof candidate.getHostAdminState === 'function' ? candidate.getHostAdminState : null;
   const fnSetRemoteAddonPreference =
     typeof candidate.setRemoteAddonPreference === 'function' ? candidate.setRemoteAddonPreference : null;
+  const fnNetFetch = typeof candidate.netFetch === 'function' ? candidate.netFetch : null;
 
   const wrapped = {
     docGenId,
@@ -2577,6 +6683,11 @@ function wrapHostBridgePort(candidate) {
   if (fnSetRemoteAddonPreference) {
     wrapped.setRemoteAddonPreference = function setRemoteAddonPreference(pluginId, enabled) {
       return _ReflectApply(fnSetRemoteAddonPreference, candidate, [pluginId, enabled]);
+    };
+  }
+  if (fnNetFetch) {
+    wrapped.netFetch = function netFetch(pluginId, url, init) {
+      return _ReflectApply(fnNetFetch, candidate, [pluginId, url, init]);
     };
   }
 
@@ -4577,9 +8688,19 @@ const { isElementInsideIgnored } = require('./ignore-guard');
 const { createStyleManager } = require('./style-manager');
 const { createSlotManager } = require('./slot-manager');
 const { createSurfaceGeometry } = require('./surface-geometry');
+const { createPlacementEngine } = require('./placement-engine');
 const { createModalPortal } = require('./modal-portal');
 const { createRegionObserver } = require('./region-observer');
 const { createSettingsTabCoordinator } = require('./settings-tab-coordinator');
+const { createThemeAndI18n } = require('./theme-i18n');
+const { createToastAndDialogManager } = require('./toast-manager');
+const { createServiceBus } = require('./service-bus');
+const { createEventBus } = require('./event-bus');
+const { createStorageV3 } = require('./storage-v3');
+const { createStatusItemRegistry } = require('./status-item-registry');
+const { createSettingsPageCoordinator } = require('./settings-page-coordinator');
+const { createAddonContextV3 } = require('./context-v3');
+const { createV2CompatAdapter } = require('./v2-compat-adapter');
 const { wrapHostBridgePort } = require('./host-bridge-port');
 const { createHostSettingsUi } = require('./host-settings-ui');
 
@@ -4657,18 +8778,22 @@ function buildUiGridMergeCss(uiGridMerges) {
     const s = typeof spec.section === 'string' ? _StringTrim(spec.section) : '';
     const t = typeof spec.secondary === 'string' ? _StringTrim(spec.secondary) : '';
     if (!isSafeGridMergeSelector(s) || !isSafeGridMergeSelector(t)) continue;
+    // SOLID #0: Read structural wrapper/grid selectors declaratively from HostProfile (zero vendor/Tailwind literals in kernel)
+    const rawWrap = typeof spec.wrapperSelector === 'string' ? _StringTrim(spec.wrapperSelector) : '[data-grid-wrapper]';
+    const rawGrid = typeof spec.gridSelector === 'string' ? _StringTrim(spec.gridSelector) : '[data-grid]';
+    if (!isSafeGridMergeSelector(rawWrap) || !isSafeGridMergeSelector(rawGrid)) continue;
     const minW = _NumberIsFinite(spec.minWidthPx) && spec.minWidthPx >= 0 ? _MathRound(spec.minWidthPx) : 640;
     const cols = _NumberIsFinite(spec.columns) && spec.columns >= 2 && spec.columns <= 12 ? _MathRound(spec.columns) : 2;
     const gap = _NumberIsFinite(spec.gapPx) && spec.gapPx >= 0 ? _MathRound(spec.gapPx) : 8;
     const hdrGap = _NumberIsFinite(spec.headerGapPx) && spec.headerGapPx >= 0 ? _MathRound(spec.headerGapPx) : 4;
-    const sel = `${s}:has(> div > div.grid):has(> ${t})`;
+    const sel = `${s}:has(> ${rawWrap} > ${rawGrid}):has(> ${t})`;
     const rule =
       `@media (min-width: ${minW}px) {` +
       `${sel} { display: grid; grid-template-columns: repeat(${cols}, minmax(0, 1fr)); gap: ${gap}px; }` +
       `${sel} > :first-child { grid-column: 1 / -1; margin-bottom: ${hdrGap}px; }` +
       `${sel} > [role="alert"] { grid-column: 1 / -1; }` +
-      `${sel} > div:has(> div.grid), ${sel} > div:has(> div.grid) > div.grid, ${sel} > ${t} { display: contents; }` +
-      `${sel} > div:has(> div.grid) > :not(div.grid) { grid-column: 1 / -1; order: 10; }` +
+      `${sel} > ${rawWrap}:has(> ${rawGrid}), ${sel} > ${rawWrap}:has(> ${rawGrid}) > ${rawGrid}, ${sel} > ${t} { display: contents; }` +
+      `${sel} > ${rawWrap}:has(> ${rawGrid}) > :not(${rawGrid}) { grid-column: 1 / -1; order: 10; }` +
       `}`;
     _ArrayPush(blocks, rule);
   }
@@ -4787,15 +8912,24 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   let booted = false;
   let docGenId = 0;
   let hostProfileId = null;
+  let hostSurface = 'desktop';
   let hostToken = null;
   let hostBridge = null;
   let extraNoTranslateAttributes = [];
   let styleManager = null;
   let slotManager = null;
   let surfaceGeometry = null;
+  let placementEngine = null;
   let modalPortal = null;
   let regionObserver = null;
   let settingsTabs = null;
+  let themeAndI18n = null;
+  let toastManager = null;
+  let serviceBus = null;
+  let eventBus = null;
+  let storageV3 = null;
+  let statusItemRegistry = null;
+  let settingsPageCoordinator = null;
   let hostSettingsUi = null;
 
   const pluginDisposers = new _Map(); // pluginId -> Set<Function>
@@ -4807,6 +8941,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   const pluginSettingsSnapshots = new _Map(); // pluginId -> frozen snapshot
   const pluginSettingsListeners = new _Map(); // pluginId -> Set<Function>
   const pluginConfigScopes = new _Map(); // pluginId -> Map<scopeId, { scopeId, access, maxBytes }>
+  const pluginV3Contexts = new _Map(); // pluginId -> AddonContextV3
   const stagedHandles = new _Map(); // runNonce -> { pluginId, handle } (S-1 CSP-safe two-phase execution)
   const recordedErrors = [];
   let nonceSeq = 0;
@@ -4892,6 +9027,11 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     if (!hostProfileId && hostBridge && hostBridge.profileId) {
       hostProfileId = hostBridge.profileId;
     }
+    hostSurface =
+      cfg.surface === 'remote-web' ||
+      (typeof hostProfileId === 'string' && hostProfileId.indexOf('remote') !== -1)
+        ? 'remote-web'
+        : 'desktop';
 
     styleManager = createStyleManager(doc);
     slotManager = createSlotManager(doc, {
@@ -4901,6 +9041,10 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     });
     surfaceGeometry = createSurfaceGeometry(doc, win, {
       uiSurfaces: cfg.uiSurfaces || {},
+      uiAnchors: cfg.uiAnchors || {},
+    });
+    placementEngine = createPlacementEngine(doc, win, {
+      surfaceGeometry,
       uiAnchors: cfg.uiAnchors || {},
     });
     modalPortal = createModalPortal(doc, win, {
@@ -4917,6 +9061,36 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     });
     regionObserver = createRegionObserver(doc, win);
     settingsTabs = createSettingsTabCoordinator();
+    themeAndI18n = createThemeAndI18n(doc, win);
+    toastManager = createToastAndDialogManager(doc, win, {
+      themeAndI18n,
+      extraNoTranslateAttributes,
+    });
+    eventBus = createEventBus({ reportPluginError });
+    storageV3 = createStorageV3(win);
+    serviceBus = createServiceBus({
+      onServiceRegistryChange: (serviceName) => {
+        if (serviceName === 'host.statusbar' && statusItemRegistry) {
+          statusItemRegistry.syncDelegation();
+        }
+      },
+    });
+    statusItemRegistry = createStatusItemRegistry(doc, win, {
+      serviceBus,
+      themeAndI18n,
+      extraNoTranslateAttributes,
+    });
+    settingsPageCoordinator = createSettingsPageCoordinator({
+      settingsTabs,
+      openTier2Modal: (pMeta, modalOpts) => {
+        const ctxRef = _MapGet(pluginV3Contexts, pMeta.pluginId);
+        return ctxRef ? ctxRef.ui.openModal(modalOpts) : null;
+      },
+      openTier3Modal: (pMeta, modalOpts) => {
+        const ctxRef = _MapGet(pluginV3Contexts, pMeta.pluginId);
+        return ctxRef ? ctxRef.ui.openModal(modalOpts) : null;
+      },
+    });
     if (
       typeof createHostSettingsUi === 'function' &&
       cfg.settingsUi &&
@@ -4996,6 +9170,13 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       if (modalPortal) modalPortal.disposePluginPortals(pluginId);
       if (regionObserver) regionObserver.disposePluginObservers(pluginId);
       if (settingsTabs) settingsTabs.disposePluginTabs(pluginId);
+      if (toastManager) toastManager.disposePlugin(pluginId);
+      if (statusItemRegistry) statusItemRegistry.disposePlugin(pluginId);
+      if (settingsPageCoordinator) settingsPageCoordinator.disposePlugin(pluginId);
+      if (serviceBus) serviceBus.disposePlugin(pluginId);
+      if (eventBus) eventBus.disposePlugin(pluginId);
+      if (storageV3) storageV3.disposePlugin(pluginId);
+      _MapDelete(pluginV3Contexts, pluginId);
       _MapDelete(pluginActions, pluginId);
       _MapDelete(pluginTrustLevels, pluginId);
       _SetDelete(pluginSettingsAllowed, pluginId);
@@ -5075,134 +9256,285 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       if (disposed) throw new _Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
     };
 
-    const handle = _ObjectFreeze({
-      pluginId,
-      version: pluginMeta.version || '0.0.0',
-      trustLevel: effectiveTrustLevel,
+    const registerCommand = (actionId, spec = {}) => {
+      assertActive();
+      if (!actionId || typeof actionId !== 'string') throw new _Error('ERR_INVALID_ACTION_ID');
+      let map = _MapGet(pluginActions, pluginId);
+      if (!map) {
+        map = new _Map();
+        _MapSet(pluginActions, pluginId, map);
+      }
+      const entry = {
+        pluginId,
+        actionId,
+        label: _String(spec.label || actionId),
+        run: typeof spec.run === 'function' ? spec.run : null,
+      };
+      _MapSet(map, actionId, entry);
+      return _ObjectFreeze({
+        unregister() {
+          _MapDelete(map, actionId);
+        },
+        dispose() {
+          _MapDelete(map, actionId);
+        },
+      });
+    };
+
+    const listCommands = () => {
+      assertActive();
+      const out = [];
+      _MapForEach(pluginActions, (map) => {
+        _MapForEach(map, (a) => {
+          const ownerTrust = _MapGet(pluginTrustLevels, a.pluginId) || 'restricted';
+          if (effectiveTrustLevel !== 'trusted' && ownerTrust === 'trusted' && a.pluginId !== pluginId) {
+            return;
+          }
+          _ArrayPush(out, { pluginId: a.pluginId, actionId: a.actionId, label: a.label });
+        });
+      });
+      return out;
+    };
+
+    const invokeCommand = (targetPluginId, actionId, ...args) => {
+      assertActive();
+      const targetTrust = _MapGet(pluginTrustLevels, targetPluginId) || 'restricted';
+      if (effectiveTrustLevel !== 'trusted' && targetTrust === 'trusted' && targetPluginId !== pluginId) {
+        throw new _Error(`ERR_ACTION_TRUST_FORBIDDEN:${targetPluginId}:${actionId}`);
+      }
+      const map = _MapGet(pluginActions, targetPluginId);
+      const a = map && _MapGet(map, actionId);
+      if (!a || !a.run) throw new _Error(`ERR_ACTION_NOT_FOUND:${targetPluginId}:${actionId}`);
+      return _ReflectApply(a.run, undefined, args);
+    };
+
+    const readConfigScope = (scopeId) => {
+      assertActive();
+      if (!hasConfigBridge) {
+        return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_NOT_DECLARED'));
+      }
+      if (typeof scopeId !== 'string' || !scopeId) {
+        return _PromiseReject(new _Error('ERR_INVALID_CONFIG_SCOPE_ID'));
+      }
+      const boundScopes = _MapGet(pluginConfigScopes, pluginId);
+      if (!boundScopes || !_MapHas(boundScopes, scopeId)) {
+        return _PromiseReject(new _Error(`ERR_CONFIG_SCOPE_NOT_DECLARED:${scopeId}`));
+      }
+      if (!hostBridge || typeof hostBridge.readConfigScope !== 'function') {
+        return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_UNAVAILABLE'));
+      }
+      return _PromiseResolve(hostBridge.readConfigScope(pluginId, scopeId)).then((res) => {
+        if (res && typeof res === 'object') {
+          return deepFreezeClone(res);
+        }
+        return _ObjectFreeze({
+          ok: false,
+          scopeId,
+          status: 'error',
+          data: null,
+          rawText: null,
+          sha256: null,
+          reason: 'ERR_CONFIG_READ_FAILED',
+        });
+      });
+    };
+
+    const writeConfigScope = (scopeId, nextDataOrRawJson, opts) => {
+      assertActive();
+      if (!hasConfigBridge) {
+        return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_NOT_DECLARED'));
+      }
+      if (typeof scopeId !== 'string' || !scopeId) {
+        return _PromiseReject(new _Error('ERR_INVALID_CONFIG_SCOPE_ID'));
+      }
+      const boundScopes = _MapGet(pluginConfigScopes, pluginId);
+      const scopeEntry = boundScopes ? _MapGet(boundScopes, scopeId) : null;
+      if (!scopeEntry) {
+        return _PromiseReject(new _Error(`ERR_CONFIG_SCOPE_NOT_DECLARED:${scopeId}`));
+      }
+      if (scopeEntry.access !== 'rw') {
+        return _PromiseReject(new _Error(`ERR_CONFIG_SCOPE_READ_ONLY:${scopeId}`));
+      }
+      if (!hostBridge || typeof hostBridge.writeConfigScope !== 'function') {
+        return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_UNAVAILABLE'));
+      }
+      let rawJson;
+      if (typeof nextDataOrRawJson === 'string') {
+        rawJson = nextDataOrRawJson;
+      } else if (nextDataOrRawJson && typeof nextDataOrRawJson === 'object' && !_ArrayIsArray(nextDataOrRawJson)) {
+        try {
+          const clean = sanitizeJsonPayload(nextDataOrRawJson);
+          rawJson = _JSONStringify(clean);
+        } catch (err) {
+          const msg = err && err.message ? err.message : 'ERR_CONFIG_INVALID_JSON';
+          return _PromiseReject(
+            new _Error(
+              msg === 'ERR_SETTINGS_UNSAFE_PROTO_KEY'
+                ? 'ERR_CONFIG_UNSAFE_PROTO_KEY'
+                : msg === 'ERR_SETTINGS_INVALID_JSON'
+                  ? 'ERR_CONFIG_INVALID_JSON'
+                  : msg
+            )
+          );
+        }
+      } else {
+        return _PromiseReject(new _Error('ERR_CONFIG_MUST_BE_OBJECT'));
+      }
+      if (typeof rawJson !== 'string') {
+        return _PromiseReject(new _Error('ERR_CONFIG_INVALID_JSON'));
+      }
+      const forwardOpts = {};
+      if (opts && typeof opts === 'object' && _ObjectHasOwn(opts, 'expectedSha256') && opts.expectedSha256 !== undefined) {
+        if (opts.expectedSha256 !== null && typeof opts.expectedSha256 !== 'string') {
+          return _PromiseReject(new _Error('ERR_INVALID_EXPECTED_SHA256'));
+        }
+        forwardOpts.expectedSha256 = opts.expectedSha256;
+      }
+      return _PromiseResolve(hostBridge.writeConfigScope(pluginId, scopeId, rawJson, forwardOpts)).then((res) => {
+        if (res && typeof res === 'object') {
+          return deepFreezeClone(res);
+        }
+        return _ObjectFreeze({
+          ok: false,
+          reason: 'ERR_CONFIG_WRITE_FAILED',
+          currentSha256: null,
+          snapshot: null,
+        });
+      });
+    };
+
+    const addManagedListenerFn = (target, type, listener, opts) => {
+      assertActive();
+      if (!target || typeof target.addEventListener !== 'function') {
+        throw new _Error('ERR_INVALID_EVENT_TARGET');
+      }
+      const safeListener = (ev) => {
+        if (disposed) return;
+        try {
+          const ret = listener(ev);
+          if (ret && typeof ret.then === 'function') {
+            ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : _String(err)));
+          }
+        } catch (err) {
+          reportPluginError(pluginId, err && err.message ? err.message : _String(err));
+        }
+      };
+      target.addEventListener(type, safeListener, opts);
+      const remove = () => {
+        if (typeof target.removeEventListener === 'function') {
+          try {
+            target.removeEventListener(type, safeListener, opts);
+          } catch (_e) {}
+        }
+      };
+      addPluginDisposer(pluginId, remove);
+      return remove;
+    };
+
+    const runSafeFn = (fn) => {
+      if (disposed || typeof fn !== 'function') return undefined;
+      try {
+        const ret = fn();
+        if (ret && typeof ret.then === 'function') {
+          return ret.catch((err) => {
+            reportPluginError(pluginId, err && err.message ? err.message : _String(err));
+            return undefined;
+          });
+        }
+        return ret;
+      } catch (err) {
+        reportPluginError(pluginId, err && err.message ? err.message : _String(err));
+        return undefined;
+      }
+    };
+
+    const disposeSelfFn = () => {
+      if (disposed) return;
+      disposePluginInternal(pluginId);
+    };
+
+    const isIgnoredFn = (nodeOrEvent, opts = {}) =>
+      isElementInsideIgnored(nodeOrEvent, {
+        extraNoTranslateAttributes,
+        ignoreElements: (opts && opts.ignoreElements) || [],
+      });
+
+    const v3Context = createAddonContextV3({
+      doc,
+      win,
+      pluginMeta,
+      surface: hostSurface,
+      hostBridge,
+      extraNoTranslateAttributes,
+      styleManager,
+      slotManager,
+      surfaceGeometry,
+      placementEngine,
+      modalPortal,
+      regionObserver,
+      themeAndI18n,
+      toastManager,
+      statusItemRegistry,
+      settingsPageCoordinator,
+      serviceBus,
+      eventBus,
+      storageV3,
+      registerCommand,
+      listCommands,
+      invokeCommand,
+      isElementInsideIgnored: isIgnoredFn,
+      readConfigScope,
+      writeConfigScope,
+      hasConfigBridge,
+      frozenConfigScopes,
+      hasSettingsBridge,
+      assertActive,
+      addDisposer: (fn) => addPluginDisposer(pluginId, fn),
+      disposeSelf: disposeSelfFn,
+      runSafe: runSafeFn,
+      addManagedListener: addManagedListenerFn,
+    });
+    _MapSet(pluginV3Contexts, pluginId, v3Context);
+
+    if (pluginMeta.sourceSchemaVersion === 3 || pluginMeta.apiVersion === 3) {
+      return v3Context;
+    }
+
+    const handle = createV2CompatAdapter(v3Context, {
       hostProfileId,
-      schemaVersion: 2,
-      sourceSchemaVersion: pluginMeta.sourceSchemaVersion || 2,
       hasSettingsBridge,
       hasConfigBridge,
       configScopes: frozenConfigScopes,
-
       mountSlot(slotId, opts) {
         assertActive();
         return slotManager.mountSlot(pluginMeta, slotId, opts);
       },
-
       unmountSlot(slotId) {
         assertActive();
         return slotManager.unmountSlot(pluginId, slotId);
       },
-
-      injectStyle(styleId, cssText, opts) {
-        assertActive();
-        return styleManager.injectStyle(pluginMeta, styleId, cssText, opts);
-      },
-
-      removeStyle(styleId) {
-        assertActive();
-        return styleManager.removeStyle(pluginId, styleId);
-      },
-
       openModal(slotId, opts) {
         assertActive();
         return modalPortal.openModal(pluginMeta, slotId, opts);
       },
-
       openPopover(slotId, opts) {
         assertActive();
         return modalPortal.openPopover(pluginMeta, slotId, opts);
       },
-
-      getSurfaceBounds(surfaceIdOrOpts) {
-        assertActive();
-        return surfaceGeometry.getSurfaceBounds(surfaceIdOrOpts);
-      },
-
-      getActiveSurface() {
-        assertActive();
-        return surfaceGeometry.getActiveSurface();
-      },
-
-      listSurfaces() {
-        assertActive();
-        return surfaceGeometry.listSurfaces();
-      },
-
       observeRegion(selector, callback, opts) {
         assertActive();
         return regionObserver.observeRegion(pluginId, selector, callback, opts);
       },
-
       registerSettingsTab(tabId, opts) {
         assertActive();
         return settingsTabs.registerSettingsTab(pluginId, tabId, opts);
       },
-
-      registerAction(actionId, spec = {}) {
-        assertActive();
-        if (!actionId || typeof actionId !== 'string') throw new _Error('ERR_INVALID_ACTION_ID');
-        let map = _MapGet(pluginActions, pluginId);
-        if (!map) {
-          map = new _Map();
-          _MapSet(pluginActions, pluginId, map);
-        }
-        const entry = {
-          pluginId,
-          actionId,
-          label: _String(spec.label || actionId),
-          run: typeof spec.run === 'function' ? spec.run : null,
-        };
-        _MapSet(map, actionId, entry);
-        return _ObjectFreeze({
-          unregister() {
-            _MapDelete(map, actionId);
-          },
-        });
-      },
-
-      listActions() {
-        assertActive();
-        const out = [];
-        _MapForEach(pluginActions, (map) => {
-          _MapForEach(map, (a) => {
-            const ownerTrust = _MapGet(pluginTrustLevels, a.pluginId) || 'restricted';
-            if (effectiveTrustLevel !== 'trusted' && ownerTrust === 'trusted' && a.pluginId !== pluginId) {
-              return;
-            }
-            _ArrayPush(out, { pluginId: a.pluginId, actionId: a.actionId, label: a.label });
-          });
-        });
-        return out;
-      },
-
-      invokeAction(targetPluginId, actionId, ...args) {
-        assertActive();
-        const targetTrust = _MapGet(pluginTrustLevels, targetPluginId) || 'restricted';
-        if (effectiveTrustLevel !== 'trusted' && targetTrust === 'trusted' && targetPluginId !== pluginId) {
-          throw new _Error(`ERR_ACTION_TRUST_FORBIDDEN:${targetPluginId}:${actionId}`);
-        }
-        const map = _MapGet(pluginActions, targetPluginId);
-        const a = map && _MapGet(map, actionId);
-        if (!a || !a.run) throw new _Error(`ERR_ACTION_NOT_FOUND:${targetPluginId}:${actionId}`);
-        return _ReflectApply(a.run, undefined, args);
-      },
-
-      isElementInsideIgnored(nodeOrEvent, opts = {}) {
-        return isElementInsideIgnored(nodeOrEvent, {
-          extraNoTranslateAttributes,
-          ignoreElements: (opts && opts.ignoreElements) || [],
-        });
-      },
-
+      isElementInsideIgnored: isIgnoredFn,
       getSettings() {
         assertActive();
         if (!hasSettingsBridge) return null;
         return _MapGet(pluginSettingsSnapshots, pluginId) || null;
       },
-
       onSettingsChange(callback) {
         assertActive();
         if (typeof callback !== 'function') {
@@ -5221,7 +9553,6 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
           _SetDelete(subs, callback);
         };
       },
-
       saveSettings(nextData) {
         assertActive();
         if (!hasSettingsBridge) {
@@ -5255,156 +9586,8 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
           });
         });
       },
-
-      readConfigScope(scopeId) {
-        assertActive();
-        if (!hasConfigBridge) {
-          return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_NOT_DECLARED'));
-        }
-        if (typeof scopeId !== 'string' || !scopeId) {
-          return _PromiseReject(new _Error('ERR_INVALID_CONFIG_SCOPE_ID'));
-        }
-        const boundScopes = _MapGet(pluginConfigScopes, pluginId);
-        if (!boundScopes || !_MapHas(boundScopes, scopeId)) {
-          return _PromiseReject(new _Error(`ERR_CONFIG_SCOPE_NOT_DECLARED:${scopeId}`));
-        }
-        if (!hostBridge || typeof hostBridge.readConfigScope !== 'function') {
-          return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_UNAVAILABLE'));
-        }
-        return _PromiseResolve(hostBridge.readConfigScope(pluginId, scopeId)).then((res) => {
-          if (res && typeof res === 'object') {
-            return deepFreezeClone(res);
-          }
-          return _ObjectFreeze({
-            ok: false,
-            scopeId,
-            status: 'error',
-            data: null,
-            rawText: null,
-            sha256: null,
-            reason: 'ERR_CONFIG_READ_FAILED',
-          });
-        });
-      },
-
-      writeConfigScope(scopeId, nextDataOrRawJson, opts) {
-        assertActive();
-        if (!hasConfigBridge) {
-          return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_NOT_DECLARED'));
-        }
-        if (typeof scopeId !== 'string' || !scopeId) {
-          return _PromiseReject(new _Error('ERR_INVALID_CONFIG_SCOPE_ID'));
-        }
-        const boundScopes = _MapGet(pluginConfigScopes, pluginId);
-        const scopeEntry = boundScopes ? _MapGet(boundScopes, scopeId) : null;
-        if (!scopeEntry) {
-          return _PromiseReject(new _Error(`ERR_CONFIG_SCOPE_NOT_DECLARED:${scopeId}`));
-        }
-        if (scopeEntry.access !== 'rw') {
-          return _PromiseReject(new _Error(`ERR_CONFIG_SCOPE_READ_ONLY:${scopeId}`));
-        }
-        if (!hostBridge || typeof hostBridge.writeConfigScope !== 'function') {
-          return _PromiseReject(new _Error('ERR_CONFIG_BRIDGE_UNAVAILABLE'));
-        }
-        let rawJson;
-        if (typeof nextDataOrRawJson === 'string') {
-          rawJson = nextDataOrRawJson;
-        } else if (nextDataOrRawJson && typeof nextDataOrRawJson === 'object' && !_ArrayIsArray(nextDataOrRawJson)) {
-          try {
-            const clean = sanitizeJsonPayload(nextDataOrRawJson);
-            rawJson = _JSONStringify(clean);
-          } catch (err) {
-            const msg = err && err.message ? err.message : 'ERR_CONFIG_INVALID_JSON';
-            return _PromiseReject(
-              new _Error(
-                msg === 'ERR_SETTINGS_UNSAFE_PROTO_KEY'
-                  ? 'ERR_CONFIG_UNSAFE_PROTO_KEY'
-                  : msg === 'ERR_SETTINGS_INVALID_JSON'
-                    ? 'ERR_CONFIG_INVALID_JSON'
-                    : msg
-              )
-            );
-          }
-        } else {
-          return _PromiseReject(new _Error('ERR_CONFIG_MUST_BE_OBJECT'));
-        }
-        if (typeof rawJson !== 'string') {
-          return _PromiseReject(new _Error('ERR_CONFIG_INVALID_JSON'));
-        }
-        const forwardOpts = {};
-        if (opts && typeof opts === 'object' && _ObjectHasOwn(opts, 'expectedSha256') && opts.expectedSha256 !== undefined) {
-          if (opts.expectedSha256 !== null && typeof opts.expectedSha256 !== 'string') {
-            return _PromiseReject(new _Error('ERR_INVALID_EXPECTED_SHA256'));
-          }
-          forwardOpts.expectedSha256 = opts.expectedSha256;
-        }
-        return _PromiseResolve(hostBridge.writeConfigScope(pluginId, scopeId, rawJson, forwardOpts)).then((res) => {
-          if (res && typeof res === 'object') {
-            return deepFreezeClone(res);
-          }
-          return _ObjectFreeze({
-            ok: false,
-            reason: 'ERR_CONFIG_WRITE_FAILED',
-            currentSha256: null,
-            snapshot: null,
-          });
-        });
-      },
-
-      addManagedListener(target, type, listener, opts) {
-        assertActive();
-        if (!target || typeof target.addEventListener !== 'function') {
-          throw new _Error('ERR_INVALID_EVENT_TARGET');
-        }
-        const safeListener = (ev) => {
-          if (disposed) return;
-          try {
-            const ret = listener(ev);
-            if (ret && typeof ret.then === 'function') {
-              ret.catch((err) => reportPluginError(pluginId, err && err.message ? err.message : _String(err)));
-            }
-          } catch (err) {
-            reportPluginError(pluginId, err && err.message ? err.message : _String(err));
-          }
-        };
-        target.addEventListener(type, safeListener, opts);
-        const remove = () => {
-          if (typeof target.removeEventListener === 'function') {
-            try {
-              target.removeEventListener(type, safeListener, opts);
-            } catch (_e) {}
-          }
-        };
-        addPluginDisposer(pluginId, remove);
-        return remove;
-      },
-
-      runSafe(fn) {
-        if (disposed || typeof fn !== 'function') return undefined;
-        try {
-          const ret = fn();
-          if (ret && typeof ret.then === 'function') {
-            return ret.catch((err) => {
-              reportPluginError(pluginId, err && err.message ? err.message : _String(err));
-              return undefined;
-            });
-          }
-          return ret;
-        } catch (err) {
-          reportPluginError(pluginId, err && err.message ? err.message : _String(err));
-          return undefined;
-        }
-      },
-
-      onDispose(fn) {
-        assertActive();
-        addPluginDisposer(pluginId, fn);
-      },
-
-      dispose() {
-        if (disposed) return;
-        disposePluginInternal(pluginId);
-      },
+      readConfigScope,
+      writeConfigScope,
     });
 
     return handle;
@@ -5529,9 +9712,19 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     disposePlugin,
     reportPluginError,
     getErrors: () => _ArraySlice(recordedErrors),
-    getBridgeStatus: () => ({ booted, docGenId, hostProfileId, hasBridge: !!hostBridge }),
+    getBridgeStatus: () => ({ booted, docGenId, hostProfileId, surface: hostSurface, hasBridge: !!hostBridge }),
     listSettingsTabs: () => (settingsTabs ? settingsTabs.listTabs() : []),
     selectSettingsTab,
+    listSettingsPages: () => (settingsPageCoordinator ? settingsPageCoordinator.listSettingsPages() : []),
+    openSettingsPage: (pid, pageId, token) => {
+      assertHostToken(token);
+      return settingsPageCoordinator ? settingsPageCoordinator.openSettingsPage(pid, pageId) : { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED' };
+    },
+    listStatusItems: () => (statusItemRegistry ? statusItemRegistry.listStatusItems() : []),
+    invokeStatusItem: (pid, itemId, clickEv, token) => {
+      assertHostToken(token);
+      return statusItemRegistry ? statusItemRegistry.invokeStatusItem(pid, itemId, clickEv) : { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED' };
+    },
     listHostActions,
     invokeHostAction,
     getSurfaceBounds: (surfaceIdOrOpts) => (surfaceGeometry ? surfaceGeometry.getSurfaceBounds(surfaceIdOrOpts) : null),

@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "hostVersion": "3.0.0",
+  "releaseBaseUrl": "https://github.com/jaeseongs95/antigravity-addons/releases/latest/download",
+  "safariRequiresCuratedBundle": true,
+  "channels": {
+    "curatedAllInOne": {
+      "id": "curated-all-in-one",
+      "title": "Official Curated All-in-One (.user.js)",
+      "url": "https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-curated-all-in-one.user.js",
+      "shadowMode": "closed",
+      "gmClosureShadowing": true,
+      "requiresExternalSri": false,
+      "safariSupported": true
+    },
+    "modularHostLib": {
+      "id": "modular-host-lib",
+      "title": "Modular @require Host Library (SRI-Pinned)",
+      "url": "https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js",
+      "hostLibSha256": null,
+      "requiresExternalSri": true,
+      "safariSupported": false
+    },
+    "hostOnlyUserscript": {
+      "id": "host-only-userscript",
+      "title": "Host-Only Remote Web Userscript (.user.js)",
+      "url": "https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.user.js",
+      "safariSupported": true
+    },
+    "desktopCli": {
+      "installCommand": "npx antigravity-addons --install",
+      "reconcileCommand": "npx antigravity-addons --reconcile --handoff --relaunch"
+    }
+  }
+}

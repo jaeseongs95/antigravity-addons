@@ -6,7 +6,19 @@
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
 > *(Formerly `antigravity-native-addon-host` — existing `addon-host` CLI command, `ADDON_HOST_LOADER_V2` marker, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Single, vendor-independent native desktop & universal remote web addon host framework (`v2.8.0`) with 1-click public HTTPS modular `@require` Userscript delivery + multi-sandbox coexistence (`--build-addon-userscript`), portable Userscript/MV3 bundling (`--build-remote`), built-in Settings `Addon Manager` (`애드온 관리`) UI, zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, per-surface content bounds & center-point API, SHA-256 trust pinning, bidirectional `settingsBridge`, and declarative named-scope `configBridge` (`AddonManifest.v2` with full `v1` backward compatibility).**
+**Single, vendor-independent API-First native desktop & universal remote web addon host framework (`v3.0.0`) with 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + Desktop-only `localLoopback`), separate `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+
+## Key Updates in v3.0.0 (API-First 3-Tier Framework, `@antigravity-addons/sdk` & 1-Click Hub)
+
+- **3-Tier ISP-Segregated `AddonContextV3` + 1-Major `v2` Compat Adapter** ([API_V3.md](./docs/API_V3.md)):
+  - **Tier 1 (Zero-DOM)**: `ui.showToast`, `ui.confirm`, `ui.prompt`, `ui.registerCommand`, `ui.registerStatusItem` (`host.statusbar` delegation + fallback bar + click modifiers), `ui.registerSettingsPage` (unified Desktop + Remote Web).
+  - **Tier 2 (Host-Positioned Overlays + Declarative JSON Schema)**: `ui.openPopup`, `ui.openModal`, `ui.openPanel` with `PlacementSpec` flip/shift/resize/scroll tracking, mobile `<=640px` bottom-sheet auto-switch, Top Layer `<dialog>`/`popover`, non-removable `Addon: <displayName>` badge, 16 closed primitives, static `visibleWhen`/`disabledWhen` (zero `eval`), and ID-based in-place `handle.update(nextTree)`.
+  - **Tier 3 (Controlled Escape Hatch)**: `ui.mountCanvas` (open Shadow DOM + `--ag-*` tokens), `ui.createStyleElementSafe`, manifest-gated `dom`.
+  - **ISP & Security**: `env` exposes abstract capabilities (never raw `hostProfileId`); undeclared `net`/`dom`/`configBridge` are omitted; dual-key `net.fetch` blocks SSRF/IMDS/DNS-rebinding on `httpsHosts` and enforces 0-redirect Desktop-trusted-only `localLoopback`; `services` enforces `<pluginId>.<name>`, default-deny `allowedCallers`, and prototype-key stripping.
+  - **SOLID #0**: Extracted remaining layout selectors out of `kernel.js` into profiles and enforced `npm run check:solid` in CI.
+- **Separate `@antigravity-addons/sdk` (`packages/sdk/`) & GitHub Pages 1-Click Hub (`docs/hub/`)**:
+  - Ships `index.d.ts`, `defineAddon()`, `h()`, real-kernel `createTestHost({ surface })`, `ag-addon init|check|dev|build|pack`, and reusable GH Action while keeping `antigravity-addons` runtime at **0 new npm dependencies**.
+  - Deterministic `npm run build:hub` / `check:hub` generates the static 1-Click Hub with Safari routing to the curated all-in-one `.user.js` (`mode: 'closed'` Shadow DOM + `GM_*` closure shadowing).
 
 ## Key Updates in v2.8.0 (Public HTTPS Modular Addon Userscripts & Multi-Sandbox Coexistence)
 

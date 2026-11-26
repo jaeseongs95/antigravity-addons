@@ -122,6 +122,18 @@ function compactUiSurfacesForShim(uiSurfaces, uiAnchors) {
   return out;
 }
 
+function scanStringValueLiterals(text) {
+  const out = [];
+  const tokenRe = /"(?:\\.|[^"\\])*"/g;
+  let m;
+  while ((m = tokenRe.exec(text)) !== null) {
+    const end = m.index + m[0].length;
+    if (text[end] === ':') continue; // Skip object keys
+    out.push(m[0]);
+  }
+  return out;
+}
+
 function serializeDeduplicatedConfigJs(obj) {
   const raw = serializeSafeInlineJson(obj);
   const arrBindings = [];
@@ -146,18 +158,34 @@ function serializeDeduplicatedConfigJs(obj) {
     expr = expr.split(literal).join(varName);
   }
 
+  // 1b. Deduplicate repeated surface-chrome trailing fragments (e.g. shared exclude* + safeInsets across uiSurfaces)
+  const objBindings = [];
+  const chromeRe = /"excludeLeftSelectors":_A\d+,"excludeRightSelectors":_A\d+,"excludeBottomSelectors":_A\d+,"safeInsets":\{"top":\d+\}/g;
+  const chromeCounts = new Map();
+  while ((m = chromeRe.exec(expr)) !== null) {
+    chromeCounts.set(m[0], (chromeCounts.get(m[0]) || 0) + 1);
+  }
+  let cIdx = 0;
+  for (const [frag, count] of chromeCounts.entries()) {
+    if (count < 2) continue;
+    const varName = `_C${cIdx}`;
+    cIdx += 1;
+    objBindings.push(`${varName}={${frag}}`);
+    expr = expr.split(frag).join(`...${varName}`);
+  }
+
   // 2. Deduplicate up to 2 shared base directory prefixes repeated across path values (e.g. long Windows/Linux CI paths)
   for (let pass = 0; pass < 2; pass += 1) {
     const varName = pass === 0 ? '_B' : '_B1';
     const minCount = pass === 0 ? 3 : 2;
     const minSavings = pass === 0 ? 40 : 20;
     const dirPrefixCounts = new Map();
-    const strRe = /"(?:\\.|[^"\\]){20,}"/g;
     const matchedStrings = [];
-    while ((m = strRe.exec(expr)) !== null) {
-      matchedStrings.push(m[0]);
+    for (const lit of scanStringValueLiterals(expr)) {
+      if (lit.length < 22) continue;
+      matchedStrings.push(lit);
       try {
-        const val = JSON.parse(m[0]);
+        const val = JSON.parse(lit);
         if (typeof val === 'string' && (val.includes('\\') || val.startsWith('/'))) {
           const sep = val.includes('\\') ? '\\' : '/';
           let cut = val.lastIndexOf(sep);
@@ -203,10 +231,12 @@ function serializeDeduplicatedConfigJs(obj) {
 
   // 3. Deduplicate repeated non-key string value literals shared across defs & expr (e.g. uiAnchors & uiSurfaces selectors)
   const valCounts = new Map();
-  const valRe = /"(?:\\.|[^"\\]){12,}"(?!\s*:)/g;
-  const scanTarget = arrBindings.join(',') + '\n' + expr;
-  while ((m = valRe.exec(scanTarget)) !== null) {
-    valCounts.set(m[0], (valCounts.get(m[0]) || 0) + 1);
+  for (const chunk of [...arrBindings, ...objBindings, expr]) {
+    for (const lit of scanStringValueLiterals(chunk)) {
+      if (lit.length >= 10) {
+        valCounts.set(lit, (valCounts.get(lit) || 0) + 1);
+      }
+    }
   }
   const strBindings = [];
   let sIdx = 0;
@@ -221,54 +251,58 @@ function serializeDeduplicatedConfigJs(obj) {
     for (let i = 0; i < arrBindings.length; i += 1) {
       arrBindings[i] = arrBindings[i].split(literal).join(varName);
     }
+    for (let i = 0; i < objBindings.length; i += 1) {
+      objBindings[i] = objBindings[i].split(literal).join(varName);
+    }
     expr = expr.split(literal).join(varName);
   }
 
-  // 4. Hoist one high-frequency common string prefix across remaining non-key string values (e.g. repeated attribute selector prefixes)
-  const prefCounts = new Map();
-  const allTargets = [...strBindings, ...arrBindings, expr];
-  const prefScanRe = /"(?:\\.|[^"\\]){16,}"(?!\s*:)/g;
-  const prefLiterals = new Set();
-  for (const chunk of allTargets) {
-    let pm;
-    while ((pm = prefScanRe.exec(chunk)) !== null) {
-      prefLiterals.add(pm[0]);
-      try {
-        const val = JSON.parse(pm[0]);
-        if (typeof val !== 'string' || val.length < 16) continue;
-        for (const delim of ['="', '/']) {
-          const pos = val.indexOf(delim);
-          if (pos >= 6 && pos + delim.length < val.length - 2) {
-            const pfx = val.slice(0, pos + delim.length);
-            prefCounts.set(pfx, (prefCounts.get(pfx) || 0) + 1);
+  // 4. Hoist up to 2 high-frequency common string prefixes across remaining non-key string values (keeps thin shim well <4096 B)
+  for (let pPass = 0; pPass < 2; pPass += 1) {
+    const pVar = pPass === 0 ? '_P' : `_P${pPass}`;
+    const prefCounts = new Map();
+    const allTargets = [...strBindings, ...arrBindings, ...objBindings, expr];
+    const prefLiterals = new Set();
+    for (const chunk of allTargets) {
+      for (const lit of scanStringValueLiterals(chunk)) {
+        if (lit.length < 14) continue;
+        prefLiterals.add(lit);
+        try {
+          const val = JSON.parse(lit);
+          if (typeof val !== 'string' || val.length < 12) continue;
+          for (const delim of ['="', ':', '/', '-']) {
+            const pos = val.indexOf(delim);
+            if (pos >= 5 && pos + delim.length < val.length - 2) {
+              const pfx = val.slice(0, pos + delim.length);
+              prefCounts.set(pfx, (prefCounts.get(pfx) || 0) + 1);
+            }
           }
-        }
-      } catch (_e) {}
+        } catch (_e) {}
+      }
     }
-  }
-  let bestValPfx = null;
-  let bestValPfxSavings = 0;
-  for (const [pfx, count] of prefCounts.entries()) {
-    if (count < 4) continue;
-    const encLen = serializeSafeInlineJson(pfx).length - 2;
-    const savings = count * (encLen - 3) - (encLen + 12);
-    if (savings > bestValPfxSavings) {
-      bestValPfxSavings = savings;
-      bestValPfx = pfx;
+    let bestValPfx = null;
+    let bestValPfxSavings = 0;
+    for (const [pfx, count] of prefCounts.entries()) {
+      if (count < 3) continue;
+      const encLen = serializeSafeInlineJson(pfx).length - 2;
+      const savings = count * (encLen - (pVar.length + 1)) - (encLen + 10);
+      if (savings > bestValPfxSavings) {
+        bestValPfxSavings = savings;
+        bestValPfx = pfx;
+      }
     }
-  }
-  if (bestValPfx && bestValPfxSavings >= 40) {
+    if (!bestValPfx || bestValPfxSavings < 16) break;
     const pfxReps = [];
     for (const lit of prefLiterals) {
       try {
         const val = JSON.parse(lit);
         if (typeof val === 'string' && val.startsWith(bestValPfx) && val.length > bestValPfx.length) {
           const rest = val.slice(bestValPfx.length);
-          pfxReps.push([lit, `_P+${serializeSafeInlineJson(rest)}`]);
+          pfxReps.push([lit, `${pVar}+${serializeSafeInlineJson(rest)}`]);
         }
       } catch (_e) {}
     }
-    if (pfxReps.length >= 4) {
+    if (pfxReps.length >= 3) {
       for (const [lit, rep] of pfxReps) {
         for (let i = 0; i < strBindings.length; i += 1) {
           strBindings[i] = strBindings[i].split(lit).join(rep);
@@ -276,15 +310,75 @@ function serializeDeduplicatedConfigJs(obj) {
         for (let i = 0; i < arrBindings.length; i += 1) {
           arrBindings[i] = arrBindings[i].split(lit).join(rep);
         }
+        for (let i = 0; i < objBindings.length; i += 1) {
+          objBindings[i] = objBindings[i].split(lit).join(rep);
+        }
         expr = expr.split(lit).join(rep);
       }
-      strBindings.unshift(`_P=${serializeSafeInlineJson(bestValPfx)}`);
+      strBindings.unshift(`${pVar}=${serializeSafeInlineJson(bestValPfx)}`);
+    }
+  }
+
+  // 5. Hoist high-frequency common string suffix (e.g. ".google.com") across remaining non-key string values
+  const sufCounts = new Map();
+  const sufLiterals = new Set();
+  for (const chunk of [...strBindings, ...arrBindings, ...objBindings, expr]) {
+    for (const lit of scanStringValueLiterals(chunk)) {
+      if (lit.length < 14) continue;
+      sufLiterals.add(lit);
+      try {
+        const val = JSON.parse(lit);
+        if (typeof val !== 'string' || val.length < 12) continue;
+        const dotPos = val.indexOf('.');
+        if (dotPos >= 2 && val.length - dotPos >= 8) {
+          const sfx = val.slice(dotPos);
+          sufCounts.set(sfx, (sufCounts.get(sfx) || 0) + 1);
+        }
+      } catch (_e) {}
+    }
+  }
+  let bestSfx = null;
+  let bestSfxSavings = 0;
+  for (const [sfx, count] of sufCounts.entries()) {
+    if (count < 3) continue;
+    const encLen = serializeSafeInlineJson(sfx).length - 2;
+    const savings = count * (encLen - 3) - (encLen + 10);
+    if (savings > bestSfxSavings) {
+      bestSfxSavings = savings;
+      bestSfx = sfx;
+    }
+  }
+  if (bestSfx && bestSfxSavings >= 14) {
+    const sfxReps = [];
+    for (const lit of sufLiterals) {
+      try {
+        const val = JSON.parse(lit);
+        if (typeof val === 'string' && val.endsWith(bestSfx) && val.length > bestSfx.length) {
+          const head = val.slice(0, val.length - bestSfx.length);
+          sfxReps.push([lit, `${serializeSafeInlineJson(head)}+_X`]);
+        }
+      } catch (_e) {}
+    }
+    if (sfxReps.length >= 3) {
+      for (const [lit, rep] of sfxReps) {
+        for (let i = 0; i < strBindings.length; i += 1) {
+          strBindings[i] = strBindings[i].split(lit).join(rep);
+        }
+        for (let i = 0; i < arrBindings.length; i += 1) {
+          arrBindings[i] = arrBindings[i].split(lit).join(rep);
+        }
+        for (let i = 0; i < objBindings.length; i += 1) {
+          objBindings[i] = objBindings[i].split(lit).join(rep);
+        }
+        expr = expr.split(lit).join(rep);
+      }
+      strBindings.unshift(`_X=${serializeSafeInlineJson(bestSfx)}`);
     }
   }
 
   const defs = [];
-  if (strBindings.length > 0) defs.push(`const ${strBindings.join(',')};`);
-  if (arrBindings.length > 0) defs.push(`const ${arrBindings.join(',')};`);
+  const merged = [...strBindings, ...arrBindings, ...objBindings];
+  if (merged.length > 0) defs.push(`const ${merged.join(',')};`);
   if (baseDefs.length > 0) defs.push(...baseDefs);
 
   return { defs, expr };
@@ -373,6 +467,12 @@ function buildHostLoaderScriptSource(
       ...(profile.settingsUi ? { settingsUi: profile.settingsUi } : {}),
       ...(profile.portalBridge ? { portalBridge: profile.portalBridge } : {}),
       ...(profile.updateSurvival ? { updateSurvival: profile.updateSurvival } : {}),
+      ...(Array.isArray(profile.forbiddenNetHosts) && profile.forbiddenNetHosts.length > 0
+        ? { forbiddenNetHosts: profile.forbiddenNetHosts }
+        : {}),
+      ...(profile.namedLoopbackTargets && Object.keys(profile.namedLoopbackTargets).length > 0
+        ? { namedLoopbackTargets: profile.namedLoopbackTargets }
+        : {}),
     },
   };
 

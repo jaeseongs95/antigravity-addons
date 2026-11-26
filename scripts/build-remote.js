@@ -171,16 +171,20 @@ ${source}
   }`;
 }
 
-function buildRemoteRuntimeBundleSource({ profile = ANTIGRAVITY_REMOTE_WEB_PROFILE, packedAddons = [] } = {}) {
+function buildRemoteRuntimeBundleSource({ profile = ANTIGRAVITY_REMOTE_WEB_PROFILE, packedAddons = [], drawerShadowMode = 'open' } = {}) {
   const browserProfile = toBrowserRemoteWebProfile(profile);
   const kernelSrc = toLf(buildRendererKernelBundleSource({ includeHostSettingsUi: false }));
   const remoteAdapterDir = path.join(REPO_ROOT, 'src', 'adapters', 'remote-web');
+  const netPolicyAbs = path.join(REPO_ROOT, 'src', 'core', 'net-policy.js');
 
-  const moduleEntries = REMOTE_BROWSER_MODULES.map((relId) => {
-    const abs = path.join(remoteAdapterDir, relId.slice(2));
-    const src = toLf(fs.readFileSync(abs, 'utf8'));
-    return `  ${JSON.stringify(relId)}: function(module, exports, require) {\n${src}\n  }`;
-  });
+  const moduleEntries = [
+    `  ${JSON.stringify('../../core/net-policy.js')}: function(module, exports, require) {\n${toLf(fs.readFileSync(netPolicyAbs, 'utf8'))}\n  }`,
+    ...REMOTE_BROWSER_MODULES.map((relId) => {
+      const abs = path.join(remoteAdapterDir, relId.slice(2));
+      const src = toLf(fs.readFileSync(abs, 'utf8'));
+      return `  ${JSON.stringify(relId)}: function(module, exports, require) {\n${src}\n  }`;
+    }),
+  ];
 
   const addonLiterals = (packedAddons || []).map(serializePackedAddonLiteral);
 
@@ -229,6 +233,7 @@ ${addonLiterals.join(',\n')}
       allowedOrigins: opts.allowedOrigins,
       allowLoopbackHttp: opts.allowLoopbackHttp,
       mountDrawer: opts.mountDrawer,
+      drawerShadowMode: opts.drawerShadowMode || ${JSON.stringify(drawerShadowMode === 'closed' ? 'closed' : 'open')},
       mountFallbackDock: opts.mountFallbackDock,
     });
   }
@@ -896,7 +901,7 @@ function verifyRemoteBundleAst(code) {
           const arg = node.arguments[0];
           if (!arg || arg.type !== 'Literal' || typeof arg.value !== 'string') {
             violations.push('FORBIDDEN_DYNAMIC_REQUIRE');
-          } else if (!arg.value.startsWith('./')) {
+          } else if (!arg.value.startsWith('./') && !/^(?:\.\.\/)+core\/[a-z0-9._-]+$/i.test(arg.value)) {
             violations.push(`FORBIDDEN_EXTERNAL_REQUIRE:${arg.value}`);
           }
         }

@@ -12,11 +12,15 @@
 
 const MANIFEST_SCHEMA_V1 = require('../../schemas/addon-manifest.v1.schema.json');
 const MANIFEST_SCHEMA_V2 = require('../../schemas/addon-manifest.v2.schema.json');
+const MANIFEST_SCHEMA_V3 = require('../../schemas/addon-manifest.v3.schema.json');
 const defaultValidateV1 = require('./generated/validate-v1.cjs');
 const defaultValidateV2 = require('./generated/validate-v2.cjs');
+const defaultValidateV3 = require('./generated/validate-v3.cjs');
 const { assertFileSystemPort } = require('./fs-port');
 const { normalizeManifestToV2 } = require('./manifest-normalizer');
 const { getPrivilegedRequirements } = require('./trust-policy-port');
+const { validateNetPermissions } = require('./net-policy');
+const { validateServicePermissions } = require('./service-bus-policy');
 
 const MANIFEST_SCHEMA = MANIFEST_SCHEMA_V1;
 const FORBIDDEN_IDS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -204,6 +208,7 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
   const compiled = {
     1: (validators && validators[1]) || defaultValidateV1,
     2: (validators && validators[2]) || defaultValidateV2,
+    3: (validators && validators[3]) || defaultValidateV3,
   };
 
   function validate(
@@ -214,6 +219,7 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       hostProfileId = null,
       compatibleHostProfiles = null,
       supportedCapabilities = null,
+      forbiddenNetHosts = null,
       hostVersion = undefined,
       strictTrustPolicy = true,
       fsPort: callFsPort = null,
@@ -224,12 +230,13 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
     }
 
     const schemaVer = manifest.schemaVersion;
-    const validateSchema = schemaVer === 1 ? compiled[1] : schemaVer === 2 ? compiled[2] : null;
+    const validateSchema =
+      schemaVer === 1 ? compiled[1] : schemaVer === 2 ? compiled[2] : schemaVer === 3 ? compiled[3] : null;
     if (!validateSchema) {
       return {
         ok: false,
         reason: 'ERR_MANIFEST_SCHEMA_INVALID',
-        errors: [`/schemaVersion must be 1 or 2 (got ${String(schemaVer)})`],
+        errors: [`/schemaVersion must be 1, 2, or 3 (got ${String(schemaVer)})`],
       };
     }
 
@@ -394,9 +401,12 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       }
     }
 
-    if (manifest.configBridge && typeof manifest.configBridge === 'object' && Array.isArray(manifest.configBridge.scopes)) {
+    const configBridgeSource =
+      manifest.configBridge ||
+      (manifest.permissions && typeof manifest.permissions === 'object' ? manifest.permissions.configBridge : null);
+    if (configBridgeSource && typeof configBridgeSource === 'object' && Array.isArray(configBridgeSource.scopes)) {
       const seenScopes = new Set();
-      for (const sc of manifest.configBridge.scopes) {
+      for (const sc of configBridgeSource.scopes) {
         if (!sc || typeof sc.scopeId !== 'string') continue;
         if (seenScopes.has(sc.scopeId)) {
           return {
@@ -409,9 +419,22 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       }
     }
 
-    // Declarative trust validation (v2 Default-Deny):
+    const perms = manifest.permissions && typeof manifest.permissions === 'object' ? manifest.permissions : null;
+    if (perms && perms.dom && perms.dom.documentTransform === true) {
+      hasDocumentTransformSlot = true;
+      if (manifest.isolation && manifest.isolation.respectsNoTranslate === false) {
+        return {
+          ok: false,
+          reason: 'ERR_DOCUMENT_TRANSFORM_MUST_RESPECT_NO_TRANSLATE',
+          errors: ['document-transform addons must keep isolation.respectsNoTranslate !== false'],
+        };
+      }
+    }
+
+    // Declarative trust validation (v2/v3 Default-Deny):
     // - `strictTrustPolicy` defaults to `true`.
-    // - Omitting `trustLevel` under strict mode defaults to `restricted`, blocking `mainHook`, `document-transform`, `settingsBridge`, and `configBridge`.
+    // - Omitting `trustLevel` under strict mode defaults to `restricted`, blocking `mainHook`,
+    //   `document-transform`, `settingsBridge`, `configBridge`, and `net.localLoopback`.
     // - Declaring `trustLevel: "trusted"` passes static manifest validation with `requiresTrustApproval: true`;
     //   actual runtime execution STILL requires host `trust-policy.json` SHA-256 pinning (TrustPolicyPort / TrustVerifier).
     const declaredTrust = manifest.trustLevel || null;
@@ -420,7 +443,7 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       declaredTrust ||
       (strictTrustPolicy
         ? 'restricted'
-        : reqs.hasMainHook || reqs.hasDocumentTransform || reqs.hasSettingsBridge || reqs.hasConfigBridge
+        : reqs.hasMainHook || reqs.hasDocumentTransform || reqs.hasSettingsBridge || reqs.hasConfigBridge || reqs.hasLocalLoopback
           ? 'trusted'
           : 'restricted');
     if (effectiveTrustLevel === 'restricted') {
@@ -451,6 +474,30 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
           reason: 'ERR_RESTRICTED_CONFIG_BRIDGE_FORBIDDEN',
           errors: ['Restricted plugins cannot declare "configBridge"; requires trustLevel: "trusted" and host trust approval'],
         };
+      }
+      if (reqs.hasLocalLoopback) {
+        return {
+          ok: false,
+          reason: 'ERR_RESTRICTED_LOCAL_LOOPBACK_FORBIDDEN',
+          errors: ['Restricted plugins cannot declare "permissions.net.localLoopback"; requires trustLevel: "trusted" and host trust approval'],
+        };
+      }
+    }
+
+    if (perms && perms.net) {
+      const netCheck = validateNetPermissions(perms.net, {
+        trustLevel: effectiveTrustLevel,
+        forbiddenHosts: Array.isArray(forbiddenNetHosts) ? forbiddenNetHosts : [],
+      });
+      if (!netCheck.ok) {
+        return { ok: false, reason: netCheck.reason, errors: netCheck.errors || [netCheck.reason] };
+      }
+    }
+
+    if (perms && perms.services) {
+      const svcCheck = validateServicePermissions(manifest.pluginId, perms.services);
+      if (!svcCheck.ok) {
+        return { ok: false, reason: svcCheck.reason, errors: svcCheck.errors || [svcCheck.reason] };
       }
     }
 
@@ -522,6 +569,7 @@ module.exports = {
   MANIFEST_SCHEMA,
   MANIFEST_SCHEMA_V1,
   MANIFEST_SCHEMA_V2,
+  MANIFEST_SCHEMA_V3,
   FORBIDDEN_IDS,
   RESERVED_SETTINGS_BRIDGE_FILES,
   SETTINGS_FILE_RE,

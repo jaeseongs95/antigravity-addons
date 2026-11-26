@@ -24,6 +24,7 @@ const { createConfigBridge } = require('./config-bridge');
 const { createHostAdminService } = require('./host-admin-service');
 const { createRendererInjector } = require('./renderer-injector');
 const { createUpdateSurvivalHook } = require('./update-survival-hook');
+const { createNetFetchBroker } = require('./net-fetch-broker');
 const { planAddonExecution } = require('../../core/lifecycle-coordinator');
 const { createNodeFileSystemPort } = require('../../adapters/node-fs-port');
 const { isPluginEnabledInConfig } = require('../../adapters/electron/config-reader');
@@ -176,6 +177,18 @@ function createHostRuntimeController(cfg, deps = {}) {
   const configBridge = createConfigBridge({
     configScopes: cfg.configScopes || {},
     reservedFilePaths: [cfg.trustPolicyPath, cfg.configJsonPath].filter(Boolean),
+    recordDiag,
+  });
+
+  const netFetchBroker = createNetFetchBroker({
+    forbiddenHosts: Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : [],
+    namedLoopbackTargets:
+      profile.namedLoopbackTargets && typeof profile.namedLoopbackTargets === 'object'
+        ? profile.namedLoopbackTargets
+        : {},
+    lookupFn: deps.netLookupFn || null,
+    httpModule: deps.httpModule,
+    httpsModule: deps.httpsModule,
     recordDiag,
   });
 
@@ -348,6 +361,32 @@ function createHostRuntimeController(cfg, deps = {}) {
         return hostAdminService.setRemoteAddonPreference(payload.pluginId, Boolean(payload.enabled));
       });
 
+      ipcMain.handle(IPC_CHANNELS.NET_FETCH, (ev, payload) => {
+        if (!payload || typeof payload !== 'object') {
+          return { ok: false, reason: 'ERR_INVALID_PAYLOAD' };
+        }
+        const check = originResolver.verifyClaimedEvent(ev, payload.docGenId);
+        if (!check.ok) {
+          return { ok: false, reason: check.reason || 'ERR_INVALID_PAYLOAD' };
+        }
+        const pluginId = typeof payload.pluginId === 'string' ? payload.pluginId : '';
+        const url = typeof payload.url === 'string' ? payload.url : '';
+        if (!pluginId || !url) {
+          return { ok: false, reason: 'ERR_INVALID_PAYLOAD' };
+        }
+        const wcId = ev && ev.sender && typeof ev.sender.id === 'number' ? ev.sender.id : null;
+        const binding = wcId !== null ? rendererInjector.getPluginNetBinding(wcId, pluginId) : null;
+        if (!binding) {
+          return { ok: false, reason: 'ERR_NET_NOT_DECLARED' };
+        }
+        return netFetchBroker.fetchForPlugin(binding, url, {
+          method: payload.method,
+          headers: payload.headers,
+          body: payload.body,
+          timeoutMs: payload.timeoutMs,
+        });
+      });
+
       ipcMain.handle(IPC_CHANNELS.PING, (ev, payload) => {
         const check = originResolver.verifyClaimedEvent(ev, payload && payload.docGenId);
         if (!check.ok) return { ok: false, reason: check.reason };
@@ -367,7 +406,7 @@ function createHostRuntimeController(cfg, deps = {}) {
     if (started) return controller;
     started = true;
 
-    // 1. Install PortalArbiter BEFORE app.whenReady() so we capture host's wcv:set-portal-overlay-open
+    // 1. Install PortalArbiter BEFORE app.whenReady() so we capture host's portal overlay channel
     portalArbiter.install();
     // 1b. Install Layer-1 fail-open update survival hook BEFORE updater module loads
     updateSurvivalHook.install();

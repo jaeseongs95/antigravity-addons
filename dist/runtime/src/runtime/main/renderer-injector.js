@@ -63,6 +63,7 @@ function createRendererInjector({
   const injectedPluginsByWcId = new Map(); // wcId -> Set<pluginId>
   const trustedSettingsByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, fileName, maxBytes }>
   const trustedConfigByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, scopes }>
+  const pluginNetByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, httpsHosts, localLoopback, allowLoopback }>
   const deliveredSettingsKeyByWcId = new Map(); // wcId -> Map<pluginId, string> (I1: per-window delivery dedup)
   const lifecycleStatesByWcId = new Map(); // wcId -> Map<pluginId, state> (I10: multi-window state isolation)
   const navAttemptSeqByWcId = new Map(); // wcId -> incremented on did-start-navigation to abort in-flight loops without bricking live doc (R-1)
@@ -247,6 +248,11 @@ function createRendererInjector({
       trustedConfigMap = new Map();
       trustedConfigByWcId.set(wcId, trustedConfigMap);
     }
+    let pluginNetMap = pluginNetByWcId.get(wcId);
+    if (!pluginNetMap) {
+      pluginNetMap = new Map();
+      pluginNetByWcId.set(wcId, pluginNetMap);
+    }
 
     // Dispose any previously injected plugins that are now disabled/unregistered
     const hostToken = hostTokensByWcId.get(wcId) || null;
@@ -263,6 +269,7 @@ function createRendererInjector({
             injectedSet.delete(oldId);
             trustedSettingsMap.delete(oldId);
             trustedConfigMap.delete(oldId);
+            pluginNetMap.delete(oldId);
             const delivMap = deliveredSettingsKeyByWcId.get(wcId);
             if (delivMap) delivMap.delete(oldId);
             setWindowLifecycleState(wcId, oldId, LIFECYCLE_STATES.DISPOSED);
@@ -322,15 +329,30 @@ function createRendererInjector({
             }))
           : [];
 
+        const netSpec =
+          addon.manifest.permissions &&
+          addon.manifest.permissions.net &&
+          typeof addon.manifest.permissions.net === 'object'
+            ? addon.manifest.permissions.net
+            : null;
+        const httpsHosts = netSpec && Array.isArray(netSpec.httpsHosts) ? netSpec.httpsHosts.slice() : [];
+        const allowLoopback = verified.effectiveTrustLevel === 'trusted';
+        const localLoopback =
+          allowLoopback && netSpec && Array.isArray(netSpec.localLoopback) ? netSpec.localLoopback.slice() : [];
+        const hasNetBinding = httpsHosts.length > 0 || localLoopback.length > 0;
+
         const pluginMeta = {
           pluginId: addon.pluginId,
+          displayName: addon.manifest.displayName || addon.pluginId,
           version: addon.manifest.version,
+          apiVersion: addon.manifest.apiVersion || (addon.manifest.sourceSchemaVersion === 3 ? 3 : 2),
           sourceSchemaVersion: addon.manifest.sourceSchemaVersion || 2,
           trustLevel: verified.effectiveTrustLevel,
           hasDocumentTransformSlot: Boolean(addon.hasDocumentTransformSlot),
           hasSettingsBridge,
           hasConfigBridge,
           configScopes,
+          permissions: addon.manifest.permissions || null,
           uiSlots: addon.manifest.uiSlots || [],
           isolation: addon.manifest.isolation || {},
         };
@@ -403,6 +425,14 @@ ${verified.source}
           trustedConfigMap.set(addon.pluginId, {
             pluginId: addon.pluginId,
             scopes: configScopes,
+          });
+        }
+        if (hasNetBinding) {
+          pluginNetMap.set(addon.pluginId, {
+            pluginId: addon.pluginId,
+            httpsHosts,
+            localLoopback,
+            allowLoopback,
           });
         }
 
@@ -556,6 +586,7 @@ ${verified.source}
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
       trustedConfigByWcId.delete(wcId);
+      pluginNetByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
       clearWindowLifecycleStates(wcId);
       syncSettingsBridgeBindings();
@@ -569,6 +600,7 @@ ${verified.source}
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
       trustedConfigByWcId.delete(wcId);
+      pluginNetByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
       clearWindowLifecycleStates(wcId);
       syncSettingsBridgeBindings();
@@ -596,6 +628,7 @@ ${verified.source}
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
       trustedConfigByWcId.delete(wcId);
+      pluginNetByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
       clearWindowLifecycleStates(wcId);
       navAttemptSeqByWcId.delete(wcId);
@@ -639,12 +672,27 @@ ${verified.source}
     };
   }
 
+  function getPluginNetBinding(wcId, pluginId) {
+    if (typeof pluginId !== 'string' || !pluginId) return null;
+    const map = pluginNetByWcId.get(wcId);
+    if (!map) return null;
+    const binding = map.get(pluginId);
+    if (!binding) return null;
+    return {
+      pluginId: binding.pluginId,
+      httpsHosts: binding.httpsHosts.slice(),
+      localLoopback: binding.localLoopback.slice(),
+      allowLoopback: Boolean(binding.allowLoopback),
+    };
+  }
+
   return Object.freeze({
     attachWebContents,
     scheduleSync,
     pushSettingsUpdate,
     getTrustedSettingsBinding,
     getTrustedConfigBinding,
+    getPluginNetBinding,
     recordRendererError,
     collectRendererErrors,
   });

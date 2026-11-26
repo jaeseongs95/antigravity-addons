@@ -28,11 +28,66 @@ function normalizeSlotToV2(slot, sourceSchemaVersion) {
   };
 }
 
+function normalizePermissionsV3(manifest, rawConfigBridge) {
+  const perms = manifest && manifest.permissions && typeof manifest.permissions === 'object' ? manifest.permissions : {};
+  const ui = perms.ui && typeof perms.ui === 'object' ? perms.ui : {};
+  const storage = perms.storage && typeof perms.storage === 'object' ? perms.storage : {};
+  const events = perms.events && typeof perms.events === 'object' ? perms.events : {};
+  const services = perms.services && typeof perms.services === 'object' ? perms.services : {};
+  const net = perms.net && typeof perms.net === 'object' ? perms.net : null;
+  const dom = perms.dom && typeof perms.dom === 'object' ? perms.dom : null;
+
+  return {
+    ui: {
+      toasts: ui.toasts !== false,
+      dialogs: ui.dialogs !== false,
+      overlays: ui.overlays !== false,
+      commands: ui.commands !== false,
+      statusItems: ui.statusItems !== false,
+      settingsPages: ui.settingsPages !== false,
+      canvas: ui.canvas !== false,
+    },
+    storage: {
+      maxBytes:
+        Number.isInteger(storage.maxBytes) && storage.maxBytes >= 1024 && storage.maxBytes <= 262144
+          ? storage.maxBytes
+          : 65536,
+      namespace: typeof storage.namespace === 'string' && storage.namespace ? storage.namespace : manifest.pluginId,
+    },
+    events: {
+      subscribe: Array.isArray(events.subscribe) ? events.subscribe.slice() : [],
+      emit: Array.isArray(events.emit) ? events.emit.slice() : [],
+    },
+    services: {
+      provide: Array.isArray(services.provide)
+        ? services.provide.map((p) => ({
+            name: p.name,
+            allowedCallers: Array.isArray(p.allowedCallers) ? p.allowedCallers.slice() : [],
+          }))
+        : [],
+      consume: Array.isArray(services.consume) ? services.consume.slice() : [],
+    },
+    net: net
+      ? {
+          httpsHosts: Array.isArray(net.httpsHosts) ? net.httpsHosts.map((h) => String(h).trim().toLowerCase()) : [],
+          localLoopback: Array.isArray(net.localLoopback) ? net.localLoopback.slice() : [],
+        }
+      : null,
+    dom: dom
+      ? {
+          documentTransform: Boolean(dom.documentTransform),
+          anchors: Array.isArray(dom.anchors) ? dom.anchors.slice() : [],
+        }
+      : null,
+    configBridge: rawConfigBridge && rawConfigBridge.scopes.length > 0 ? rawConfigBridge : null,
+  };
+}
+
 function normalizeManifestToV2(manifest) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
     throw new Error('ERR_INVALID_MANIFEST_FOR_NORMALIZATION');
   }
-  const sourceSchemaVersion = manifest.schemaVersion === 2 ? 2 : 1;
+  const sourceSchemaVersion = manifest.schemaVersion === 3 ? 3 : manifest.schemaVersion === 2 ? 2 : 1;
   const rawSlots = Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [];
   const rawIsolation = manifest.isolation && typeof manifest.isolation === 'object' ? manifest.isolation : {};
   const rawSettingsBridge =
@@ -51,13 +106,16 @@ function normalizeManifestToV2(manifest) {
         }
       : null;
 
+  const rawConfigSource =
+    manifest.configBridge ||
+    (manifest.permissions && typeof manifest.permissions === 'object' ? manifest.permissions.configBridge : null);
   const rawConfigBridge =
-    manifest.configBridge &&
-    typeof manifest.configBridge === 'object' &&
-    Array.isArray(manifest.configBridge.scopes) &&
-    manifest.configBridge.scopes.length > 0
+    rawConfigSource &&
+    typeof rawConfigSource === 'object' &&
+    Array.isArray(rawConfigSource.scopes) &&
+    rawConfigSource.scopes.length > 0
       ? {
-          scopes: manifest.configBridge.scopes
+          scopes: rawConfigSource.scopes
             .filter((s) => s && typeof s === 'object' && typeof s.scopeId === 'string' && s.scopeId.length > 0)
             .map((s) => ({
               scopeId: s.scopeId,
@@ -68,18 +126,25 @@ function normalizeManifestToV2(manifest) {
         }
       : null;
 
+  const normalizedSlots = rawSlots.map((s) => normalizeSlotToV2(s, sourceSchemaVersion));
+  const normalizedPermissions = sourceSchemaVersion === 3 ? normalizePermissionsV3(manifest, rawConfigBridge) : null;
+
   return {
     ...manifest,
-    schemaVersion: 2,
+    schemaVersion: sourceSchemaVersion === 3 ? 3 : 2,
+    apiVersion: sourceSchemaVersion === 3 ? 3 : 2,
     sourceSchemaVersion,
     loadOrder: typeof manifest.loadOrder === 'number' ? manifest.loadOrder : 100,
-    uiSlots: rawSlots.map((s) => normalizeSlotToV2(s, sourceSchemaVersion)),
+    uiSlots: normalizedSlots,
     isolation: {
+      noTranslate: rawIsolation.noTranslate !== false,
+      i18nSelfManaged: Boolean(rawIsolation.i18nSelfManaged),
       ...rawIsolation,
       respectsNoTranslate: rawIsolation.respectsNoTranslate !== false,
     },
     settingsBridge: rawSettingsBridge,
     configBridge: rawConfigBridge && rawConfigBridge.scopes.length > 0 ? rawConfigBridge : null,
+    ...(normalizedPermissions ? { permissions: normalizedPermissions } : {}),
     integrity:
       manifest.integrity && typeof manifest.integrity === 'object'
         ? {
@@ -95,5 +160,7 @@ function normalizeManifestToV2(manifest) {
 
 module.exports = {
   normalizeSlotToV2,
+  normalizePermissionsV3,
   normalizeManifestToV2,
+  normalizeManifest: normalizeManifestToV2,
 };

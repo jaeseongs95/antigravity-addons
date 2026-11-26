@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Antigravity Addons — 1-Click Install Hub (v3.0.0)</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: rgba(240, 246, 252, 0.14);
+      --text: #f0f6fc;
+      --muted: #8b949e;
+      --accent: #38bdf8;
+      --accent-fg: #082f49;
+      --warn-bg: rgba(251, 191, 36, 0.14);
+      --warn-fg: #fbbf24;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f8fafc;
+        --surface: #ffffff;
+        --border: rgba(15, 23, 42, 0.14);
+        --text: #0f172a;
+        --muted: #475569;
+        --accent: #0284c7;
+        --accent-fg: #ffffff;
+        --warn-bg: rgba(217, 119, 6, 0.12);
+        --warn-fg: #b45309;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px 20px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    main { max-width: 840px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    h1, h2 { margin: 0; }
+    p { margin: 0; color: var(--muted); }
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: rgba(56, 189, 248, 0.16);
+      color: var(--accent);
+      width: fit-content;
+    }
+    .notice {
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: var(--warn-bg);
+      color: var(--warn-fg);
+      font-size: 13px;
+    }
+    .notice[hidden] { display: none; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    a.btn, button.btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 14px;
+      text-decoration: none;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
+    }
+    a.btn.primary {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border-color: transparent;
+    }
+    a.btn[aria-disabled="true"] {
+      opacity: 0.45;
+      pointer-events: none;
+    }
+    pre {
+      margin: 0;
+      padding: 12px;
+      border-radius: 8px;
+      background: rgba(127, 127, 127, 0.12);
+      overflow-x: auto;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="card">
+      <span class="badge" id="hub-env-badge">Detecting environment...</span>
+      <h1>Antigravity Addons — 1-Click Install Hub</h1>
+      <p>API-First AddonManifest.v3 Host Framework (v3.0.0) for Desktop &amp; Remote Web.</p>
+      <div class="notice" id="hub-safari-notice" hidden>
+        Safari detected: External <code>@require #sha256=</code> SRI links are hidden on Safari until Userscripts SRI support is verified. Use the Official Curated All-in-One <code>.user.js</code> bundle below.
+      </div>
+    </header>
+
+    <section class="card" id="hub-remote-curated">
+      <h2>1. Remote Web — Official Curated All-in-One (Recommended)</h2>
+      <p>Single self-contained <code>.user.js</code> with closed Shadow DOM, <code>GM_*</code> closure shadowing, and zero external <code>@require</code> dependencies. Works on Safari (iOS/iPadOS/macOS), Violentmonkey, and Tampermonkey.</p>
+      <div class="actions">
+        <a class="btn primary" id="btn-curated-install" href="https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-curated-all-in-one.user.js">Install Curated All-in-One (.user.js)</a>
+        <a class="btn" id="btn-host-only-install" href="https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.user.js">Install Host-Only (.user.js)</a>
+      </div>
+    </section>
+
+    <section class="card" id="hub-remote-modular">
+      <h2>2. Remote Web — Modular SRI-Pinned @require (Chromium / Firefox)</h2>
+      <p>For Violentmonkey / Tampermonkey users installing individual modular addon Userscripts pinned via SHA-256 SRI.</p>
+      <div class="actions">
+        <a class="btn" id="btn-modular-lib" href="https://github.com/jaeseongs95/antigravity-addons/releases/latest/download/antigravity-remote-host.lib.js">Download SRI-Pinned Host Library</a>
+      </div>
+    </section>
+
+    <section class="card" id="hub-desktop">
+      <h2>3. Native Desktop App (Windows / macOS / Linux)</h2>
+      <p>Install or recover the native Desktop host after an app auto-update without losing addons or trust pins.</p>
+      <pre><code>npx antigravity-addons --install
+npx antigravity-addons --reconcile --handoff --relaunch</code></pre>
+    </section>
+  </main>
+  <script src="./hub.js" defer></script>
+</body>
+</html>
