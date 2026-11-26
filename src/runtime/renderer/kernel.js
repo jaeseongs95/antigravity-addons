@@ -422,6 +422,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         settingsUi: cfg.settingsUi,
         extraNoTranslateAttributes,
         settingsPageCoordinator,
+        themeAndI18n,
       });
       hostSettingsUi.start();
     }

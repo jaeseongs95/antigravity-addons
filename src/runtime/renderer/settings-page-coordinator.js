@@ -1,19 +1,23 @@
 'use strict';
 
 /**
- * Vendor-neutral Unified Settings Page Coordinator for Tier-1 `ui.registerSettingsPage` (v3.0.0 — SOLID #0).
+ * Vendor-neutral Unified Settings Page Coordinator for Tier-1 `ui.registerSettingsPage` (v3.0.3 — SOLID #0).
  *
- * - Bridges both Desktop Settings sidebar tabs (`settingsTabs`) AND Remote Web Drawer settings tabs
- *   through a single declarative API.
+ * - Bridges both Desktop Settings sidebar tabs (`settingsTabs` + inline Desktop Settings pane host)
+ *   AND Remote Web Drawer settings tabs through a single declarative API.
  * - Supports either a Tier-2 declarative JSON `schema` (with `state`, `onChange`, `onAction`)
  *   OR a Tier-3 Shadow-DOM `render(canvasRoot)` callback.
- * - Opens inside a host-managed modal/panel surface when triggered from Remote Web or Desktop
- *   without requiring plugins to query or mutate host Settings DOM directly.
+ * - When an inline Settings host (`setInlineHost`) is mounted (Desktop Settings view), renders
+ *   registered plugin pages directly inline inside the Settings content pane like a native tab;
+ *   otherwise falls back cleanly to a host-managed modal/panel overlay (Command Palette / Remote Web).
  */
 
 function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = null, openTier3Modal = null } = {}) {
   const pagesByKey = new Map(); // `${pluginId}:${pageId}` -> record
   const changeListeners = new Set();
+  let inlineHost = null;
+  let activePageKey = null;
+  let activePageHandle = null;
 
   function notifyChange() {
     for (const fn of Array.from(changeListeners)) {
@@ -21,6 +25,28 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
         fn();
       } catch (_e) {}
     }
+  }
+
+  function closeActiveHandle() {
+    const prev = activePageHandle;
+    activePageHandle = null;
+    activePageKey = null;
+    if (prev && typeof prev.close === 'function') {
+      try {
+        prev.close();
+      } catch (_e) {}
+    }
+  }
+
+  function setInlineHost(host) {
+    if (host && typeof host.canMountInline === 'function' && typeof host.mountInlinePage === 'function') {
+      inlineHost = host;
+      return () => {
+        if (inlineHost === host) inlineHost = null;
+      };
+    }
+    inlineHost = null;
+    return () => {};
   }
 
   function registerSettingsPage(pluginMeta, spec = {}) {
@@ -36,16 +62,36 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       throw new Error('ERR_SETTINGS_PAGE_REQUIRES_SCHEMA_OR_RENDER');
     }
 
-    let activeModalHandle = null;
     const openPage = () => {
-      if (activeModalHandle && typeof activeModalHandle.close === 'function') {
-        try {
-          activeModalHandle.close();
-        } catch (_e) {}
-        activeModalHandle = null;
+      closeActiveHandle();
+
+      let openedHandle = null;
+      const onClosed = () => {
+        if (activePageHandle === openedHandle) {
+          activePageHandle = null;
+          activePageKey = null;
+        }
+      };
+
+      if (inlineHost && typeof inlineHost.canMountInline === 'function' && inlineHost.canMountInline()) {
+        openedHandle = inlineHost.mountInlinePage({
+          pluginMeta,
+          pageId,
+          key,
+          title,
+          kind: hasSchema ? 'schema' : 'canvas',
+          spec,
+          onClosed,
+        });
+        if (openedHandle) {
+          activePageHandle = openedHandle;
+          activePageKey = key;
+          return openedHandle;
+        }
       }
+
       if (hasSchema && typeof openTier2Modal === 'function') {
-        activeModalHandle = openTier2Modal(pluginMeta, {
+        openedHandle = openTier2Modal(pluginMeta, {
           title,
           placement: { zone: 'surface-center', width: spec.width || 560 },
           tree: typeof spec.getSchema === 'function' ? spec.getSchema() : spec.schema,
@@ -53,25 +99,33 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
           onChange: spec.onChange || null,
           onAction: spec.onAction || null,
           onClose: () => {
-            activeModalHandle = null;
+            onClosed();
             if (typeof spec.onClose === 'function') spec.onClose();
           },
         });
-        return activeModalHandle;
+        if (openedHandle) {
+          activePageHandle = openedHandle;
+          activePageKey = key;
+        }
+        return openedHandle;
       }
       if (hasRender && typeof openTier3Modal === 'function') {
-        activeModalHandle = openTier3Modal(pluginMeta, {
+        openedHandle = openTier3Modal(pluginMeta, {
           title,
           placement: { zone: 'surface-center', width: spec.width || 560 },
           onClose: () => {
-            activeModalHandle = null;
+            onClosed();
             if (typeof spec.onClose === 'function') spec.onClose();
           },
         });
-        if (activeModalHandle && activeModalHandle.bodyEl) {
-          spec.render(activeModalHandle.bodyEl, activeModalHandle);
+        if (openedHandle) {
+          activePageHandle = openedHandle;
+          activePageKey = key;
+          if (openedHandle.bodyEl) {
+            spec.render(openedHandle.bodyEl, openedHandle);
+          }
         }
-        return activeModalHandle;
+        return openedHandle;
       }
       return null;
     };
@@ -103,16 +157,13 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       update(nextSchema, nextState) {
         if (nextSchema && typeof nextSchema === 'object') spec.schema = nextSchema;
         if (nextState && typeof nextState === 'object') spec.state = nextState;
-        if (activeModalHandle && typeof activeModalHandle.update === 'function') {
-          activeModalHandle.update(nextSchema || spec.schema, nextState);
+        if (activePageKey === key && activePageHandle && typeof activePageHandle.update === 'function') {
+          activePageHandle.update(nextSchema || spec.schema, nextState);
         }
       },
       dispose() {
-        if (activeModalHandle && typeof activeModalHandle.close === 'function') {
-          try {
-            activeModalHandle.close();
-          } catch (_e) {}
-          activeModalHandle = null;
+        if (activePageKey === key) {
+          closeActiveHandle();
         }
         if (tabHandle && typeof tabHandle.unregister === 'function') {
           try {
@@ -150,6 +201,9 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     let removed = false;
     for (const [key, rec] of Array.from(pagesByKey.entries())) {
       if (rec.pluginId !== pluginId) continue;
+      if (activePageKey === key) {
+        closeActiveHandle();
+      }
       if (rec.tabHandle && typeof rec.tabHandle.unregister === 'function') {
         try {
           rec.tabHandle.unregister();
@@ -172,6 +226,8 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     registerSettingsPage,
     listSettingsPages,
     openSettingsPage,
+    setInlineHost,
+    getActivePageKey: () => activePageKey,
     disposePlugin,
     onChange,
   });
