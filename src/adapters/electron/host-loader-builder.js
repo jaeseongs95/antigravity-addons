@@ -256,7 +256,7 @@ function serializeDeduplicatedConfigJs(obj) {
   const valCounts = new Map();
   for (const chunk of [...arrBindings, ...objBindings, expr]) {
     for (const lit of scanStringValueLiterals(chunk)) {
-      if (lit.length >= 10) {
+      if (lit.length >= 6) {
         valCounts.set(lit, (valCounts.get(lit) || 0) + 1);
       }
     }
@@ -284,19 +284,19 @@ function serializeDeduplicatedConfigJs(obj) {
     expr = replaceStringValueLiterals(expr, strRepMap);
   }
 
-  // 4. Hoist up to 2 high-frequency common string prefixes across remaining non-key string values (keeps thin shim well <4096 B)
-  for (let pPass = 0; pPass < 2; pPass += 1) {
+  // 4. Hoist up to 4 high-frequency common string prefixes across remaining non-key string values (keeps thin shim well <4096 B)
+  for (let pPass = 0; pPass < 4; pPass += 1) {
     const pVar = pPass === 0 ? '_P' : `_P${pPass}`;
     const prefCounts = new Map();
     const allTargets = [...strBindings, ...arrBindings, ...objBindings, expr];
     const prefLiterals = new Set();
     for (const chunk of allTargets) {
       for (const lit of scanStringValueLiterals(chunk)) {
-        if (lit.length < 14) continue;
+        if (lit.length < 12) continue;
         prefLiterals.add(lit);
         try {
           const val = JSON.parse(lit);
-          if (typeof val !== 'string' || val.length < 12) continue;
+          if (typeof val !== 'string' || val.length < 10) continue;
           for (const delim of ['="', ':', '/', '-']) {
             const pos = val.indexOf(delim);
             if (pos >= 5 && pos + delim.length < val.length - 2) {
@@ -318,7 +318,7 @@ function serializeDeduplicatedConfigJs(obj) {
         bestValPfx = pfx;
       }
     }
-    if (!bestValPfx || bestValPfxSavings < 16) break;
+    if (!bestValPfx || bestValPfxSavings < 8) break;
     const pfxRepMap = new Map();
     for (const lit of prefLiterals) {
       try {

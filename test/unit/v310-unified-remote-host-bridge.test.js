@@ -703,11 +703,17 @@ test('TC-V310-04: Desktop host-admin-service + host-settings-ui Remote Bridge & 
     assert.equal(rebuildCalls, 2);
     ui.dispose();
 
-    // Verify thin shim size stays strictly < 4096 bytes with remoteAllowedOrigins
-    const paths = ANTIGRAVITY_HOST_PROFILE.resolvePaths({
-      USERPROFILE: 'C:\\Users\\demo',
-      LOCALAPPDATA: 'C:\\Users\\demo\\AppData\\Local',
-    });
+    // Verify thin shim size stays strictly < 4096 bytes with remoteAllowedOrigins on both Windows & Linux
+    const paths = ANTIGRAVITY_HOST_PROFILE.resolvePaths(
+      process.platform === 'win32'
+        ? {
+            USERPROFILE: 'C:\\Users\\demo',
+            LOCALAPPDATA: 'C:\\Users\\demo\\AppData\\Local',
+          }
+        : {
+            HOME: '/home/runner/work/antigravity-addons/antigravity-addons/.tmp-v310',
+          }
+    );
     const shimSrc = buildHostLoaderScriptSource(paths, ANTIGRAVITY_HOST_PROFILE, {
       hostVersion: '3.1.0',
       buildSha8: 'abcd1234',
