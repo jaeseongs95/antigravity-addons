@@ -63,6 +63,7 @@ const _ObjectCreate = Object.create;
 const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+const _ReflectApply = Reflect.apply;
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
 const _MapSet = Function.prototype.call.bind(Map.prototype.set);
@@ -98,8 +99,9 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   function getDelegatedService() {
     if (!serviceBus || typeof serviceBus.getInternalService !== 'function') return null;
     const svc = serviceBus.getInternalService('host.statusbar');
-    if (svc && svc.impl && typeof svc.impl.registerItem === 'function') {
-      return svc.impl;
+    const impl = getOwn(svc, 'impl');
+    if (impl && typeof getOwn(impl, 'registerItem') === 'function') {
+      return impl;
     }
     return null;
   }
@@ -329,15 +331,20 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
           record.priority = _Number(pPriority);
         }
         const activeSvc = getDelegatedService();
-        if (activeSvc && typeof activeSvc.updateItem === 'function') {
+        const updateFn = getOwn(activeSvc, 'updateItem');
+        if (typeof updateFn === 'function') {
           try {
-            activeSvc.updateItem(pluginId, id, {
+            const updateArgs = [];
+            defineSafeDataProp(updateArgs, 0, pluginId);
+            defineSafeDataProp(updateArgs, 1, id);
+            defineSafeDataProp(updateArgs, 2, {
               label: record.label,
               icon: record.icon,
               tooltip: record.tooltip,
               badge: record.badge,
               priority: record.priority,
             });
+            _ReflectApply(updateFn, activeSvc, updateArgs);
           } catch (_e) {}
         } else {
           renderFallbackItems();
@@ -355,9 +362,13 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
           } catch (_e) {}
         } else {
           const activeSvc = getDelegatedService();
-          if (activeSvc && typeof activeSvc.removeItem === 'function') {
+          const removeFn = getOwn(activeSvc, 'removeItem');
+          if (typeof removeFn === 'function') {
             try {
-              activeSvc.removeItem(pluginId, id);
+              const removeArgs = [];
+              defineSafeDataProp(removeArgs, 0, pluginId);
+              defineSafeDataProp(removeArgs, 1, id);
+              _ReflectApply(removeFn, activeSvc, removeArgs);
             } catch (_e) {}
           }
         }

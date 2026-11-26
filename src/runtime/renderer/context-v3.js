@@ -17,6 +17,7 @@ const { validateSafeCssText } = require('./style-manager');
 const _ObjectCreate = Object.create;
 const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
+const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ReflectApply = Reflect.apply;
 const _ArrayIsArray = Array.isArray;
 const _Set = Set;
@@ -45,9 +46,33 @@ function defineSafeDataProp(target, key, value) {
   _ObjectDefineProperty(target, key, desc);
 }
 
-// NB-01: Module-scoped LIFO stack for v3 overlays so a single Escape closes only the top-most overlay.
+function pushSafe(arr, value) {
+  defineSafeDataProp(arr, arr.length, value);
+}
+
+function getOwn(obj, key) {
+  if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+  return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
+}
+
+// NB-01 / R4-NB-02: Module-scoped LIFO stack for v3 overlays with prototype-safe mutations.
 const v3EscapeStack = [];
 let v3OverlaySeq = 0;
+
+function removeFromEscapeStack(fn) {
+  let idx = -1;
+  for (let i = 0; i < v3EscapeStack.length; i += 1) {
+    if (v3EscapeStack[i] === fn) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return;
+  for (let i = idx; i < v3EscapeStack.length - 1; i += 1) {
+    defineSafeDataProp(v3EscapeStack, i, v3EscapeStack[i + 1]);
+  }
+  v3EscapeStack.length -= 1;
+}
 
 function detectLayoutMode(win) {
   const w = win && Number.isFinite(Number(win.innerWidth)) ? Number(win.innerWidth) : 1280;
@@ -91,32 +116,40 @@ function createAddonContextV3({
   runSafe,
   addManagedListener,
 }) {
-  const pluginId = pluginMeta.pluginId;
-  const displayName = pluginMeta.displayName || pluginId;
-  const effectiveTrustLevel = pluginMeta.trustLevel || 'restricted';
-  const perms = pluginMeta.permissions && typeof pluginMeta.permissions === 'object' ? pluginMeta.permissions : {};
-  const netPerm = perms.net && typeof perms.net === 'object' ? perms.net : null;
-  const domPerm = perms.dom && typeof perms.dom === 'object' ? perms.dom : null;
+  // R4-NB-02: Use own-property lookups so inherited Object.prototype.net/dom/trustLevel cannot expose undeclared capabilities.
+  const pluginId = getOwn(pluginMeta, 'pluginId');
+  const displayName = getOwn(pluginMeta, 'displayName') || pluginId;
+  const effectiveTrustLevel = getOwn(pluginMeta, 'trustLevel') || 'restricted';
+  const rawPerms = getOwn(pluginMeta, 'permissions');
+  const perms = rawPerms && typeof rawPerms === 'object' ? rawPerms : null;
+  const rawNet = getOwn(perms, 'net');
+  const netPerm = rawNet && typeof rawNet === 'object' ? rawNet : null;
+  const rawDom = getOwn(perms, 'dom');
+  const domPerm = rawDom && typeof rawDom === 'object' ? rawDom : null;
 
-  const hasNetHttps = !!(netPerm && _ArrayIsArray(netPerm.httpsHosts) && netPerm.httpsHosts.length > 0);
+  const netHttpsHosts = getOwn(netPerm, 'httpsHosts');
+  const netLocalLoopback = getOwn(netPerm, 'localLoopback');
+  const domAnchors = getOwn(domPerm, 'anchors');
+  const uiSlots = getOwn(pluginMeta, 'uiSlots');
+
+  const hasNetHttps = !!(_ArrayIsArray(netHttpsHosts) && netHttpsHosts.length > 0);
   const hasLocalLoopback = !!(
     surface === 'desktop' &&
       effectiveTrustLevel === 'trusted' &&
-      netPerm &&
-      _ArrayIsArray(netPerm.localLoopback) &&
-      netPerm.localLoopback.length > 0
+      _ArrayIsArray(netLocalLoopback) &&
+      netLocalLoopback.length > 0
   );
   const hasNetCapability = !!(
     (hasNetHttps || hasLocalLoopback) && hostBridge && typeof hostBridge.netFetch === 'function'
   );
   const hasDocumentTransform = !!(
     effectiveTrustLevel === 'trusted' &&
-      (pluginMeta.hasDocumentTransformSlot || (domPerm && domPerm.documentTransform === true))
+      (getOwn(pluginMeta, 'hasDocumentTransformSlot') || getOwn(domPerm, 'documentTransform') === true)
   );
   const hasDomCapability = !!(
     hasDocumentTransform ||
-      (domPerm && _ArrayIsArray(domPerm.anchors) && domPerm.anchors.length > 0) ||
-      (_ArrayIsArray(pluginMeta.uiSlots) && pluginMeta.uiSlots.length > 0)
+      (_ArrayIsArray(domAnchors) && domAnchors.length > 0) ||
+      (_ArrayIsArray(uiSlots) && uiSlots.length > 0)
   );
 
   // Lifecycle AbortController
@@ -134,7 +167,7 @@ function createAddonContextV3({
   addDisposer(() => {
     const closers = [];
     _SetForEach(activeOverlays, (fn) => {
-      closers[closers.length] = fn;
+      pushSafe(closers, fn);
     });
     for (let i = 0; i < closers.length; i += 1) {
       try {
@@ -195,8 +228,7 @@ function createAddonContextV3({
       if (closed) return false;
       closed = true;
       _SetDelete(activeOverlays, close);
-      const stackIdx = v3EscapeStack.indexOf(close);
-      if (stackIdx !== -1) v3EscapeStack.splice(stackIdx, 1);
+      removeFromEscapeStack(close);
       notifyPortalClaim(false);
       if (tracker) {
         tracker.dispose();
@@ -307,7 +339,7 @@ function createAddonContextV3({
       escCleanup = () => win.removeEventListener('keydown', onKeyDown, true);
     }
 
-    v3EscapeStack.push(close);
+    pushSafe(v3EscapeStack, close);
     notifyPortalClaim(true);
     _SetAdd(activeOverlays, close);
 
@@ -458,10 +490,15 @@ function createAddonContextV3({
     },
   });
 
-  const storagePerm = perms.storage && typeof perms.storage === 'object' ? perms.storage : {};
+  const rawStoragePerm = getOwn(perms, 'storage');
+  const storagePerm = rawStoragePerm && typeof rawStoragePerm === 'object' ? rawStoragePerm : null;
+  const isolationMeta = getOwn(pluginMeta, 'isolation');
   const storage = storageV3.createPluginStorage(pluginId, {
-    namespace: storagePerm.namespace || (pluginMeta.isolation && pluginMeta.isolation.storageNamespace) || pluginId,
-    maxBytes: storagePerm.maxBytes || 65536,
+    namespace:
+      getOwn(storagePerm, 'namespace') ||
+      getOwn(isolationMeta, 'storageNamespace') ||
+      pluginId,
+    maxBytes: getOwn(storagePerm, 'maxBytes') || 65536,
     assertActive,
     registerDisposer: addDisposer,
   });

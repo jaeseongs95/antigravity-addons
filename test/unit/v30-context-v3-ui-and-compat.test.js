@@ -514,6 +514,173 @@ test('TC-V30-08: services default-deny ACL, storage TTL + onDidChange, and v2 co
     }
   }
 
+  // R4-BLK-01 & R4-NB-01..02: Async Promise[Symbol.species]/constructor/then attacks & own-property hardening
+  const asyncVaultCtx = await host.mountPlugin({
+    schemaVersion: 3,
+    pluginId: 'r4-async-victim',
+    displayName: 'R4 Async Victim',
+    version: '1.0.0',
+    trustLevel: 'trusted',
+    capabilities: ['renderer'],
+    entry: { rendererScript: 'av.js' },
+    permissions: {
+      services: {
+        provide: [{ name: 'r4-async-victim.vault', allowedCallers: ['trusted-partner'] }],
+      },
+    },
+  });
+  asyncVaultCtx.services.provide('r4-async-victim.vault', {
+    getSecret: async () => ({ apiKey: 'SK-LIVE-9999-SECRET' }),
+    getFrozenSecret: () => Object.freeze(Promise.resolve({ apiKey: 'FROZEN-SECRET' })),
+  });
+
+  const OrigPromise = Promise;
+  const origSpeciesDesc = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+  const origProtoCtorDesc = Object.getOwnPropertyDescriptor(Promise.prototype, 'constructor');
+  const origProtoThen = Promise.prototype.then;
+  let stolenViaSpecies = null;
+  let injectedFnRan = false;
+  try {
+    // Variant A: Promise[Symbol.species] getter poisoning (tested with BOTH await and .then())
+    Object.defineProperty(Promise, Symbol.species, {
+      configurable: true,
+      get() {
+        return function EvilSpecies(executor) {
+          executor(
+            (v) => {
+              stolenViaSpecies = v;
+            },
+            () => {}
+          );
+          return OrigPromise.resolve({
+            apiKey: 'FORGED_VIA_SPECIES',
+            runEvil: () => {
+              injectedFnRan = true;
+            },
+          });
+        };
+      },
+    });
+    const r4AwaitRes = await partnerCtx.services.call('r4-async-victim.vault', 'getSecret');
+    assert.equal(stolenViaSpecies, null, 'R4-BLK-01: Promise[Symbol.species] must NOT steal async service payload');
+    assert.equal(r4AwaitRes.apiKey, 'SK-LIVE-9999-SECRET');
+    assert.equal(typeof r4AwaitRes.runEvil, 'undefined');
+
+    const r4ThenRes = await new OrigPromise((resolve, reject) => {
+      partnerCtx.services.call('r4-async-victim.vault', 'getSecret').then(resolve, reject);
+    });
+    assert.equal(stolenViaSpecies, null, 'R4-BLK-01: .then() chain must NOT invoke Promise[Symbol.species]');
+    assert.equal(r4ThenRes.apiKey, 'SK-LIVE-9999-SECRET');
+
+    // Non-extensible frozen Promise while Symbol.species is poisoned MUST fail closed
+    assert.throws(
+      () => partnerCtx.services.call('r4-async-victim.vault', 'getFrozenSecret'),
+      /ERR_SERVICE_PROMISE_UNSAFE/,
+      'R4-BLK-01: non-extensible Promise under poisoned Promise[Symbol.species] must fail closed'
+    );
+
+    // Variant B: Promise.prototype.constructor + Promise.prototype.then poisoning
+    Object.defineProperty(Promise.prototype, 'constructor', {
+      configurable: true,
+      writable: true,
+      value: {
+        [Symbol.species]: function EvilProtoCtor(executor) {
+          executor(
+            (v) => {
+              stolenViaSpecies = v;
+            },
+            () => {}
+          );
+          return OrigPromise.resolve({ apiKey: 'FORGED_KEY' });
+        },
+      },
+    });
+    Promise.prototype.then = function () {
+      injectedFnRan = true;
+      return OrigPromise.resolve({ apiKey: 'FORGED_THEN' });
+    };
+    const r4ProtoRes = await partnerCtx.services.call('r4-async-victim.vault', 'getSecret');
+    assert.equal(stolenViaSpecies, null, 'R4-BLK-01: Promise.prototype.constructor must NOT steal async payload');
+    assert.equal(injectedFnRan, false, 'R4-BLK-01: Promise.prototype.then must NOT hijack returned Promise');
+    assert.equal(r4ProtoRes.apiKey, 'SK-LIVE-9999-SECRET');
+  } finally {
+    if (origSpeciesDesc) Object.defineProperty(Promise, Symbol.species, origSpeciesDesc);
+    if (origProtoCtorDesc) Object.defineProperty(Promise.prototype, 'constructor', origProtoCtorDesc);
+    Promise.prototype.then = origProtoThen;
+  }
+
+  // R4-NB-01: Inherited Object.prototype.updateItem/removeItem must NOT intercept status item updates/dispose
+  const minimalBarCtx = await host.mountPlugin({
+    schemaVersion: 3,
+    pluginId: 'r4-minimal-bar',
+    displayName: 'Minimal Bar',
+    version: '1.0.0',
+    trustLevel: 'trusted',
+    capabilities: ['renderer'],
+    entry: { rendererScript: 'mb.js' },
+    permissions: { services: { provide: [{ name: 'host.statusbar', allowedCallers: ['*'] }] } },
+  });
+  const barHandle = minimalBarCtx.services.provide('host.statusbar', {
+    registerItem() {
+      return {};
+    },
+  });
+  let stolenUpdate = null;
+  let stolenRemove = null;
+  Object.defineProperty(Object.prototype, 'updateItem', {
+    configurable: true,
+    writable: true,
+    value(pid, id, patch) {
+      stolenUpdate = { pid, id, patch };
+    },
+  });
+  Object.defineProperty(Object.prototype, 'removeItem', {
+    configurable: true,
+    writable: true,
+    value(pid, id) {
+      stolenRemove = { pid, id };
+    },
+  });
+  try {
+    const r4Item = victimCtx.ui.registerStatusItem({ id: 'r4-secret-btn', label: 'Init' });
+    r4Item.update({ label: 'Balance: $999' });
+    r4Item.dispose();
+    assert.equal(stolenUpdate, null, 'R4-NB-01: Object.prototype.updateItem must NOT steal status updates');
+    assert.equal(stolenRemove, null, 'R4-NB-01: Object.prototype.removeItem must NOT intercept status disposal');
+  } finally {
+    delete Object.prototype.updateItem;
+    delete Object.prototype.removeItem;
+    barHandle.dispose();
+  }
+
+  // R4-NB-02: Inherited Object.prototype.net/dom must NOT expose ctx.net or ctx.dom on minimal v3 plugin
+  Object.defineProperty(Object.prototype, 'net', {
+    configurable: true,
+    writable: true,
+    value: { httpsHosts: ['api.example.com'] },
+  });
+  Object.defineProperty(Object.prototype, 'dom', {
+    configurable: true,
+    writable: true,
+    value: { anchors: ['sidebar'] },
+  });
+  try {
+    const r4MinCtx = await host.mountPlugin({
+      schemaVersion: 3,
+      pluginId: 'r4-minimal-v3',
+      displayName: 'R4 Minimal',
+      version: '1.0.0',
+      capabilities: ['renderer'],
+      entry: { rendererScript: 'm.js' },
+    });
+    assert.equal(Object.prototype.hasOwnProperty.call(r4MinCtx, 'net'), false, 'R4-NB-02: Object.prototype.net must NOT expose ctx.net');
+    assert.equal(Object.prototype.hasOwnProperty.call(r4MinCtx, 'dom'), false, 'R4-NB-02: Object.prototype.dom must NOT expose ctx.dom');
+    assert.equal(r4MinCtx.env.capabilities.hasNetHttps, false);
+  } finally {
+    delete Object.prototype.net;
+    delete Object.prototype.dom;
+  }
+
   // v2 plugin mounted on the SAME v3 kernel receives full v2 compat adapter
   const v2Handle = await host.mountPlugin({
     schemaVersion: 2,

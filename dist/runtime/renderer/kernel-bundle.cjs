@@ -5091,6 +5091,8 @@ const _ObjectFreeze = Object.freeze;
 const _ObjectKeys = Object.keys;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ObjectGetPrototypeOf = Object.getPrototypeOf;
+const _ObjectIsExtensible = Object.isExtensible;
+const _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const _ArrayIsArray = Array.isArray;
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
@@ -5103,8 +5105,56 @@ const _SetHas = Function.prototype.call.bind(Set.prototype.has);
 const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
 const _StringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
 const _ReflectApply = Reflect.apply;
+const _Promise = Promise;
 const _PromisePrototype = Promise.prototype;
 const _PromiseThen = Function.prototype.call.bind(Promise.prototype.then);
+const _SymbolSpecies = Symbol.species;
+const _OrigPromiseSpeciesGetter = (_ObjectGetOwnPropertyDescriptor(_Promise, _SymbolSpecies) || {}).get;
+
+function pinSafePromiseConstructor(p) {
+  if (_ObjectIsExtensible(p)) {
+    const desc = _ObjectCreate(null);
+    desc.value = undefined;
+    desc.writable = true;
+    desc.configurable = true;
+    desc.enumerable = false;
+    _ObjectDefineProperty(p, 'constructor', desc);
+    return;
+  }
+  // R4-BLK-01: Non-extensible Promise — fail closed unless constructor & Promise[Symbol.species] are provably unpoisoned.
+  if (_ObjectHasOwn(p, 'constructor')) {
+    const ownDesc = _ObjectGetOwnPropertyDescriptor(p, 'constructor');
+    if (ownDesc && !ownDesc.get && !ownDesc.set && ownDesc.value === undefined) return;
+    throw new _Error('ERR_SERVICE_PROMISE_UNSAFE');
+  }
+  const protoDesc = _ObjectGetOwnPropertyDescriptor(_PromisePrototype, 'constructor');
+  const speciesDesc = _ObjectGetOwnPropertyDescriptor(_Promise, _SymbolSpecies);
+  if (
+    protoDesc &&
+    !protoDesc.get &&
+    !protoDesc.set &&
+    protoDesc.value === _Promise &&
+    speciesDesc &&
+    speciesDesc.get === _OrigPromiseSpeciesGetter &&
+    !speciesDesc.set
+  ) {
+    return;
+  }
+  throw new _Error('ERR_SERVICE_PROMISE_UNSAFE');
+}
+
+function hardenReturnedPromise(p) {
+  pinSafePromiseConstructor(p);
+  const thenDesc = _ObjectCreate(null);
+  thenDesc.value = function safeThen(onFulfilled, onRejected) {
+    return hardenReturnedPromise(_PromiseThen(p, onFulfilled, onRejected));
+  };
+  thenDesc.writable = true;
+  thenDesc.configurable = true;
+  thenDesc.enumerable = false;
+  _ObjectDefineProperty(p, 'then', thenDesc);
+  return p;
+}
 
 function defineSafeDataProp(target, key, value) {
   const desc = _ObjectCreate(null);
@@ -5291,10 +5341,25 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
       pushSafe(cleanArgs, sanitizeBusPayload(arguments[i]));
     }
     const ret = _ReflectApply(fn, undefined, cleanArgs);
-    // R3-BLK-03: Only treat genuine native Promises as async via captured Promise.prototype.then;
-    // never read inherited Object.prototype.then on plain return values.
+    // R3-BLK-03 / R4-BLK-01: Only treat genuine native Promises as async, pin own constructor=undefined
+    // before invoking _PromiseThen (defeating Promise[Symbol.species] & Promise.prototype.constructor),
+    // and return a fresh hardened Promise immune to Promise.prototype.then / species tampering.
     if (ret !== null && typeof ret === 'object' && _ObjectGetPrototypeOf(ret) === _PromisePrototype) {
-      return _PromiseThen(ret, (resolved) => sanitizeBusPayload(resolved));
+      pinSafePromiseConstructor(ret);
+      const safePromise = new _Promise((resolve, reject) => {
+        _PromiseThen(
+          ret,
+          (resolved) => {
+            try {
+              resolve(sanitizeBusPayload(resolved));
+            } catch (err) {
+              reject(err);
+            }
+          },
+          reject
+        );
+      });
+      return hardenReturnedPromise(safePromise);
     }
     return sanitizeBusPayload(ret);
   }
@@ -5711,6 +5776,7 @@ const _ObjectCreate = Object.create;
 const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+const _ReflectApply = Reflect.apply;
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
 const _MapSet = Function.prototype.call.bind(Map.prototype.set);
@@ -5746,8 +5812,9 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
   function getDelegatedService() {
     if (!serviceBus || typeof serviceBus.getInternalService !== 'function') return null;
     const svc = serviceBus.getInternalService('host.statusbar');
-    if (svc && svc.impl && typeof svc.impl.registerItem === 'function') {
-      return svc.impl;
+    const impl = getOwn(svc, 'impl');
+    if (impl && typeof getOwn(impl, 'registerItem') === 'function') {
+      return impl;
     }
     return null;
   }
@@ -5977,15 +6044,20 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
           record.priority = _Number(pPriority);
         }
         const activeSvc = getDelegatedService();
-        if (activeSvc && typeof activeSvc.updateItem === 'function') {
+        const updateFn = getOwn(activeSvc, 'updateItem');
+        if (typeof updateFn === 'function') {
           try {
-            activeSvc.updateItem(pluginId, id, {
+            const updateArgs = [];
+            defineSafeDataProp(updateArgs, 0, pluginId);
+            defineSafeDataProp(updateArgs, 1, id);
+            defineSafeDataProp(updateArgs, 2, {
               label: record.label,
               icon: record.icon,
               tooltip: record.tooltip,
               badge: record.badge,
               priority: record.priority,
             });
+            _ReflectApply(updateFn, activeSvc, updateArgs);
           } catch (_e) {}
         } else {
           renderFallbackItems();
@@ -6003,9 +6075,13 @@ function createStatusItemRegistry(doc, _win, { serviceBus = null, themeAndI18n =
           } catch (_e) {}
         } else {
           const activeSvc = getDelegatedService();
-          if (activeSvc && typeof activeSvc.removeItem === 'function') {
+          const removeFn = getOwn(activeSvc, 'removeItem');
+          if (typeof removeFn === 'function') {
             try {
-              activeSvc.removeItem(pluginId, id);
+              const removeArgs = [];
+              defineSafeDataProp(removeArgs, 0, pluginId);
+              defineSafeDataProp(removeArgs, 1, id);
+              _ReflectApply(removeFn, activeSvc, removeArgs);
             } catch (_e) {}
           }
         }
@@ -6262,6 +6338,7 @@ const { validateSafeCssText } = require('./style-manager');
 const _ObjectCreate = Object.create;
 const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
+const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ReflectApply = Reflect.apply;
 const _ArrayIsArray = Array.isArray;
 const _Set = Set;
@@ -6290,9 +6367,33 @@ function defineSafeDataProp(target, key, value) {
   _ObjectDefineProperty(target, key, desc);
 }
 
-// NB-01: Module-scoped LIFO stack for v3 overlays so a single Escape closes only the top-most overlay.
+function pushSafe(arr, value) {
+  defineSafeDataProp(arr, arr.length, value);
+}
+
+function getOwn(obj, key) {
+  if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+  return _ObjectHasOwn(obj, key) ? obj[key] : undefined;
+}
+
+// NB-01 / R4-NB-02: Module-scoped LIFO stack for v3 overlays with prototype-safe mutations.
 const v3EscapeStack = [];
 let v3OverlaySeq = 0;
+
+function removeFromEscapeStack(fn) {
+  let idx = -1;
+  for (let i = 0; i < v3EscapeStack.length; i += 1) {
+    if (v3EscapeStack[i] === fn) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return;
+  for (let i = idx; i < v3EscapeStack.length - 1; i += 1) {
+    defineSafeDataProp(v3EscapeStack, i, v3EscapeStack[i + 1]);
+  }
+  v3EscapeStack.length -= 1;
+}
 
 function detectLayoutMode(win) {
   const w = win && Number.isFinite(Number(win.innerWidth)) ? Number(win.innerWidth) : 1280;
@@ -6336,32 +6437,40 @@ function createAddonContextV3({
   runSafe,
   addManagedListener,
 }) {
-  const pluginId = pluginMeta.pluginId;
-  const displayName = pluginMeta.displayName || pluginId;
-  const effectiveTrustLevel = pluginMeta.trustLevel || 'restricted';
-  const perms = pluginMeta.permissions && typeof pluginMeta.permissions === 'object' ? pluginMeta.permissions : {};
-  const netPerm = perms.net && typeof perms.net === 'object' ? perms.net : null;
-  const domPerm = perms.dom && typeof perms.dom === 'object' ? perms.dom : null;
+  // R4-NB-02: Use own-property lookups so inherited Object.prototype.net/dom/trustLevel cannot expose undeclared capabilities.
+  const pluginId = getOwn(pluginMeta, 'pluginId');
+  const displayName = getOwn(pluginMeta, 'displayName') || pluginId;
+  const effectiveTrustLevel = getOwn(pluginMeta, 'trustLevel') || 'restricted';
+  const rawPerms = getOwn(pluginMeta, 'permissions');
+  const perms = rawPerms && typeof rawPerms === 'object' ? rawPerms : null;
+  const rawNet = getOwn(perms, 'net');
+  const netPerm = rawNet && typeof rawNet === 'object' ? rawNet : null;
+  const rawDom = getOwn(perms, 'dom');
+  const domPerm = rawDom && typeof rawDom === 'object' ? rawDom : null;
 
-  const hasNetHttps = !!(netPerm && _ArrayIsArray(netPerm.httpsHosts) && netPerm.httpsHosts.length > 0);
+  const netHttpsHosts = getOwn(netPerm, 'httpsHosts');
+  const netLocalLoopback = getOwn(netPerm, 'localLoopback');
+  const domAnchors = getOwn(domPerm, 'anchors');
+  const uiSlots = getOwn(pluginMeta, 'uiSlots');
+
+  const hasNetHttps = !!(_ArrayIsArray(netHttpsHosts) && netHttpsHosts.length > 0);
   const hasLocalLoopback = !!(
     surface === 'desktop' &&
       effectiveTrustLevel === 'trusted' &&
-      netPerm &&
-      _ArrayIsArray(netPerm.localLoopback) &&
-      netPerm.localLoopback.length > 0
+      _ArrayIsArray(netLocalLoopback) &&
+      netLocalLoopback.length > 0
   );
   const hasNetCapability = !!(
     (hasNetHttps || hasLocalLoopback) && hostBridge && typeof hostBridge.netFetch === 'function'
   );
   const hasDocumentTransform = !!(
     effectiveTrustLevel === 'trusted' &&
-      (pluginMeta.hasDocumentTransformSlot || (domPerm && domPerm.documentTransform === true))
+      (getOwn(pluginMeta, 'hasDocumentTransformSlot') || getOwn(domPerm, 'documentTransform') === true)
   );
   const hasDomCapability = !!(
     hasDocumentTransform ||
-      (domPerm && _ArrayIsArray(domPerm.anchors) && domPerm.anchors.length > 0) ||
-      (_ArrayIsArray(pluginMeta.uiSlots) && pluginMeta.uiSlots.length > 0)
+      (_ArrayIsArray(domAnchors) && domAnchors.length > 0) ||
+      (_ArrayIsArray(uiSlots) && uiSlots.length > 0)
   );
 
   // Lifecycle AbortController
@@ -6379,7 +6488,7 @@ function createAddonContextV3({
   addDisposer(() => {
     const closers = [];
     _SetForEach(activeOverlays, (fn) => {
-      closers[closers.length] = fn;
+      pushSafe(closers, fn);
     });
     for (let i = 0; i < closers.length; i += 1) {
       try {
@@ -6440,8 +6549,7 @@ function createAddonContextV3({
       if (closed) return false;
       closed = true;
       _SetDelete(activeOverlays, close);
-      const stackIdx = v3EscapeStack.indexOf(close);
-      if (stackIdx !== -1) v3EscapeStack.splice(stackIdx, 1);
+      removeFromEscapeStack(close);
       notifyPortalClaim(false);
       if (tracker) {
         tracker.dispose();
@@ -6552,7 +6660,7 @@ function createAddonContextV3({
       escCleanup = () => win.removeEventListener('keydown', onKeyDown, true);
     }
 
-    v3EscapeStack.push(close);
+    pushSafe(v3EscapeStack, close);
     notifyPortalClaim(true);
     _SetAdd(activeOverlays, close);
 
@@ -6703,10 +6811,15 @@ function createAddonContextV3({
     },
   });
 
-  const storagePerm = perms.storage && typeof perms.storage === 'object' ? perms.storage : {};
+  const rawStoragePerm = getOwn(perms, 'storage');
+  const storagePerm = rawStoragePerm && typeof rawStoragePerm === 'object' ? rawStoragePerm : null;
+  const isolationMeta = getOwn(pluginMeta, 'isolation');
   const storage = storageV3.createPluginStorage(pluginId, {
-    namespace: storagePerm.namespace || (pluginMeta.isolation && pluginMeta.isolation.storageNamespace) || pluginId,
-    maxBytes: storagePerm.maxBytes || 65536,
+    namespace:
+      getOwn(storagePerm, 'namespace') ||
+      getOwn(isolationMeta, 'storageNamespace') ||
+      pluginId,
+    maxBytes: getOwn(storagePerm, 'maxBytes') || 65536,
     assertActive,
     registerDisposer: addDisposer,
   });

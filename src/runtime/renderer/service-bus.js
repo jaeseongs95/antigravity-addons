@@ -24,6 +24,8 @@ const _ObjectFreeze = Object.freeze;
 const _ObjectKeys = Object.keys;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ObjectGetPrototypeOf = Object.getPrototypeOf;
+const _ObjectIsExtensible = Object.isExtensible;
+const _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const _ArrayIsArray = Array.isArray;
 const _Map = Map;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
@@ -36,8 +38,56 @@ const _SetHas = Function.prototype.call.bind(Set.prototype.has);
 const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
 const _StringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
 const _ReflectApply = Reflect.apply;
+const _Promise = Promise;
 const _PromisePrototype = Promise.prototype;
 const _PromiseThen = Function.prototype.call.bind(Promise.prototype.then);
+const _SymbolSpecies = Symbol.species;
+const _OrigPromiseSpeciesGetter = (_ObjectGetOwnPropertyDescriptor(_Promise, _SymbolSpecies) || {}).get;
+
+function pinSafePromiseConstructor(p) {
+  if (_ObjectIsExtensible(p)) {
+    const desc = _ObjectCreate(null);
+    desc.value = undefined;
+    desc.writable = true;
+    desc.configurable = true;
+    desc.enumerable = false;
+    _ObjectDefineProperty(p, 'constructor', desc);
+    return;
+  }
+  // R4-BLK-01: Non-extensible Promise — fail closed unless constructor & Promise[Symbol.species] are provably unpoisoned.
+  if (_ObjectHasOwn(p, 'constructor')) {
+    const ownDesc = _ObjectGetOwnPropertyDescriptor(p, 'constructor');
+    if (ownDesc && !ownDesc.get && !ownDesc.set && ownDesc.value === undefined) return;
+    throw new _Error('ERR_SERVICE_PROMISE_UNSAFE');
+  }
+  const protoDesc = _ObjectGetOwnPropertyDescriptor(_PromisePrototype, 'constructor');
+  const speciesDesc = _ObjectGetOwnPropertyDescriptor(_Promise, _SymbolSpecies);
+  if (
+    protoDesc &&
+    !protoDesc.get &&
+    !protoDesc.set &&
+    protoDesc.value === _Promise &&
+    speciesDesc &&
+    speciesDesc.get === _OrigPromiseSpeciesGetter &&
+    !speciesDesc.set
+  ) {
+    return;
+  }
+  throw new _Error('ERR_SERVICE_PROMISE_UNSAFE');
+}
+
+function hardenReturnedPromise(p) {
+  pinSafePromiseConstructor(p);
+  const thenDesc = _ObjectCreate(null);
+  thenDesc.value = function safeThen(onFulfilled, onRejected) {
+    return hardenReturnedPromise(_PromiseThen(p, onFulfilled, onRejected));
+  };
+  thenDesc.writable = true;
+  thenDesc.configurable = true;
+  thenDesc.enumerable = false;
+  _ObjectDefineProperty(p, 'then', thenDesc);
+  return p;
+}
 
 function defineSafeDataProp(target, key, value) {
   const desc = _ObjectCreate(null);
@@ -224,10 +274,25 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
       pushSafe(cleanArgs, sanitizeBusPayload(arguments[i]));
     }
     const ret = _ReflectApply(fn, undefined, cleanArgs);
-    // R3-BLK-03: Only treat genuine native Promises as async via captured Promise.prototype.then;
-    // never read inherited Object.prototype.then on plain return values.
+    // R3-BLK-03 / R4-BLK-01: Only treat genuine native Promises as async, pin own constructor=undefined
+    // before invoking _PromiseThen (defeating Promise[Symbol.species] & Promise.prototype.constructor),
+    // and return a fresh hardened Promise immune to Promise.prototype.then / species tampering.
     if (ret !== null && typeof ret === 'object' && _ObjectGetPrototypeOf(ret) === _PromisePrototype) {
-      return _PromiseThen(ret, (resolved) => sanitizeBusPayload(resolved));
+      pinSafePromiseConstructor(ret);
+      const safePromise = new _Promise((resolve, reject) => {
+        _PromiseThen(
+          ret,
+          (resolved) => {
+            try {
+              resolve(sanitizeBusPayload(resolved));
+            } catch (err) {
+              reject(err);
+            }
+          },
+          reject
+        );
+      });
+      return hardenReturnedPromise(safePromise);
     }
     return sanitizeBusPayload(ret);
   }
