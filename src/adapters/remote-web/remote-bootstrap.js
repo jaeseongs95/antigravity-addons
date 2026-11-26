@@ -140,6 +140,36 @@ function createSwappableBridgePort(kernelState) {
         ? p.netFetch(pluginId, url, init)
         : Promise.resolve({ ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
     },
+    secretsSet(pluginId, key, value) {
+      const p = activePort();
+      return p && typeof p.secretsSet === 'function'
+        ? p.secretsSet(pluginId, key, value)
+        : Promise.resolve({ ok: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
+    secretsGet(pluginId, key) {
+      const p = activePort();
+      return p && typeof p.secretsGet === 'function'
+        ? p.secretsGet(pluginId, key)
+        : Promise.resolve({ ok: false, exists: false, value: undefined, reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
+    secretsHas(pluginId, key) {
+      const p = activePort();
+      return p && typeof p.secretsHas === 'function'
+        ? p.secretsHas(pluginId, key)
+        : Promise.resolve({ ok: false, exists: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
+    secretsDelete(pluginId, key) {
+      const p = activePort();
+      return p && typeof p.secretsDelete === 'function'
+        ? p.secretsDelete(pluginId, key)
+        : Promise.resolve({ ok: false, deleted: false, reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
+    secretsList(pluginId) {
+      const p = activePort();
+      return p && typeof p.secretsList === 'function'
+        ? p.secretsList(pluginId)
+        : Promise.resolve({ ok: false, keys: [], reason: 'ERR_REMOTE_HOST_DISPOSED' });
+    },
     getRemoteBridgeStatus() {
       const p = activePort();
       return p && typeof p.getRemoteBridgeStatus === 'function'
@@ -303,6 +333,42 @@ const DRAWER_CSS = `
 .rah-meta {
   font-size: 11px;
   color: #8b949e;
+}
+.rah-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.rah-lang-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+}
+.rah-lang-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: #8b949e;
+  border-radius: 6px;
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.rah-lang-btn[aria-pressed="true"] {
+  background: #2563eb;
+  color: #ffffff;
+}
+.rah-lang-btn:focus-visible {
+  outline: 2px solid #79c0ff;
+  outline-offset: 1px;
 }
 .rah-btn {
   appearance: none;
@@ -1068,6 +1134,8 @@ function createHostDrawerUi({
   getState,
   onSelectSettingsTab = null,
   onInvokeHostAction = null,
+  getHostLocale = null,
+  onSetHostLocale = null,
   netConsent = null,
   remoteBridgeControls = null,
   shadowMode = 'open',
@@ -1106,14 +1174,52 @@ function createHostDrawerUi({
   titleWrap.appendChild(titleEl);
   titleWrap.appendChild(metaEl);
 
+  const headerActions = createElementSafe(doc, 'div', { class: 'rah-header-actions' });
+  const langButtons = [];
+  if (typeof onSetHostLocale === 'function') {
+    const langGroup = createElementSafe(doc, 'div', {
+      class: 'rah-lang-switch',
+      role: 'group',
+      'aria-label': 'Host language',
+      'data-rah-lang-switch': '1',
+    });
+    const langDefs = [
+      { code: 'ko', label: '한국어' },
+      { code: 'en', label: 'EN' },
+    ];
+    for (let i = 0; i < langDefs.length; i += 1) {
+      const def = langDefs[i];
+      const lBtn = createElementSafe(
+        doc,
+        'button',
+        {
+          type: 'button',
+          class: 'rah-lang-btn',
+          'data-rah-lang': def.code,
+          'aria-pressed': 'false',
+        },
+        def.label
+      );
+      lBtn.addEventListener('click', (ev) => {
+        if (ev && ev.isTrusted === false) return;
+        onSetHostLocale(def.code);
+        render();
+      });
+      langButtons.push({ code: def.code, el: lBtn });
+      langGroup.appendChild(lBtn);
+    }
+    headerActions.appendChild(langGroup);
+  }
+
   const closeBtn = createElementSafe(
     doc,
     'button',
     { type: 'button', class: 'rah-btn', 'aria-label': 'Close remote addon host panel' },
     'Close'
   );
+  headerActions.appendChild(closeBtn);
   header.appendChild(titleWrap);
-  header.appendChild(closeBtn);
+  header.appendChild(headerActions);
 
   const tabsRow = createElementSafe(doc, 'div', { class: 'rah-tabs', role: 'tablist' });
   const bodyEl = createElementSafe(doc, 'div', { class: 'rah-body', role: 'tabpanel' });
@@ -1233,6 +1339,14 @@ function createHostDrawerUi({
     shell.setAttribute('data-rah-primary-total', String(state.addons.length));
     shell.setAttribute('data-rah-primary-errors', String(errorCount));
 
+    if (langButtons.length > 0 && typeof getHostLocale === 'function') {
+      const rawLoc = String(getHostLocale() || 'en').toLowerCase();
+      const activeLoc = rawLoc === 'ko' || rawLoc.startsWith('ko-') ? 'ko' : 'en';
+      for (let i = 0; i < langButtons.length; i += 1) {
+        langButtons[i].el.setAttribute('aria-pressed', langButtons[i].code === activeLoc ? 'true' : 'false');
+      }
+    }
+
     for (const [id, btn] of tabButtons.entries()) {
       btn.setAttribute('aria-selected', id === activeTab ? 'true' : 'false');
       const ref = paneRefs.get(id);
@@ -1300,6 +1414,8 @@ function attachPeerDrawerContributor({
   getState,
   onSelectSettingsTab = null,
   onInvokeHostAction = null,
+  getHostLocale = null,
+  onSetHostLocale = null,
   netConsent = null,
 }) {
   if (!shadowRoot) return null;
@@ -1569,6 +1685,7 @@ async function bootRemoteWebHost({
     uiAnchors: profile.uiAnchors || {},
     uiSurfaces: profile.uiSurfaces || {},
     uiGridMerges: Array.isArray(profile.uiGridMerges) ? profile.uiGridMerges : [],
+    uiSectionTargets: profile.uiSectionTargets || {},
     extraNoTranslateAttributes: safeExtraNoTranslateAttributes,
   });
   if (!bootRes || bootRes.ok !== true) {
@@ -1659,6 +1776,13 @@ async function bootRemoteWebHost({
         return { ok: false, reason: 'ERR_INVOKE_HOST_ACTION_UNAVAILABLE' };
       }
       return activeKernel.invokeHostAction(pluginId, actionId, [], hostToken);
+    },
+    getHostLocale() {
+      return typeof activeKernel.getHostLocale === 'function' ? activeKernel.getHostLocale() : 'en';
+    },
+    onSetHostLocale(locale) {
+      if (typeof activeKernel.setHostLocale !== 'function') return 'en';
+      return activeKernel.setHostLocale(locale, hostToken);
     },
     netConsent: {
       listHosts: (pluginId) => bridge.listUserAllowedHttpsHosts(pluginId),
@@ -1756,6 +1880,16 @@ async function bootRemoteWebHost({
         userApprovedHttps: allowUserHttps,
         localLoopback: trustedLoopback,
       });
+    }
+    const secretsPerm =
+      meta.trustLevel === 'trusted' &&
+      meta.permissions &&
+      meta.permissions.secrets &&
+      typeof meta.permissions.secrets === 'object'
+        ? meta.permissions.secrets
+        : null;
+    if (secretsPerm && typeof bridge.bindSecretsPlugin === 'function') {
+      bridge.bindSecretsPlugin(pluginId, secretsPerm);
     }
 
     let stageRes;
@@ -1865,6 +1999,13 @@ async function bootRemoteWebHost({
     connectRemoteHost,
     disconnectRemoteHost,
     getRemoteBridgeStatus: () => bridge.getRemoteBridgeStatus(),
+    getHostLocale: () => (typeof activeKernel.getHostLocale === 'function' ? activeKernel.getHostLocale() : 'en'),
+    setHostLocale(locale) {
+      if (disposed || typeof activeKernel.setHostLocale !== 'function') return 'en';
+      const next = activeKernel.setHostLocale(locale, hostToken);
+      if (drawerUi) drawerUi.render();
+      return next;
+    },
     get disposed() {
       return disposed;
     },

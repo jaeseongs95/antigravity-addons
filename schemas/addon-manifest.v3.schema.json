@@ -142,6 +142,7 @@
             "overlays": { "type": "boolean" },
             "commands": { "type": "boolean" },
             "statusItems": { "type": "boolean" },
+            "sectionActions": { "type": "boolean" },
             "settingsPages": { "type": "boolean" },
             "canvas": { "type": "boolean" }
           }
@@ -158,6 +159,25 @@
             "namespace": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            }
+          }
+        },
+        "secrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxKeys": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            "maxBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65536
+            },
+            "allowRead": {
+              "type": "boolean"
             }
           }
         },

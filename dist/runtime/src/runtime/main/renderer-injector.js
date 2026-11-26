@@ -63,7 +63,8 @@ function createRendererInjector({
   const injectedPluginsByWcId = new Map(); // wcId -> Set<pluginId>
   const trustedSettingsByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, fileName, maxBytes }>
   const trustedConfigByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, scopes }>
-  const pluginNetByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, httpsHosts, localLoopback, allowLoopback }>
+  const trustedSecretsByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, maxKeys, maxBytes, allowRead }>
+  const pluginNetByWcId = new Map(); // wcId -> Map<pluginId, { pluginId, httpsHosts, userApprovedHttps, localLoopback, allowLoopback }>
   const deliveredSettingsKeyByWcId = new Map(); // wcId -> Map<pluginId, string> (I1: per-window delivery dedup)
   const lifecycleStatesByWcId = new Map(); // wcId -> Map<pluginId, state> (I10: multi-window state isolation)
   const navAttemptSeqByWcId = new Map(); // wcId -> incremented on did-start-navigation to abort in-flight loops without bricking live doc (R-1)
@@ -191,6 +192,7 @@ function createRendererInjector({
       uiAnchors: profile.uiAnchors || {},
       uiSurfaces: profile.uiSurfaces || {},
       uiGridMerges: Array.isArray(profile.uiGridMerges) ? profile.uiGridMerges : [],
+      uiSectionTargets: profile.uiSectionTargets || {},
       settingsUi: profile.settingsUi || null,
       worldId,
     };
@@ -248,6 +250,11 @@ function createRendererInjector({
       trustedConfigMap = new Map();
       trustedConfigByWcId.set(wcId, trustedConfigMap);
     }
+    let trustedSecretsMap = trustedSecretsByWcId.get(wcId);
+    if (!trustedSecretsMap) {
+      trustedSecretsMap = new Map();
+      trustedSecretsByWcId.set(wcId, trustedSecretsMap);
+    }
     let pluginNetMap = pluginNetByWcId.get(wcId);
     if (!pluginNetMap) {
       pluginNetMap = new Map();
@@ -269,6 +276,7 @@ function createRendererInjector({
             injectedSet.delete(oldId);
             trustedSettingsMap.delete(oldId);
             trustedConfigMap.delete(oldId);
+            trustedSecretsMap.delete(oldId);
             pluginNetMap.delete(oldId);
             const delivMap = deliveredSettingsKeyByWcId.get(wcId);
             if (delivMap) delivMap.delete(oldId);
@@ -336,10 +344,24 @@ function createRendererInjector({
             ? addon.manifest.permissions.net
             : null;
         const httpsHosts = netSpec && Array.isArray(netSpec.httpsHosts) ? netSpec.httpsHosts.slice() : [];
+        const userApprovedHttps = Boolean(netSpec && netSpec.userApprovedHttps === true && verified.effectiveTrustLevel === 'trusted');
         const allowLoopback = verified.effectiveTrustLevel === 'trusted';
         const localLoopback =
           allowLoopback && netSpec && Array.isArray(netSpec.localLoopback) ? netSpec.localLoopback.slice() : [];
-        const hasNetBinding = httpsHosts.length > 0 || localLoopback.length > 0;
+        const hasNetBinding = httpsHosts.length > 0 || userApprovedHttps || localLoopback.length > 0;
+
+        const secretsSpec =
+          verified.effectiveTrustLevel === 'trusted' &&
+          addon.manifest.permissions &&
+          addon.manifest.permissions.secrets &&
+          typeof addon.manifest.permissions.secrets === 'object'
+            ? {
+                maxKeys: addon.manifest.permissions.secrets.maxKeys,
+                maxBytes: addon.manifest.permissions.secrets.maxBytes,
+                allowRead: addon.manifest.permissions.secrets.allowRead === true,
+              }
+            : null;
+        const hasSecrets = Boolean(secretsSpec);
 
         const pluginMeta = {
           pluginId: addon.pluginId,
@@ -351,6 +373,7 @@ function createRendererInjector({
           hasDocumentTransformSlot: Boolean(addon.hasDocumentTransformSlot),
           hasSettingsBridge,
           hasConfigBridge,
+          hasSecrets,
           configScopes,
           permissions: addon.manifest.permissions || null,
           uiSlots: addon.manifest.uiSlots || [],
@@ -427,10 +450,19 @@ ${verified.source}
             scopes: configScopes,
           });
         }
+        if (hasSecrets && secretsSpec) {
+          trustedSecretsMap.set(addon.pluginId, {
+            pluginId: addon.pluginId,
+            maxKeys: secretsSpec.maxKeys,
+            maxBytes: secretsSpec.maxBytes,
+            allowRead: secretsSpec.allowRead === true,
+          });
+        }
         if (hasNetBinding) {
           pluginNetMap.set(addon.pluginId, {
             pluginId: addon.pluginId,
             httpsHosts,
+            userApprovedHttps,
             localLoopback,
             allowLoopback,
           });
@@ -440,6 +472,7 @@ ${verified.source}
           const execRes = await execInWorld(contents, runCode, `plugin:${addon.pluginId}`);
           if (!isStillCurrent()) {
             trustedConfigMap.delete(addon.pluginId);
+            trustedSecretsMap.delete(addon.pluginId);
             pluginNetMap.delete(addon.pluginId);
             return;
           }
@@ -473,6 +506,7 @@ ${verified.source}
             injectedSet.add(addon.pluginId);
             trustedSettingsMap.delete(addon.pluginId);
             trustedConfigMap.delete(addon.pluginId);
+            trustedSecretsMap.delete(addon.pluginId);
             pluginNetMap.delete(addon.pluginId);
             setWindowLifecycleState(wcId, addon.pluginId, LIFECYCLE_STATES.FAILED);
             recordRendererError(addon.pluginId, (execRes && execRes.error) || 'ERR_PLUGIN_EXEC');
@@ -486,6 +520,7 @@ ${verified.source}
           }
         } catch (err) {
           trustedConfigMap.delete(addon.pluginId);
+          trustedSecretsMap.delete(addon.pluginId);
           pluginNetMap.delete(addon.pluginId);
           if (!isStillCurrent()) return;
           injectedSet.add(addon.pluginId);
@@ -589,6 +624,7 @@ ${verified.source}
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
       trustedConfigByWcId.delete(wcId);
+      trustedSecretsByWcId.delete(wcId);
       pluginNetByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
       clearWindowLifecycleStates(wcId);
@@ -603,6 +639,7 @@ ${verified.source}
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
       trustedConfigByWcId.delete(wcId);
+      trustedSecretsByWcId.delete(wcId);
       pluginNetByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
       clearWindowLifecycleStates(wcId);
@@ -631,6 +668,7 @@ ${verified.source}
       injectedPluginsByWcId.delete(wcId);
       trustedSettingsByWcId.delete(wcId);
       trustedConfigByWcId.delete(wcId);
+      trustedSecretsByWcId.delete(wcId);
       pluginNetByWcId.delete(wcId);
       deliveredSettingsKeyByWcId.delete(wcId);
       clearWindowLifecycleStates(wcId);
@@ -675,6 +713,20 @@ ${verified.source}
     };
   }
 
+  function getTrustedSecretsBinding(wcId, pluginId) {
+    if (typeof pluginId !== 'string' || !pluginId) return null;
+    const map = trustedSecretsByWcId.get(wcId);
+    if (!map) return null;
+    const binding = map.get(pluginId);
+    if (!binding) return null;
+    return {
+      pluginId: binding.pluginId,
+      maxKeys: binding.maxKeys,
+      maxBytes: binding.maxBytes,
+      allowRead: Boolean(binding.allowRead),
+    };
+  }
+
   function getPluginNetBinding(wcId, pluginId) {
     if (typeof pluginId !== 'string' || !pluginId) return null;
     const map = pluginNetByWcId.get(wcId);
@@ -684,6 +736,7 @@ ${verified.source}
     return {
       pluginId: binding.pluginId,
       httpsHosts: binding.httpsHosts.slice(),
+      userApprovedHttps: Boolean(binding.userApprovedHttps),
       localLoopback: binding.localLoopback.slice(),
       allowLoopback: Boolean(binding.allowLoopback),
     };
@@ -695,6 +748,7 @@ ${verified.source}
     pushSettingsUpdate,
     getTrustedSettingsBinding,
     getTrustedConfigBinding,
+    getTrustedSecretsBinding,
     getPluginNetBinding,
     recordRendererError,
     collectRendererErrors,

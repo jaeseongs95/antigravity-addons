@@ -177,9 +177,11 @@ function buildRemoteRuntimeBundleSource({ profile = ANTIGRAVITY_REMOTE_WEB_PROFI
   const kernelSrc = toLf(buildRendererKernelBundleSource({ includeHostSettingsUi: false }));
   const remoteAdapterDir = path.join(REPO_ROOT, 'src', 'adapters', 'remote-web');
   const netPolicyAbs = path.join(REPO_ROOT, 'src', 'core', 'net-policy.js');
+  const secretsPolicyAbs = path.join(REPO_ROOT, 'src', 'core', 'secrets-policy.js');
 
   const moduleEntries = [
     `  ${JSON.stringify('../../core/net-policy.js')}: function(module, exports, require) {\n${toLf(fs.readFileSync(netPolicyAbs, 'utf8'))}\n  }`,
+    `  ${JSON.stringify('../../core/secrets-policy.js')}: function(module, exports, require) {\n${toLf(fs.readFileSync(secretsPolicyAbs, 'utf8'))}\n  }`,
     ...REMOTE_BROWSER_MODULES.map((relId) => {
       const abs = path.join(remoteAdapterDir, relId.slice(2));
       const src = toLf(fs.readFileSync(abs, 'utf8'));

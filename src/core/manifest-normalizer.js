@@ -32,6 +32,7 @@ function normalizePermissionsV3(manifest, rawConfigBridge) {
   const perms = manifest && manifest.permissions && typeof manifest.permissions === 'object' ? manifest.permissions : {};
   const ui = perms.ui && typeof perms.ui === 'object' ? perms.ui : {};
   const storage = perms.storage && typeof perms.storage === 'object' ? perms.storage : {};
+  const secrets = perms.secrets && typeof perms.secrets === 'object' && !Array.isArray(perms.secrets) ? perms.secrets : null;
   const events = perms.events && typeof perms.events === 'object' ? perms.events : {};
   const services = perms.services && typeof perms.services === 'object' ? perms.services : {};
   const net = perms.net && typeof perms.net === 'object' ? perms.net : null;
@@ -44,6 +45,7 @@ function normalizePermissionsV3(manifest, rawConfigBridge) {
       overlays: ui.overlays !== false,
       commands: ui.commands !== false,
       statusItems: ui.statusItems !== false,
+      sectionActions: ui.sectionActions !== false,
       settingsPages: ui.settingsPages !== false,
       canvas: ui.canvas !== false,
     },
@@ -54,6 +56,19 @@ function normalizePermissionsV3(manifest, rawConfigBridge) {
           : 65536,
       namespace: typeof storage.namespace === 'string' && storage.namespace ? storage.namespace : manifest.pluginId,
     },
+    secrets: secrets
+      ? {
+          maxKeys:
+            Number.isInteger(secrets.maxKeys) && secrets.maxKeys >= 1 && secrets.maxKeys <= 64
+              ? secrets.maxKeys
+              : 32,
+          maxBytes:
+            Number.isInteger(secrets.maxBytes) && secrets.maxBytes >= 1024 && secrets.maxBytes <= 65536
+              ? secrets.maxBytes
+              : 32768,
+          allowRead: secrets.allowRead === true,
+        }
+      : null,
     events: {
       subscribe: Array.isArray(events.subscribe) ? events.subscribe.slice() : [],
       emit: Array.isArray(events.emit) ? events.emit.slice() : [],

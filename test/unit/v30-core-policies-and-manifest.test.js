@@ -178,7 +178,7 @@ test('TC-V30-02: net-policy blocks SSRF, RFC1918, IMDS, IPv4-mapped IPv6, forbid
 });
 
 test('TC-V30-03: ui-schema-validator & service-bus-policy enforce closed primitives, static predicates, default-deny ACL, and proto stripping', () => {
-  assert.equal(ALLOWED_UI_NODE_TYPES.length, 16);
+  assert.equal(ALLOWED_UI_NODE_TYPES.length, 17);
 
   const validTree = {
     type: 'stack',

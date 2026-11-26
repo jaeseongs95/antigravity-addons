@@ -4,7 +4,7 @@
  * Pure vendor- & runtime-neutral Tier-2 Declarative UI Schema Validator &
  * Static JSON Predicate Evaluator (v3.0.0 — SOLID #0).
  *
- * - Closed set of 16 semantic UI primitives (zero raw HTML, zero script tags, zero eval).
+ * - Closed set of 17 semantic UI primitives (zero raw HTML, zero script tags, zero eval).
  * - Static JSON `visibleWhen` / `disabledWhen` predicates (`{ field, eq | neq | in | truthy }`
  *   plus bounded `{ all }` / `{ any }` combinators).
  * - Enforces max tree depth (12) and max node count (256) to prevent DoS.
@@ -24,6 +24,7 @@ const ALLOWED_UI_NODE_TYPES = Object.freeze([
   'input',
   'textarea',
   'select',
+  'segmented',
   'slider',
   'progress',
   'list',
@@ -166,9 +167,9 @@ function validateUiTree(tree) {
       const r = validateUiCondition(node.disabledWhen);
       if (!r.ok) errors.push(`${pathLabel}.disabledWhen: ${r.reason}`);
     }
-    if (node.type === 'select') {
+    if (node.type === 'select' || node.type === 'segmented') {
       if (!Array.isArray(node.options)) {
-        errors.push(`${pathLabel}: select node requires options array`);
+        errors.push(`${pathLabel}: ${node.type} node requires options array`);
       }
     }
     if (node.type === 'list') {

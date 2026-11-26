@@ -26,6 +26,7 @@ export type UiNodeType =
   | 'input'
   | 'textarea'
   | 'select'
+  | 'segmented'
   | 'slider'
   | 'progress'
   | 'list';
@@ -128,6 +129,35 @@ export interface StatusItemHandle {
   dispose(): void;
 }
 
+export interface SectionActionClickEvent {
+  readonly pluginId: string;
+  readonly actionId: string;
+  readonly target: string;
+  readonly shiftKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly altKey: boolean;
+  readonly anchorEl: Element | null;
+}
+
+export interface SectionActionSpec {
+  id: string;
+  target: string;
+  label: string;
+  icon?: string;
+  tooltip?: string;
+  badge?: string | null;
+  order?: number;
+  onClick?: (ev: SectionActionClickEvent) => void;
+}
+
+export interface SectionActionHandle {
+  readonly id: string;
+  readonly target: string;
+  update(patch: Partial<Omit<SectionActionSpec, 'id' | 'target' | 'onClick'>>): void;
+  dispose(): void;
+}
+
 export interface SettingsPageSpec {
   id: string;
   title: string;
@@ -141,6 +171,14 @@ export interface SettingsPageSpec {
   onAction?: (ev: { actionId: string; payload?: unknown; state: Record<string, unknown> }) => void;
   render?: (canvasRoot: Element, handle: OverlayHandle) => void;
   onClose?: () => void;
+}
+
+export type SecretsPersistenceMode = 'os-encrypted' | 'remote-bridge' | 'session-memory' | 'none';
+
+export interface NetSecretHeaderSpec {
+  secretKey: string;
+  prefix?: string;
+  suffix?: string;
 }
 
 export interface NetFetchResponse {
@@ -170,6 +208,8 @@ export interface AddonContextV3 {
       readonly hasLocalLoopback: boolean;
       readonly hasRemoteHostBridge?: boolean;
       readonly hasNetHttps: boolean;
+      readonly hasSecrets: boolean;
+      readonly secretsPersistence: SecretsPersistenceMode;
       readonly hasConfigBridge: boolean;
       readonly hasSettingsBridge: boolean;
       readonly hasDocumentTransform: boolean;
@@ -184,6 +224,7 @@ export interface AddonContextV3 {
   readonly i18n: {
     getLocale(): string;
     t(key: string, dictOrParams?: Record<string, unknown>, params?: Record<string, unknown>): string;
+    onDidChange(cb: (locale: string) => void): () => void;
   };
   readonly ui: {
     showToast(opts: string | { message: string; title?: string; variant?: 'info' | 'success' | 'warning' | 'error'; durationMs?: number; action?: { label: string; onClick: () => void } }): { readonly id: string; dismiss(): void };
@@ -193,6 +234,7 @@ export interface AddonContextV3 {
     listCommands(): Array<{ pluginId: string; actionId: string; label: string }>;
     invokeCommand(targetPluginId: string, commandId: string, ...args: unknown[]): unknown;
     registerStatusItem(spec: StatusItemSpec): StatusItemHandle;
+    registerSectionAction(spec: SectionActionSpec): SectionActionHandle;
     registerSettingsPage(spec: SettingsPageSpec): { readonly id: string; open(): OverlayHandle | null; update(nextSchema?: UiNode, nextState?: Record<string, unknown>): void; dispose(): void };
     openPopup(opts: OverlayOptions): OverlayHandle;
     openModal(opts: OverlayOptions): OverlayHandle;
@@ -232,7 +274,25 @@ export interface AddonContextV3 {
     dispose(): void;
   };
   readonly net?: {
-    fetch(url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<NetFetchResponse>;
+    fetch(
+      url: string,
+      init?: {
+        method?: string;
+        headers?: Record<string, string>;
+        secretHeaders?: Record<string, string | NetSecretHeaderSpec>;
+        body?: string;
+        timeoutMs?: number;
+      }
+    ): Promise<NetFetchResponse>;
+  };
+  readonly secrets?: {
+    set(key: string, value: string): Promise<{ ok: boolean; key?: string; persistence?: SecretsPersistenceMode; updatedAt?: string; reason?: string | null }>;
+    has(key: string): Promise<boolean>;
+    delete(key: string): Promise<boolean>;
+    keys(): Promise<string[]>;
+    getPersistenceMode(): SecretsPersistenceMode;
+    /** Exposed ONLY when manifest declares `permissions.secrets.allowRead: true`. */
+    get?(key: string): Promise<string | undefined>;
   };
   readonly dom?: {
     observeRegion(selector: string, callback: (records: unknown[]) => void, opts?: Record<string, unknown>): { disconnect(): void };
@@ -271,6 +331,7 @@ export interface AddonManifestV3 {
   permissions?: {
     ui?: Record<string, boolean>;
     storage?: { maxBytes?: number; namespace?: string };
+    secrets?: { maxKeys?: number; maxBytes?: number; allowRead?: boolean };
     events?: { subscribe?: string[]; emit?: string[] };
     services?: {
       provide?: Array<{ name: string; allowedCallers?: string[] }>;
@@ -309,6 +370,7 @@ export interface TestHostOptions {
   locale?: string;
   themeMode?: 'dark' | 'light';
   remoteBridgeConnected?: boolean;
+  uiSectionTargets?: Record<string, { rootSelectors?: string[]; headingTexts?: string[]; containerSelectors?: string[]; insertPosition?: 'before-first-child' | 'append' | 'prepend' }>;
   netHandler?: (pluginId: string, url: string, init?: Record<string, unknown>) => Promise<NetFetchResponse> | NetFetchResponse;
   configScopes?: Record<string, { data: Record<string, unknown>; sha256?: string }>;
   initialSettings?: Record<string, Record<string, unknown>>;
@@ -322,7 +384,10 @@ export interface TestHostHandle {
   mountPlugin(manifest: AddonManifestV3, setupFn: (ctx: AddonContextV3) => unknown): Promise<AddonContextV3>;
   disposePlugin(pluginId: string): boolean;
   setViewport(width: number, height: number): void;
+  setLocale(locale: string): string;
   getStatusItems(): readonly Record<string, unknown>[];
+  getSectionActions(): readonly Record<string, unknown>[];
+  invokeSectionAction(pluginId: string, actionId: string, clickEv?: Partial<SectionActionClickEvent>): { ok: boolean; reason: string | null };
   getSettingsPages(): readonly Record<string, unknown>[];
 }
 

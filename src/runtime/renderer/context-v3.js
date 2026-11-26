@@ -19,6 +19,7 @@ const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ReflectApply = Reflect.apply;
+const _PromiseResolve = Promise.resolve.bind(Promise);
 const _ArrayIsArray = Array.isArray;
 const _Set = Set;
 const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
@@ -131,6 +132,7 @@ function createAddonContextV3({
   themeAndI18n,
   toastManager,
   statusItemRegistry,
+  sectionActionRegistry,
   settingsPageCoordinator,
   serviceBus,
   eventBus,
@@ -163,6 +165,11 @@ function createAddonContextV3({
   const netPerm = rawNet && typeof rawNet === 'object' ? rawNet : null;
   const rawDom = getOwn(perms, 'dom');
   const domPerm = rawDom && typeof rawDom === 'object' ? rawDom : null;
+  const rawSecrets = getOwn(perms, 'secrets');
+  const secretsPerm = rawSecrets && typeof rawSecrets === 'object' && !_ArrayIsArray(rawSecrets) ? rawSecrets : null;
+  const rawUiPerm = getOwn(perms, 'ui');
+  const uiPerm = rawUiPerm && typeof rawUiPerm === 'object' && !_ArrayIsArray(rawUiPerm) ? rawUiPerm : null;
+  const allowSectionActions = !(uiPerm && getOwn(uiPerm, 'sectionActions') === false);
 
   const netHttpsHosts = getOwn(netPerm, 'httpsHosts');
   const netLocalLoopback = getOwn(netPerm, 'localLoopback');
@@ -172,7 +179,7 @@ function createAddonContextV3({
 
   const hasNetHttps = !!(
     (_ArrayIsArray(netHttpsHosts) && netHttpsHosts.length > 0) ||
-      (surface === 'remote-web' && netUserApprovedHttps)
+      (netUserApprovedHttps && (surface === 'remote-web' || effectiveTrustLevel === 'trusted'))
   );
   const supportsRemoteHostBridge = !!(
     surface === 'remote-web' && hostBridge && typeof hostBridge.getRemoteBridgeStatus === 'function'
@@ -198,6 +205,27 @@ function createAddonContextV3({
       hostBridge &&
       typeof hostBridge.netFetch === 'function'
   );
+  const hasSecretsCapability = !!(
+    effectiveTrustLevel === 'trusted' &&
+      secretsPerm &&
+      hostBridge &&
+      typeof hostBridge.secretsSet === 'function' &&
+      typeof hostBridge.secretsHas === 'function' &&
+      typeof hostBridge.secretsDelete === 'function' &&
+      typeof hostBridge.secretsList === 'function'
+  );
+  const secretsAllowRead = !!(
+    hasSecretsCapability &&
+      getOwn(secretsPerm, 'allowRead') === true &&
+      typeof hostBridge.secretsGet === 'function'
+  );
+  const getSecretsPersistenceMode = () => {
+    if (!hasSecretsCapability) return 'none';
+    if (surface === 'remote-web') {
+      return isRemoteHostBridgeConnected() ? 'remote-bridge' : 'session-memory';
+    }
+    return 'os-encrypted';
+  };
   const hasDocumentTransform = !!(
     effectiveTrustLevel === 'trusted' &&
       (getOwn(pluginMeta, 'hasDocumentTransformSlot') || getOwn(domPerm, 'documentTransform') === true)
@@ -486,6 +514,10 @@ function createAddonContextV3({
         return isRemoteHostBridgeConnected();
       },
       hasNetHttps,
+      hasSecrets: hasSecretsCapability,
+      get secretsPersistence() {
+        return getSecretsPersistenceMode();
+      },
       hasConfigBridge: !!hasConfigBridge,
       hasSettingsBridge: !!hasSettingsBridge,
       hasDocumentTransform,
@@ -521,6 +553,18 @@ function createAddonContextV3({
     registerStatusItem(spec) {
       assertActive();
       const handle = statusItemRegistry.registerStatusItem(pluginId, spec);
+      addDisposer(() => handle.dispose());
+      return handle;
+    },
+    registerSectionAction(spec) {
+      assertActive();
+      if (!allowSectionActions) {
+        throw new Error('ERR_UI_SECTION_ACTIONS_FORBIDDEN');
+      }
+      if (!sectionActionRegistry || typeof sectionActionRegistry.registerSectionAction !== 'function') {
+        throw new Error('ERR_SECTION_ACTIONS_UNAVAILABLE');
+      }
+      const handle = sectionActionRegistry.registerSectionAction(pluginId, spec);
       addDisposer(() => handle.dispose());
       return handle;
     },
@@ -642,7 +686,7 @@ function createAddonContextV3({
   defineSafeReadOnlyProp(ctx, 'meta', meta);
   defineSafeReadOnlyProp(ctx, 'env', env);
   defineSafeReadOnlyProp(ctx, 'theme', themeAndI18n.createThemeHandle(addDisposer));
-  defineSafeReadOnlyProp(ctx, 'i18n', themeAndI18n.createI18nHandle());
+  defineSafeReadOnlyProp(ctx, 'i18n', themeAndI18n.createI18nHandle(addDisposer));
   defineSafeReadOnlyProp(ctx, 'ui', ui);
   defineSafeReadOnlyProp(ctx, 'storage', storage);
   defineSafeReadOnlyProp(ctx, 'events', events);
@@ -663,6 +707,43 @@ function createAddonContextV3({
         },
       })
     );
+  }
+
+  if (hasSecretsCapability) {
+    const secretsApi = {};
+    defineSafeReadOnlyProp(secretsApi, 'set', function set(key, value) {
+      assertActive();
+      return _PromiseResolve(hostBridge.secretsSet(pluginId, key, value));
+    });
+    defineSafeReadOnlyProp(secretsApi, 'has', function has(key) {
+      assertActive();
+      return _PromiseResolve(hostBridge.secretsHas(pluginId, key)).then((res) => Boolean(res && res.ok && res.exists));
+    });
+    defineSafeReadOnlyProp(secretsApi, 'delete', function remove(key) {
+      assertActive();
+      return _PromiseResolve(hostBridge.secretsDelete(pluginId, key)).then((res) =>
+        Boolean(res && res.ok && res.deleted)
+      );
+    });
+    defineSafeReadOnlyProp(secretsApi, 'keys', function keys() {
+      assertActive();
+      return _PromiseResolve(hostBridge.secretsList(pluginId)).then((res) =>
+        res && res.ok && _ArrayIsArray(res.keys) ? res.keys.slice() : []
+      );
+    });
+    defineSafeReadOnlyProp(secretsApi, 'getPersistenceMode', function getPersistenceMode() {
+      assertActive();
+      return getSecretsPersistenceMode();
+    });
+    if (secretsAllowRead) {
+      defineSafeReadOnlyProp(secretsApi, 'get', function get(key) {
+        assertActive();
+        return _PromiseResolve(hostBridge.secretsGet(pluginId, key)).then((res) =>
+          res && res.ok && res.exists ? res.value : undefined
+        );
+      });
+    }
+    defineSafeReadOnlyProp(ctx, 'secrets', _ObjectFreeze(secretsApi));
   }
 
   if (hasDomCapability) {

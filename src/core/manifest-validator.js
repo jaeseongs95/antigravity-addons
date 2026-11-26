@@ -21,6 +21,7 @@ const { normalizeManifestToV2 } = require('./manifest-normalizer');
 const { getPrivilegedRequirements } = require('./trust-policy-port');
 const { validateNetPermissions } = require('./net-policy');
 const { validateServicePermissions } = require('./service-bus-policy');
+const { validateSecretsPermissions } = require('./secrets-policy');
 
 const MANIFEST_SCHEMA = MANIFEST_SCHEMA_V1;
 const FORBIDDEN_IDS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -28,6 +29,7 @@ const RESERVED_SETTINGS_BRIDGE_FILES = new Set([
   'trust-policy.json',
   'remote-bridge.json',
   'remote-preferences.json',
+  'secrets-vault.json',
   'host-cli.json',
   'config.json',
   'index.json',
@@ -451,7 +453,8 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
             reqs.hasSettingsBridge ||
             reqs.hasConfigBridge ||
             reqs.hasLocalLoopback ||
-            reqs.hasHostServiceProvide
+            reqs.hasHostServiceProvide ||
+            reqs.hasSecrets
           ? 'trusted'
           : 'restricted');
     if (effectiveTrustLevel === 'restricted') {
@@ -497,6 +500,13 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
           errors: ['Restricted plugins cannot provide well-known "host.*" services; requires trustLevel: "trusted" and host trust approval'],
         };
       }
+      if (reqs.hasSecrets) {
+        return {
+          ok: false,
+          reason: 'ERR_RESTRICTED_SECRETS_FORBIDDEN',
+          errors: ['Restricted plugins cannot declare "permissions.secrets"; requires trustLevel: "trusted" and host trust approval'],
+        };
+      }
     }
 
     if (perms && perms.net) {
@@ -506,6 +516,15 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       });
       if (!netCheck.ok) {
         return { ok: false, reason: netCheck.reason, errors: netCheck.errors || [netCheck.reason] };
+      }
+    }
+
+    if (perms && perms.secrets) {
+      const secretsCheck = validateSecretsPermissions(perms.secrets, {
+        trustLevel: effectiveTrustLevel,
+      });
+      if (!secretsCheck.ok) {
+        return { ok: false, reason: secretsCheck.reason, errors: secretsCheck.errors || [secretsCheck.reason] };
       }
     }
 
@@ -564,6 +583,7 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       hasDocumentTransformSlot,
       hasSettingsBridge: reqs.hasSettingsBridge,
       hasConfigBridge: reqs.hasConfigBridge,
+      hasSecrets: reqs.hasSecrets,
       skippedCapabilities,
       resolvedEntries,
       manifest: normalizedManifest,

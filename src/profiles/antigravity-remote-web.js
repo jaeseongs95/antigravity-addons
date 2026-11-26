@@ -172,6 +172,14 @@ const REMOTE_WEB_UI_GRID_MERGES = Object.freeze([
   }),
 ]);
 
+const REMOTE_WEB_UI_SECTION_TARGETS = Object.freeze({
+  'customizations.mcp-servers.header': Object.freeze({
+    rootSelectors: Object.freeze(['[data-testid="customizations-view"]']),
+    headingTexts: Object.freeze(['MCP Servers', 'MCP 서버']),
+    insertPosition: 'before-first-child',
+  }),
+});
+
 const REMOTE_WEB_FORBIDDEN_NET_HOSTS = Object.freeze([
   'antigravity.google.com',
   'accounts.google.com',
@@ -194,6 +202,7 @@ const ANTIGRAVITY_REMOTE_WEB_PROFILE = Object.freeze({
   uiAnchors: REMOTE_WEB_UI_ANCHORS,
   uiSurfaces: REMOTE_WEB_UI_SURFACES,
   uiGridMerges: REMOTE_WEB_UI_GRID_MERGES,
+  uiSectionTargets: REMOTE_WEB_UI_SECTION_TARGETS,
   forbiddenNetHosts: REMOTE_WEB_FORBIDDEN_NET_HOSTS,
   resolvePaths: resolveAntigravityRemoteWebPaths,
   resolveConfigScopes: resolveAntigravityConfigScopes,
@@ -228,6 +237,7 @@ function toBrowserRemoteWebProfile(profile = ANTIGRAVITY_REMOTE_WEB_PROFILE) {
     uiGridMerges: Object.freeze(
       Array.isArray(profile.uiGridMerges) ? profile.uiGridMerges.slice() : []
     ),
+    uiSectionTargets: profile.uiSectionTargets || {},
     forbiddenNetHosts: Object.freeze(
       Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts.slice() : REMOTE_WEB_FORBIDDEN_NET_HOSTS.slice()
     ),
@@ -244,6 +254,7 @@ module.exports = {
   REMOTE_WEB_UI_ANCHORS,
   REMOTE_WEB_UI_SURFACES,
   REMOTE_WEB_UI_GRID_MERGES,
+  REMOTE_WEB_UI_SECTION_TARGETS,
   resolveAntigravityRemoteWebPaths,
   toBrowserRemoteWebProfile,
   ANTIGRAVITY_REMOTE_WEB_PROFILE,

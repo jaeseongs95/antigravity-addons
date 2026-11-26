@@ -24,6 +24,7 @@ const { createServiceBus } = require('./service-bus');
 const { createEventBus } = require('./event-bus');
 const { createStorageV3 } = require('./storage-v3');
 const { createStatusItemRegistry } = require('./status-item-registry');
+const { createSectionActionRegistry } = require('./section-action-registry');
 const { createSettingsPageCoordinator } = require('./settings-page-coordinator');
 const { createAddonContextV3 } = require('./context-v3');
 const { createV2CompatAdapter } = require('./v2-compat-adapter');
@@ -245,6 +246,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
   let eventBus = null;
   let storageV3 = null;
   let statusItemRegistry = null;
+  let sectionActionRegistry = null;
   let settingsPageCoordinator = null;
   let hostSettingsUi = null;
 
@@ -399,6 +401,11 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       extraNoTranslateAttributes,
       surface: hostSurface,
     });
+    sectionActionRegistry = createSectionActionRegistry(doc, win, {
+      uiSectionTargets: cfg.uiSectionTargets || {},
+      themeAndI18n,
+      extraNoTranslateAttributes,
+    });
     settingsPageCoordinator = createSettingsPageCoordinator({
       settingsTabs,
       openTier2Modal: (pMeta, modalOpts) => {
@@ -493,6 +500,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       if (settingsTabs) settingsTabs.disposePluginTabs(pluginId);
       if (toastManager) toastManager.disposePlugin(pluginId);
       if (statusItemRegistry) statusItemRegistry.disposePlugin(pluginId);
+      if (sectionActionRegistry) sectionActionRegistry.disposePlugin(pluginId);
       if (settingsPageCoordinator) settingsPageCoordinator.disposePlugin(pluginId);
       if (serviceBus) serviceBus.disposePlugin(pluginId);
       if (eventBus) eventBus.disposePlugin(pluginId);
@@ -857,6 +865,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       themeAndI18n,
       toastManager,
       statusItemRegistry,
+      sectionActionRegistry,
       settingsPageCoordinator,
       serviceBus,
       eventBus,
@@ -1065,6 +1074,26 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     invokeStatusItem: (pid, itemId, clickEv, token) => {
       assertHostToken(token);
       return statusItemRegistry ? statusItemRegistry.invokeStatusItem(pid, itemId, clickEv) : { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED' };
+    },
+    listSectionActions: () => (sectionActionRegistry ? sectionActionRegistry.listSectionActions() : []),
+    invokeSectionAction: (pid, actionId, clickEv, token) => {
+      assertHostToken(token);
+      return sectionActionRegistry
+        ? sectionActionRegistry.invokeSectionAction(pid, actionId, clickEv)
+        : { ok: false, reason: 'ERR_KERNEL_NOT_BOOTED' };
+    },
+    syncSectionActions: (token) => {
+      assertHostToken(token);
+      if (sectionActionRegistry && typeof sectionActionRegistry.syncDomNow === 'function') {
+        sectionActionRegistry.syncDomNow();
+        return true;
+      }
+      return false;
+    },
+    getHostLocale: () => (themeAndI18n && typeof themeAndI18n.getLocale === 'function' ? themeAndI18n.getLocale() : 'en'),
+    setHostLocale: (locale, token) => {
+      assertHostToken(token);
+      return themeAndI18n && typeof themeAndI18n.setLocale === 'function' ? themeAndI18n.setLocale(locale) : 'en';
     },
     listHostActions,
     invokeHostAction,

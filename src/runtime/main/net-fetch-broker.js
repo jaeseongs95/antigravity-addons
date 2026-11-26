@@ -26,6 +26,10 @@ const {
   isPrivateOrReservedIp,
   evaluateNetRequest,
 } = require('../../core/net-policy');
+const {
+  SENSITIVE_REDIRECT_STRIP_HEADERS,
+  resolveSecretHeaders,
+} = require('../../core/secrets-policy');
 
 const DEFAULT_TIMEOUT_MS = 15000;
 const MAX_TIMEOUT_MS = 30000;
@@ -37,6 +41,8 @@ function createNetFetchBroker({
   forbiddenHosts = [],
   namedLoopbackTargets = {},
   resolveDynamicLoopbackPorts = null,
+  resolveDynamicHttpsHosts = null,
+  resolvePluginSecret = null,
   lookupFn = null,
   httpModule = http,
   httpsModule = https,
@@ -211,14 +217,34 @@ function createNetFetchBroker({
       }
     }
 
+    let dynamicHttpsHosts = [];
+    if (pluginBinding.userApprovedHttps && typeof resolveDynamicHttpsHosts === 'function') {
+      try {
+        const resolvedHosts = resolveDynamicHttpsHosts(pluginBinding);
+        if (Array.isArray(resolvedHosts)) {
+          dynamicHttpsHosts = resolvedHosts;
+        }
+      } catch (_dynHostErr) {
+        dynamicHttpsHosts = [];
+      }
+    }
+
+    const baseHttpsHosts = Array.isArray(pluginBinding.httpsHosts) ? pluginBinding.httpsHosts : [];
+    const effectiveHttpsHosts =
+      dynamicHttpsHosts.length > 0 ? Array.from(new Set([...baseHttpsHosts, ...dynamicHttpsHosts])) : baseHttpsHosts;
+
     const policy = {
-      httpsHosts: Array.isArray(pluginBinding.httpsHosts) ? pluginBinding.httpsHosts : [],
+      httpsHosts: effectiveHttpsHosts,
       localLoopback: Array.isArray(pluginBinding.localLoopback) ? pluginBinding.localLoopback : [],
       namedLoopbackPorts: namedLoopbackTargets,
       dynamicLoopbackPorts,
       forbiddenHosts,
       allowLoopback: Boolean(pluginBinding.allowLoopback),
     };
+
+    const rawSecretHeaders = init && init.secretHeaders !== undefined ? init.secretHeaders : null;
+    const injectedSecretHeaderLowerNames = new Set();
+    let secretsInjected = false;
 
     let currentUrl = rawUrl;
     let currentMethod = init.method || 'GET';
@@ -227,9 +253,39 @@ function createNetFetchBroker({
     let redirectsUsed = 0;
 
     while (true) {
-      const plan = evaluateNetRequest(currentUrl, { method: currentMethod, headers: currentHeaders }, policy);
+      let plan = evaluateNetRequest(currentUrl, { method: currentMethod, headers: currentHeaders }, policy);
       if (!plan.ok) {
         return { ok: false, reason: plan.reason };
+      }
+
+      // Resolve & inject secretHeaders ONLY AFTER URL allowlist passes on hop 0
+      if (!secretsInjected && rawSecretHeaders !== null) {
+        secretsInjected = true;
+        const lookupFnForPlugin =
+          typeof resolvePluginSecret === 'function' && typeof pluginBinding.pluginId === 'string' && pluginBinding.pluginId
+            ? (secretKey) => resolvePluginSecret(pluginBinding.pluginId, secretKey, pluginBinding)
+            : null;
+        const secretRes = resolveSecretHeaders(rawSecretHeaders, lookupFnForPlugin);
+        if (!secretRes.ok) {
+          return { ok: false, reason: secretRes.reason };
+        }
+        if (secretRes.injectedHeaderNames.length > 0) {
+          for (let i = 0; i < secretRes.injectedHeaderNames.length; i += 1) {
+            injectedSecretHeaderLowerNames.add(secretRes.injectedHeaderNames[i]);
+          }
+          // Strip any user-supplied header colliding case-insensitively with an injected secret header
+          const mergedHeaders = {};
+          for (const [k, v] of Object.entries(currentHeaders)) {
+            if (injectedSecretHeaderLowerNames.has(k.toLowerCase())) continue;
+            mergedHeaders[k] = v;
+          }
+          Object.assign(mergedHeaders, secretRes.headers);
+          currentHeaders = mergedHeaders;
+          plan = evaluateNetRequest(currentUrl, { method: currentMethod, headers: currentHeaders }, policy);
+          if (!plan.ok) {
+            return { ok: false, reason: plan.reason };
+          }
+        }
       }
 
       const hop = await executeSingleHop(plan, {
@@ -270,11 +326,14 @@ function createNetFetchBroker({
       } catch (_e) {
         return { ok: false, reason: 'ERR_NET_INVALID_REDIRECT_URL' };
       }
-      // BLK-07: Strip Authorization header on cross-host redirects to prevent credential leakage
+      // BLK-07 + v3.3.0: Strip Authorization, API-key headers, and all injected secretHeaders on cross-host redirects
       if (nextParsed.hostname.toLowerCase() !== plan.hostname.toLowerCase()) {
         const filtered = {};
         for (const [k, v] of Object.entries(currentHeaders)) {
-          if (k.toLowerCase() === 'authorization') continue;
+          const lower = k.toLowerCase();
+          if (SENSITIVE_REDIRECT_STRIP_HEADERS.includes(lower) || injectedSecretHeaderLowerNames.has(lower)) {
+            continue;
+          }
           filtered[k] = v;
         }
         currentHeaders = filtered;
