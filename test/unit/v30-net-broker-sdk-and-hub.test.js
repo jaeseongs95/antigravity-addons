@@ -74,6 +74,57 @@ test('TC-V30-09: Main-process net-fetch-broker blocks DNS-rebinding/IMDS and enf
     );
     assert.equal(redir.ok, false);
     assert.equal(redir.reason, 'ERR_NET_LOOPBACK_REDIRECT_FORBIDDEN');
+
+    // BLK-07: GET with body must NOT send Content-Length header; cross-host HTTPS redirect MUST strip Authorization
+    const capturedReqOpts = [];
+    const mockHttps = {
+      request(opts, cb) {
+        capturedReqOpts.push(opts);
+        const listeners = {};
+        const reqObj = {
+          setTimeout() {},
+          on(ev, fn) {
+            listeners[ev] = fn;
+          },
+          write() {},
+          destroy() {},
+          end() {
+            const isFirst = capturedReqOpts.length === 1;
+            const resListeners = {};
+            const resObj = {
+              statusCode: isFirst ? 302 : 200,
+              statusMessage: isFirst ? 'Found' : 'OK',
+              headers: isFirst ? { location: 'https://cdn.b.example/final' } : {},
+              resume() {},
+              on(ev, fn) {
+                resListeners[ev] = fn;
+              },
+            };
+            cb(resObj);
+            if (!isFirst) {
+              if (resListeners.data) resListeners.data(Buffer.from('DONE'));
+              if (resListeners.end) resListeners.end();
+            }
+          },
+        };
+        return reqObj;
+      },
+    };
+    const brokerRedir = createNetFetchBroker({
+      lookupFn: async () => [{ address: '93.184.216.34', family: 4 }],
+      httpsModule: mockHttps,
+    });
+    const redirRes = await brokerRedir.fetchForPlugin(
+      { httpsHosts: ['api.a.example', 'cdn.b.example'], localLoopback: [], allowLoopback: false },
+      'https://api.a.example/start',
+      { method: 'GET', body: 'ignored-on-get', headers: { Authorization: 'Bearer SECRET', 'X-Keep': 'yes' } }
+    );
+    assert.equal(redirRes.ok, true);
+    assert.equal(capturedReqOpts.length, 2);
+    assert.equal(capturedReqOpts[0].headers['Content-Length'], undefined, 'BLK-07: GET must not emit Content-Length');
+    assert.equal(capturedReqOpts[0].headers.Authorization, 'Bearer SECRET');
+    assert.equal(capturedReqOpts[1].headers.Authorization, undefined, 'BLK-07: Cross-host redirect must strip Authorization');
+    assert.equal(capturedReqOpts[1].headers['X-Keep'], 'yes');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -81,6 +132,7 @@ test('TC-V30-09: Main-process net-fetch-broker blocks DNS-rebinding/IMDS and enf
 
 test('TC-V30-10: Remote Web host bridge netFetch allows httpsHosts via GM_xmlhttpRequest and blocks localLoopback', async () => {
   const seen = [];
+  let mockResp = { status: 200, statusText: 'OK', responseText: '{"ok":true}' };
   const bridge = createRemoteHostBridge({
     profileId: 'antigravity-remote-web',
     forbiddenNetHosts: ['antigravity.google.com', 'accounts.google.com'],
@@ -89,7 +141,7 @@ test('TC-V30-10: Remote Web host bridge netFetch allows httpsHosts via GM_xmlhtt
     },
     netTransport(req) {
       seen.push(req);
-      req.onload({ status: 200, statusText: 'OK', responseText: '{"ok":true}' });
+      req.onload(mockResp);
     },
   });
 
@@ -100,6 +152,17 @@ test('TC-V30-10: Remote Web host bridge netFetch allows httpsHosts via GM_xmlhtt
   assert.equal(seen.length, 1);
   assert.equal(seen[0].anonymous, true);
   assert.deepEqual(seen[0].headers, { 'X-Safe': '1' });
+
+  // NB-03: Redirect finalUrl to disallowed host MUST fail closed, and oversized body MUST fail
+  mockResp = { status: 200, statusText: 'OK', responseText: 'secret', finalUrl: 'https://evil.example.com/leak' };
+  const badRedirect = await bridge.port.netFetch('rw-addon', 'https://api.example.com/v1/redir');
+  assert.equal(badRedirect.ok, false);
+  assert.match(badRedirect.reason, /ERR_NET_REDIRECT_FORBIDDEN/);
+
+  mockResp = { status: 200, statusText: 'OK', responseText: 'x'.repeat(2048) };
+  const tooLarge = await bridge.port.netFetch('rw-addon', 'https://api.example.com/v1/big', { maxResponseBytes: 1024 });
+  assert.equal(tooLarge.ok, false);
+  assert.equal(tooLarge.reason, 'ERR_NET_RESPONSE_TOO_LARGE');
 
   const loopDenied = await bridge.port.netFetch('rw-addon', 'http://127.0.0.1:11434/api/tags');
   assert.equal(loopDenied.ok, false);
@@ -176,7 +239,48 @@ test('TC-V30-12: 1-Click Hub Safari routing guard & curated all-in-one closed Sh
   });
   assert.ok(curated.includes('drawerShadowMode: opts.drawerShadowMode || "closed"'));
   assert.ok(curated.includes('GM, GM_xmlhttpRequest, GM_getValue, GM_setValue'));
+  assert.ok(curated.includes('GM_info, GM_openInTab, GM_registerMenuCommand, GM_notification, GM_download, GM_cookie'));
+  assert.ok(curated.includes('bootRemoteWebHost()'), 'BLK-05: Curated All-in-One bundle MUST include auto-boot snippet');
   assert.equal(curated.includes('@require'), false);
+
+  // BLK-06: Remote Web collector forwards v3 apiVersion & sanitized permissions (stripping localLoopback)
+  const { collectRemoteWebAddons } = require('../../src/adapters/remote-web/addon-collector');
+  const { ANTIGRAVITY_REMOTE_WEB_PROFILE } = require('../../src/profiles/antigravity-remote-web');
+  const tmpPack = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-v3-remote-pack-'));
+  try {
+    const addonsDir = path.join(tmpPack, 'addons.d');
+    const pluginsRoot = path.join(tmpPack, 'plugins');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    fs.mkdirSync(path.join(pluginsRoot, 'v3-net-addon'), { recursive: true });
+    fs.writeFileSync(path.join(pluginsRoot, 'v3-net-addon', 'index.js'), 'addonHost.ui.showToast("ok");', 'utf8');
+    fs.writeFileSync(
+      path.join(addonsDir, 'v3-net-addon.json'),
+      JSON.stringify({
+        schemaVersion: 3,
+        pluginId: 'v3-net-addon',
+        displayName: 'V3 Net Addon',
+        version: '1.0.0',
+        capabilities: ['renderer'],
+        entry: { rendererScript: 'index.js' },
+        permissions: { net: { httpsHosts: ['api.example.com'] } },
+      }),
+      'utf8'
+    );
+    const collected = collectRemoteWebAddons({
+      profile: ANTIGRAVITY_REMOTE_WEB_PROFILE,
+      addonsDir,
+      pluginsRootDir: pluginsRoot,
+      configJsonPath: null,
+      trustPolicyPath: null,
+      remotePrefsPath: null,
+    });
+    assert.equal(collected.addons.length, 1);
+    assert.equal(collected.addons[0].pluginMeta.apiVersion, 3);
+    assert.deepEqual(collected.addons[0].pluginMeta.permissions.net.httpsHosts, ['api.example.com']);
+    assert.deepEqual(collected.addons[0].pluginMeta.permissions.net.localLoopback, []);
+  } finally {
+    fs.rmSync(tmpPack, { recursive: true, force: true });
+  }
 
   const hubFiles = buildHubFiles({ version: '3.0.0', hostLibSha256: 'a'.repeat(64) });
   assert.ok(hubFiles['index.html'].includes('#sha256=' + 'a'.repeat(64)));

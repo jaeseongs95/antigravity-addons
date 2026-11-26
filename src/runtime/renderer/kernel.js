@@ -37,6 +37,7 @@ const _Number = Number;
 const _NumberIsFinite = Number.isFinite;
 const _ReflectApply = Reflect.apply;
 const _ObjectKeys = Object.keys;
+const _ObjectCreate = Object.create;
 const _ObjectFreeze = Object.freeze;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ObjectDefineProperty = Object.defineProperty;
@@ -147,6 +148,15 @@ function applyUiGridMerges(doc, uiGridMerges) {
   return true;
 }
 
+function defineSafeOwnProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.configurable = true;
+  desc.writable = true;
+  _ObjectDefineProperty(target, key, desc);
+}
+
 function deepFreezeClone(value, seen = new _WeakMap()) {
   if (value === null || typeof value !== 'object') {
     return value;
@@ -158,12 +168,7 @@ function deepFreezeClone(value, seen = new _WeakMap()) {
     const out = [];
     _WeakMapSet(seen, value, out);
     for (let i = 0; i < value.length; i++) {
-      _ObjectDefineProperty(out, i, {
-        value: deepFreezeClone(value[i], seen),
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
+      defineSafeOwnProp(out, i, deepFreezeClone(value[i], seen));
     }
     return _ObjectFreeze(out);
   }
@@ -173,12 +178,7 @@ function deepFreezeClone(value, seen = new _WeakMap()) {
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
     if (_SetHas(FORBIDDEN_CLONE_KEYS, k)) continue;
-    _ObjectDefineProperty(out, k, {
-      value: deepFreezeClone(value[k], seen),
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
+    defineSafeOwnProp(out, k, deepFreezeClone(value[k], seen));
   }
   return _ObjectFreeze(out);
 }
@@ -202,12 +202,7 @@ function sanitizeJsonPayload(value, seen = new _WeakSet()) {
       const out = [];
       for (let i = 0; i < value.length; i++) {
         const item = sanitizeJsonPayload(value[i], seen);
-        _ObjectDefineProperty(out, i, {
-          value: item === undefined ? null : item,
-          enumerable: true,
-          configurable: true,
-          writable: true,
-        });
+        defineSafeOwnProp(out, i, item === undefined ? null : item);
       }
       return out;
     }
@@ -220,12 +215,7 @@ function sanitizeJsonPayload(value, seen = new _WeakSet()) {
       }
       const nextVal = sanitizeJsonPayload(value[k], seen);
       if (nextVal !== undefined) {
-        _ObjectDefineProperty(out, k, {
-          value: nextVal,
-          enumerable: true,
-          configurable: true,
-          writable: true,
-        });
+        defineSafeOwnProp(out, k, nextVal);
       }
     }
     return out;
@@ -373,17 +363,18 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       surfaceGeometry,
       uiAnchors: cfg.uiAnchors || {},
     });
+    const onPortalClaimChange = (claimId, active) => {
+      if (hostBridge && typeof hostBridge.setPortalClaim === 'function') {
+        try {
+          hostBridge.setPortalClaim(claimId, active);
+        } catch (_e) {}
+      }
+    };
     modalPortal = createModalPortal(doc, win, {
       extraNoTranslateAttributes,
       styleManager,
       surfaceGeometry,
-      onPortalClaimChange: (claimId, active) => {
-        if (hostBridge && typeof hostBridge.setPortalClaim === 'function') {
-          try {
-            hostBridge.setPortalClaim(claimId, active);
-          } catch (_e) {}
-        }
-      },
+      onPortalClaimChange,
     });
     regionObserver = createRegionObserver(doc, win);
     settingsTabs = createSettingsTabCoordinator();
@@ -391,6 +382,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     toastManager = createToastAndDialogManager(doc, win, {
       themeAndI18n,
       extraNoTranslateAttributes,
+      onPortalClaimChange,
     });
     eventBus = createEventBus({ reportPluginError });
     storageV3 = createStorageV3(win);

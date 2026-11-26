@@ -68,13 +68,20 @@ test('TC-V30-06: Tier 1 UI (toast, confirm, prompt, statusItem delegation + fall
   assert.equal(clicks[0].shiftKey, true);
   assert.equal(clicks[0].altKey, true);
 
-  // Now mount a statusbar provider plugin providing `host.statusbar`
+  // BLK-01: Restricted plugin CANNOT hijack host.statusbar even by passing allowWellKnownHostServices
+  assert.throws(
+    () => ctxA.services.provide('host.statusbar', { registerItem() {} }, { allowWellKnownHostServices: true }),
+    /ERR_SERVICE_HOST_TRUST_FORBIDDEN/
+  );
+
+  // Now mount a TRUSTED statusbar provider plugin providing `host.statusbar`
   const delegatedItems = [];
   const ctxBar = await host.mountPlugin({
     schemaVersion: 3,
     pluginId: 'statusbar-provider',
     displayName: 'Statusbar Provider',
     version: '1.0.0',
+    trustLevel: 'trusted',
     capabilities: ['renderer'],
     entry: { rendererScript: 'bar.js' },
     permissions: {
@@ -191,6 +198,15 @@ test('TC-V30-08: services default-deny ACL, storage TTL + onDidChange, and v2 co
     version: '1.0.0',
     capabilities: ['renderer'],
     entry: { rendererScript: 'p.js' },
+    permissions: {
+      storage: { maxBytes: 120 },
+      services: {
+        provide: [
+          { name: 'svc-provider.secret', allowedCallers: [] },
+          { name: 'svc-provider.open', allowedCallers: ['svc-caller'] },
+        ],
+      },
+    },
   });
   const ctxB = await host.mountPlugin({
     schemaVersion: 3,
@@ -201,33 +217,75 @@ test('TC-V30-08: services default-deny ACL, storage TTL + onDidChange, and v2 co
     entry: { rendererScript: 'c.js' },
   });
 
-  // Default-deny: omitting allowedCallers blocks ctxB
-  ctxA.services.provide('svc-provider.secret', {
-    ping: (x) => ({ pong: x }),
-  });
+  // BLK-01: Undeclared service rejected on v3 & runtime opts cannot widen manifest allowedCallers
+  assert.throws(
+    () => ctxA.services.provide('svc-provider.undeclared', { ping: () => 1 }),
+    /ERR_SERVICE_NOT_DECLARED/
+  );
+  ctxA.services.provide(
+    'svc-provider.secret',
+    { ping: (x) => ({ pong: x }) },
+    { allowedCallers: ['*'] } // Attempt to widen manifest's [] must be ignored
+  );
   assert.throws(() => ctxB.services.call('svc-provider.secret', 'ping', 'hi'), /ERR_SERVICE_CALLER_FORBIDDEN/);
 
   // Explicit allowlist permits ctxB & strips __proto__
-  ctxA.services.provide(
-    'svc-provider.open',
-    {
-      echo: (obj) => obj,
-    },
-    { allowedCallers: ['svc-caller'] }
-  );
+  ctxA.services.provide('svc-provider.open', {
+    echo: (obj) => obj,
+  });
   const res = ctxB.services.call('svc-provider.open', 'echo', JSON.parse('{"a":1,"__proto__":{"x":9}}'));
   assert.equal(res.a, 1);
   assert.equal(Object.prototype.hasOwnProperty.call(res, '__proto__'), false);
 
-  // Storage KV + onDidChange + TTL
+  // Storage KV + onDidChange + TTL + NB-04 total bucket quota
   const changes = [];
   ctxA.storage.onDidChange((ev) => changes.push(ev));
   await ctxA.storage.set('k1', { n: 7 });
   assert.deepEqual(await ctxA.storage.get('k1'), { n: 7 });
   assert.equal(changes.length, 1);
+  await assert.rejects(
+    () => ctxA.storage.set('k2', 'x'.repeat(110)),
+    /ERR_STORAGE_QUOTA_EXCEEDED/
+  );
   await ctxA.storage.set('ephemeral', 'bye', { ttlMs: 1 });
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(await ctxA.storage.get('ephemeral'), undefined);
+
+  // BLK-02: World 998 Object.prototype.net setter & Object.prototype.get pollution MUST NOT steal capabilities or crash
+  let stolenNet = null;
+  Object.defineProperty(Object.prototype, 'net', {
+    configurable: true,
+    set(v) {
+      stolenNet = v;
+    },
+    get() {
+      return stolenNet;
+    },
+  });
+  Object.defineProperty(Object.prototype, 'get', {
+    configurable: true,
+    writable: true,
+    value() {
+      return 'polluted';
+    },
+  });
+  try {
+    const trustedNetCtx = await host.mountPlugin({
+      schemaVersion: 3,
+      pluginId: 'trusted-net-target',
+      displayName: 'Trusted Net',
+      version: '1.0.0',
+      trustLevel: 'trusted',
+      capabilities: ['renderer'],
+      entry: { rendererScript: 't.js' },
+      permissions: { net: { httpsHosts: ['api.example.com'] } },
+    });
+    assert.equal(stolenNet, null, 'BLK-02: Object.prototype.net setter must NOT steal ctx.net');
+    assert.equal(typeof trustedNetCtx.net.fetch, 'function');
+  } finally {
+    delete Object.prototype.net;
+    delete Object.prototype.get;
+  }
 
   // v2 plugin mounted on the SAME v3 kernel receives full v2 compat adapter
   const v2Handle = await host.mountPlugin({

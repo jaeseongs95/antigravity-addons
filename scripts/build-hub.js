@@ -25,7 +25,9 @@ const {
 } = require('../src/profiles/antigravity-remote-web');
 const {
   buildRemoteRuntimeBundleSource,
+  buildAutoBootSnippet,
   normalizeConnectHosts,
+  verifyRemoteBundleAst,
 } = require('./build-remote');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -73,10 +75,10 @@ function buildCuratedAllInOneUserscript({
   const shadowedAddons = (Array.isArray(packedAddons) ? packedAddons : []).map((addon) => ({
     ...addon,
     rendererSource: [
-      '(function(addonHost, GM, GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_deleteValue, GM_addStyle, unsafeWindow) {',
+      'return (function(addonHost, GM, GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_deleteValue, GM_addStyle, GM_info, GM_openInTab, GM_registerMenuCommand, GM_notification, GM_download, GM_cookie, unsafeWindow) {',
       '  "use strict";',
       toLf(addon.rendererSource || ''),
-      '})(addonHost, undefined, undefined, undefined, undefined, undefined, undefined, undefined);',
+      '})(addonHost, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined);',
     ].join('\n'),
   }));
 
@@ -103,7 +105,14 @@ function buildCuratedAllInOneUserscript({
     '',
   ];
 
-  return toLf(headerLines.join('\n') + runtimeSource);
+  // BLK-05: Append auto-boot snippet so installing the Curated All-in-One bundle boots automatically,
+  // and verify the complete output with the Acorn AST security gate.
+  const out = toLf(headerLines.join('\n') + runtimeSource + buildAutoBootSnippet());
+  const astRes = verifyRemoteBundleAst(out);
+  if (!astRes.ok) {
+    throw new Error(`CURATED_BUNDLE_AST_VIOLATIONS:${JSON.stringify(astRes.violations)}`);
+  }
+  return out;
 }
 
 function buildHubFiles({

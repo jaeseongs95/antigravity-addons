@@ -443,7 +443,12 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
       declaredTrust ||
       (strictTrustPolicy
         ? 'restricted'
-        : reqs.hasMainHook || reqs.hasDocumentTransform || reqs.hasSettingsBridge || reqs.hasConfigBridge || reqs.hasLocalLoopback
+        : reqs.hasMainHook ||
+            reqs.hasDocumentTransform ||
+            reqs.hasSettingsBridge ||
+            reqs.hasConfigBridge ||
+            reqs.hasLocalLoopback ||
+            reqs.hasHostServiceProvide
           ? 'trusted'
           : 'restricted');
     if (effectiveTrustLevel === 'restricted') {
@@ -480,6 +485,13 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
           ok: false,
           reason: 'ERR_RESTRICTED_LOCAL_LOOPBACK_FORBIDDEN',
           errors: ['Restricted plugins cannot declare "permissions.net.localLoopback"; requires trustLevel: "trusted" and host trust approval'],
+        };
+      }
+      if (reqs.hasHostServiceProvide) {
+        return {
+          ok: false,
+          reason: 'ERR_RESTRICTED_HOST_SERVICE_FORBIDDEN',
+          errors: ['Restricted plugins cannot provide well-known "host.*" services; requires trustLevel: "trusted" and host trust approval'],
         };
       }
     }

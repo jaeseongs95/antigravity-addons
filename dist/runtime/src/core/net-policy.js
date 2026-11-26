@@ -171,13 +171,22 @@ function isPrivateOrReservedIp(rawIp) {
   if (allZeroPrefix6 && v6[5] === 0 && v6[6] === 0 && (v6[7] === 0 || v6[7] === 1)) {
     return true;
   }
-  // IPv4-mapped ::ffff:0:0/96 or IPv4-compatible ::/96 or NAT64 64:ff9b::/96
+  // IPv4-mapped ::ffff:0:0/96, IPv4-compatible ::/96, RFC 2765 ::ffff:0:0:0/96, or NAT64 64:ff9b::/96
   const isV4Mapped = allZeroPrefix6 && (v6[5] === 0xffff || v6[5] === 0);
+  const isV4Translated = v6[0] === 0 && v6[1] === 0 && v6[2] === 0 && v6[3] === 0 && v6[4] === 0xffff && v6[5] === 0;
   const isNat64 = v6[0] === 0x0064 && v6[1] === 0xff9b && v6[2] === 0 && v6[3] === 0 && v6[4] === 0 && v6[5] === 0;
-  if (isV4Mapped || isNat64) {
+  if (isV4Mapped || isV4Translated || isNat64) {
     const mappedOctets = [(v6[6] >> 8) & 0xff, v6[6] & 0xff, (v6[7] >> 8) & 0xff, v6[7] & 0xff];
     return isPrivateOrReservedIpv4Octets(mappedOctets);
   }
+  // RFC 8215 Local-Use NAT64 64:ff9b:1::/48
+  if (v6[0] === 0x0064 && v6[1] === 0xff9b && v6[2] === 0x0001) return true;
+  // RFC 6666 Discard-Only 100::/64
+  if (v6[0] === 0x0100 && v6[1] === 0 && v6[2] === 0 && v6[3] === 0) return true;
+  // 6to4 2002::/16 (always block to prevent tunneled SSRF)
+  if (v6[0] === 0x2002) return true;
+  // Teredo 2001:0000::/32
+  if (v6[0] === 0x2001 && v6[1] === 0x0000) return true;
   // Unique Local fc00::/7
   if ((v6[0] & 0xfe00) === 0xfc00) return true;
   // Link-Local fe80::/10

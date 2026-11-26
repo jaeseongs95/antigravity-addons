@@ -14,6 +14,8 @@
 const { buildOverlayChrome, createSchemaUiController } = require('./ui-schema-renderer');
 const { validateSafeCssText } = require('./style-manager');
 
+const _ObjectCreate = Object.create;
+const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
 const _ReflectApply = Reflect.apply;
 const _ArrayIsArray = Array.isArray;
@@ -22,6 +24,21 @@ const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
 const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
 const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
 const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
+
+// BLK-02: Null-prototype descriptor avoids both Object.prototype.<prop> setter theft
+// AND Object.prototype.get/set descriptor collision throws in shared World 998.
+function defineSafeReadOnlyProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.writable = false;
+  desc.configurable = false;
+  _ObjectDefineProperty(target, key, desc);
+}
+
+// NB-01: Module-scoped LIFO stack for v3 overlays so a single Escape closes only the top-most overlay.
+const v3EscapeStack = [];
+let v3OverlaySeq = 0;
 
 function detectLayoutMode(win) {
   const w = win && Number.isFinite(Number(win.innerWidth)) ? Number(win.innerWidth) : 1280;
@@ -155,11 +172,23 @@ function createAddonContextV3({
     let tracker = null;
     let outsideCleanup = null;
     let escCleanup = null;
+    v3OverlaySeq += 1;
+    const claimId = `v3:${pluginId}:${kind}:${v3OverlaySeq}`;
+    const notifyPortalClaim = (active) => {
+      if (hostBridge && typeof hostBridge.setPortalClaim === 'function') {
+        try {
+          hostBridge.setPortalClaim(claimId, active);
+        } catch (_e) {}
+      }
+    };
 
     const close = () => {
       if (closed) return false;
       closed = true;
       _SetDelete(activeOverlays, close);
+      const stackIdx = v3EscapeStack.indexOf(close);
+      if (stackIdx !== -1) v3EscapeStack.splice(stackIdx, 1);
+      notifyPortalClaim(false);
       if (tracker) {
         tracker.dispose();
         tracker = null;
@@ -258,15 +287,19 @@ function createAddonContextV3({
     if (win && typeof win.addEventListener === 'function') {
       const onKeyDown = (ev) => {
         if (closed || !ev || ev.key !== 'Escape') return;
+        if (v3EscapeStack.length > 0 && v3EscapeStack[v3EscapeStack.length - 1] !== close) return;
         if (ev.isComposing || ev.keyCode === 229 || ev.defaultPrevented) return;
         if (ev.isTrusted === false) return;
         if (typeof ev.preventDefault === 'function') ev.preventDefault();
+        if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
         close();
       };
       win.addEventListener('keydown', onKeyDown, true);
       escCleanup = () => win.removeEventListener('keydown', onKeyDown, true);
     }
 
+    v3EscapeStack.push(close);
+    notifyPortalClaim(true);
     _SetAdd(activeOverlays, close);
 
     return _ObjectFreeze({
@@ -475,63 +508,74 @@ function createAddonContextV3({
     dispose: disposeSelf,
   });
 
-  const ctx = {
-    apiVersion: 3,
-    meta,
-    env,
-    theme: themeAndI18n.createThemeHandle(addDisposer),
-    i18n: themeAndI18n.createI18nHandle(),
-    ui,
-    storage,
-    events,
-    services,
-    lifecycle,
-  };
+  const ctx = {};
+  defineSafeReadOnlyProp(ctx, 'apiVersion', 3);
+  defineSafeReadOnlyProp(ctx, 'meta', meta);
+  defineSafeReadOnlyProp(ctx, 'env', env);
+  defineSafeReadOnlyProp(ctx, 'theme', themeAndI18n.createThemeHandle(addDisposer));
+  defineSafeReadOnlyProp(ctx, 'i18n', themeAndI18n.createI18nHandle());
+  defineSafeReadOnlyProp(ctx, 'ui', ui);
+  defineSafeReadOnlyProp(ctx, 'storage', storage);
+  defineSafeReadOnlyProp(ctx, 'events', events);
+  defineSafeReadOnlyProp(ctx, 'services', services);
+  defineSafeReadOnlyProp(ctx, 'lifecycle', lifecycle);
 
   // Capability-gated namespaces: strictly omitted when not declared/permitted/supported.
-  // Direct own assignment prior to _ObjectFreeze(ctx) avoids Object.defineProperty descriptor
-  // inheritance breaks if a peer plugin pollutes Object.prototype.get/set in World 998.
+  // BLK-02: defineSafeReadOnlyProp uses a null-prototype descriptor so neither
+  // Object.prototype.<prop> setters nor Object.prototype.get/set can hijack or crash World 998.
   if (hasNetCapability) {
-    ctx.net = _ObjectFreeze({
-      fetch(url, init = {}) {
-        assertActive();
-        return hostBridge.netFetch(pluginId, url, init);
-      },
-    });
+    defineSafeReadOnlyProp(
+      ctx,
+      'net',
+      _ObjectFreeze({
+        fetch(url, init = {}) {
+          assertActive();
+          return hostBridge.netFetch(pluginId, url, init);
+        },
+      })
+    );
   }
 
   if (hasDomCapability) {
-    ctx.dom = _ObjectFreeze({
-      observeRegion(selector, callback, opts) {
-        assertActive();
-        return regionObserver.observeRegion(pluginId, selector, callback, opts);
-      },
-      isElementInsideIgnored(nodeOrEvent, opts) {
-        return isElementInsideIgnored(nodeOrEvent, opts);
-      },
-      mountSlot(slotId, opts) {
-        assertActive();
-        return slotManager.mountSlot(pluginMeta, slotId, opts);
-      },
-      unmountSlot(slotId) {
-        assertActive();
-        return slotManager.unmountSlot(pluginId, slotId);
-      },
-    });
+    defineSafeReadOnlyProp(
+      ctx,
+      'dom',
+      _ObjectFreeze({
+        observeRegion(selector, callback, opts) {
+          assertActive();
+          return regionObserver.observeRegion(pluginId, selector, callback, opts);
+        },
+        isElementInsideIgnored(nodeOrEvent, opts) {
+          return isElementInsideIgnored(nodeOrEvent, opts);
+        },
+        mountSlot(slotId, opts) {
+          assertActive();
+          return slotManager.mountSlot(pluginMeta, slotId, opts);
+        },
+        unmountSlot(slotId) {
+          assertActive();
+          return slotManager.unmountSlot(pluginId, slotId);
+        },
+      })
+    );
   }
 
   if (hasConfigBridge) {
-    ctx.configBridge = _ObjectFreeze({
-      scopes: frozenConfigScopes,
-      read(scopeId) {
-        assertActive();
-        return readConfigScope(scopeId);
-      },
-      write(scopeId, nextDataOrRawJson, opts) {
-        assertActive();
-        return writeConfigScope(scopeId, nextDataOrRawJson, opts);
-      },
-    });
+    defineSafeReadOnlyProp(
+      ctx,
+      'configBridge',
+      _ObjectFreeze({
+        scopes: frozenConfigScopes,
+        read(scopeId) {
+          assertActive();
+          return readConfigScope(scopeId);
+        },
+        write(scopeId, nextDataOrRawJson, opts) {
+          assertActive();
+          return writeConfigScope(scopeId, nextDataOrRawJson, opts);
+        },
+      })
+    );
   }
 
   return _ObjectFreeze(ctx);

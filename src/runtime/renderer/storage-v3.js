@@ -138,8 +138,21 @@ function createStorageV3(win, { namespacePrefix = 'ag-v3-storage' } = {}) {
         }
         const ttlMs = opts && Number.isFinite(Number(opts.ttlMs)) && Number(opts.ttlMs) > 0 ? Number(opts.ttlMs) : null;
         const exp = ttlMs ? Date.now() + ttlMs : null;
+        const now = Date.now();
+        // NB-04: Enforce total bucket serialized byte quota across all live keys
+        const projected = {};
+        _MapForEach(bucket.map, (rec, existingKey) => {
+          if (existingKey === key) return;
+          if (rec.exp !== null && rec.exp <= now) return;
+          projected[existingKey] = rec;
+        });
+        projected[key] = { v: cleanVal, exp };
+        const totalSerialized = JSON.stringify(projected);
+        if (totalSerialized && totalSerialized.length > maxBytes) {
+          throw new Error('ERR_STORAGE_QUOTA_EXCEEDED');
+        }
         const prevRec = _MapGet(bucket.map, key);
-        const oldValue = prevRec && (prevRec.exp === null || prevRec.exp > Date.now()) ? sanitizeBusPayload(prevRec.v) : undefined;
+        const oldValue = prevRec && (prevRec.exp === null || prevRec.exp > now) ? sanitizeBusPayload(prevRec.v) : undefined;
         _MapSet(bucket.map, key, { v: cleanVal, exp });
         persistBucket(bucket);
         emitChange(bucket, { key, oldValue, newValue: sanitizeBusPayload(cleanVal) });

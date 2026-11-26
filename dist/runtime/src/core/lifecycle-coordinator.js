@@ -23,6 +23,7 @@ function planAddonExecution(
     supportedCapabilities = null,
     hostVersion = undefined,
     strictTrustPolicy = true,
+    forbiddenNetHosts = null,
     fsPort = null,
     isEnabled = () => true,
   } = {}
@@ -41,6 +42,7 @@ function planAddonExecution(
       supportedCapabilities,
       hostVersion,
       strictTrustPolicy,
+      forbiddenNetHosts,
       fsPort,
     });
     if (!check.ok) {

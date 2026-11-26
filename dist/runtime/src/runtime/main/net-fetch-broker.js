@@ -85,7 +85,8 @@ function createNetFetchBroker({
       reqHeaders.Host = `127.0.0.1:${plan.port}`;
     }
 
-    const bodyBuf = typeof body === 'string' && body.length > 0 ? Buffer.from(body, 'utf8') : null;
+    const canSendBody = plan.method !== 'GET' && plan.method !== 'HEAD';
+    const bodyBuf = canSendBody && typeof body === 'string' && body.length > 0 ? Buffer.from(body, 'utf8') : null;
     if (bodyBuf && !Object.keys(reqHeaders).some((k) => k.toLowerCase() === 'content-length')) {
       reqHeaders['Content-Length'] = String(bodyBuf.length);
     }
@@ -202,10 +203,11 @@ function createNetFetchBroker({
     let currentUrl = rawUrl;
     let currentMethod = init.method || 'GET';
     let currentBody = typeof init.body === 'string' ? init.body : null;
+    let currentHeaders = init.headers && typeof init.headers === 'object' ? { ...init.headers } : {};
     let redirectsUsed = 0;
 
     while (true) {
-      const plan = evaluateNetRequest(currentUrl, { method: currentMethod, headers: init.headers }, policy);
+      const plan = evaluateNetRequest(currentUrl, { method: currentMethod, headers: currentHeaders }, policy);
       if (!plan.ok) {
         return { ok: false, reason: plan.reason };
       }
@@ -241,14 +243,23 @@ function createNetFetchBroker({
         };
       }
 
-      let nextUrl;
+      let nextParsed;
       try {
-        nextUrl = new URL(hop.location, plan.url).href;
+        nextParsed = new URL(hop.location, plan.url);
       } catch (_e) {
         return { ok: false, reason: 'ERR_NET_INVALID_REDIRECT_URL' };
       }
+      // BLK-07: Strip Authorization header on cross-host redirects to prevent credential leakage
+      if (nextParsed.hostname.toLowerCase() !== plan.hostname.toLowerCase()) {
+        const filtered = {};
+        for (const [k, v] of Object.entries(currentHeaders)) {
+          if (k.toLowerCase() === 'authorization') continue;
+          filtered[k] = v;
+        }
+        currentHeaders = filtered;
+      }
       redirectsUsed += 1;
-      currentUrl = nextUrl;
+      currentUrl = nextParsed.href;
       if (hop.status === 303) {
         currentMethod = 'GET';
         currentBody = null;

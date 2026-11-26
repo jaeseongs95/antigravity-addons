@@ -224,15 +224,23 @@ function createSchemaUiController(doc, containerEl, {
         if (ref.controlEl) ref.controlEl.checked = Boolean(val);
         return true;
       case 'input':
-      case 'textarea':
+      case 'textarea': {
         if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
-        if (ref.controlEl && doc.activeElement !== ref.controlEl) {
+        const activeEl =
+          ref.controlEl &&
+          typeof ref.controlEl.getRootNode === 'function' &&
+          ref.controlEl.getRootNode() &&
+          ref.controlEl.getRootNode().activeElement
+            ? ref.controlEl.getRootNode().activeElement
+            : doc.activeElement;
+        if (ref.controlEl && activeEl !== ref.controlEl) {
           ref.controlEl.value = val !== undefined && val !== null ? String(val) : '';
         }
         if (node.placeholder !== undefined && ref.controlEl) {
           ref.controlEl.setAttribute('placeholder', String(node.placeholder));
         }
         return true;
+      }
       case 'select':
         if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
         if (ref.controlEl) {
@@ -270,6 +278,35 @@ function createSchemaUiController(doc, containerEl, {
           ref.labelEl.textContent = String(node.title);
         }
         return true;
+      case 'list': {
+        const listSig = JSON.stringify(node.items || []);
+        if (ref.optSig !== listSig && ref.wrapperEl) {
+          while (ref.wrapperEl.firstChild) ref.wrapperEl.removeChild(ref.wrapperEl.firstChild);
+          const items = Array.isArray(node.items) ? node.items : [];
+          for (let i = 0; i < items.length; i += 1) {
+            const item = items[i];
+            const li = doc.createElement('li');
+            li.className = 'ag-list-item';
+            const textSpan = doc.createElement('span');
+            textSpan.textContent = String(item && typeof item === 'object' ? item.label || item.text || '' : item);
+            li.appendChild(textSpan);
+            if (item && typeof item === 'object' && item.actionId) {
+              const btn = doc.createElement('button');
+              btn.type = 'button';
+              btn.className = 'ag-btn';
+              btn.textContent = String(item.actionLabel || 'Open');
+              btn.addEventListener('click', (ev) => {
+                if (ev && ev.isTrusted === false) return;
+                emitAction(item.actionId, item.payload !== undefined ? item.payload : item.id);
+              });
+              li.appendChild(btn);
+            }
+            ref.wrapperEl.appendChild(li);
+          }
+          ref.optSig = listSig;
+        }
+        return true;
+      }
       default:
         return true;
     }
@@ -392,7 +429,7 @@ function createSchemaUiController(doc, containerEl, {
         });
         controlEl.addEventListener('keydown', (ev) => {
           if (!ev || ev.key !== 'Enter') return;
-          if (ev.isComposing || ev.keyCode === 229) return;
+          if (ev.isComposing || ev.keyCode === 229 || ev.isTrusted === false) return;
           if (node.submitActionId) {
             emitAction(node.submitActionId, { value: controlEl.value });
           }

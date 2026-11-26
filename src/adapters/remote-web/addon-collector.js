@@ -62,11 +62,35 @@ function buildPackedPluginMeta(addon, verified) {
       }))
     : [];
 
+  // BLK-06: Forward apiVersion & Remote-Web-sanitized permissions (strictly stripping localLoopback & desktop-only configBridge)
+  const rawPerms = manifest.permissions && typeof manifest.permissions === 'object' ? manifest.permissions : null;
+  let remotePermissions = null;
+  if (rawPerms) {
+    remotePermissions = {};
+    if (rawPerms.ui && typeof rawPerms.ui === 'object') remotePermissions.ui = rawPerms.ui;
+    if (rawPerms.storage && typeof rawPerms.storage === 'object') remotePermissions.storage = rawPerms.storage;
+    if (rawPerms.events && typeof rawPerms.events === 'object') remotePermissions.events = rawPerms.events;
+    if (rawPerms.services && typeof rawPerms.services === 'object') remotePermissions.services = rawPerms.services;
+    if (rawPerms.net && typeof rawPerms.net === 'object') {
+      remotePermissions.net = {
+        httpsHosts: Array.isArray(rawPerms.net.httpsHosts) ? rawPerms.net.httpsHosts.slice() : [],
+        localLoopback: [],
+      };
+    }
+    if (rawPerms.dom && typeof rawPerms.dom === 'object') {
+      remotePermissions.dom = {
+        anchors: Array.isArray(rawPerms.dom.anchors) ? rawPerms.dom.anchors.slice() : [],
+        documentTransform: Boolean(rawPerms.dom.documentTransform && verified.effectiveTrustLevel === 'trusted'),
+      };
+    }
+  }
+
   return {
     pluginMeta: {
       pluginId: addon.pluginId,
       displayName: typeof manifest.displayName === 'string' && manifest.displayName.trim() ? manifest.displayName.trim() : addon.pluginId,
       version: manifest.version || '0.0.0',
+      apiVersion: manifest.apiVersion || (manifest.sourceSchemaVersion === 3 || manifest.schemaVersion === 3 ? 3 : 2),
       sourceSchemaVersion: manifest.sourceSchemaVersion || 2,
       trustLevel: verified.effectiveTrustLevel,
       hasDocumentTransformSlot: Boolean(addon.hasDocumentTransformSlot),
@@ -76,6 +100,7 @@ function buildPackedPluginMeta(addon, verified) {
       uiSlots: Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [],
       isolation: manifest.isolation && typeof manifest.isolation === 'object' ? manifest.isolation : {},
       skippedCapabilities: Array.isArray(addon.skippedCapabilities) ? addon.skippedCapabilities.slice() : [],
+      ...(remotePermissions ? { permissions: remotePermissions } : {}),
     },
     settingsSpec: hasSettingsBridge ? settingsSpec : null,
   };
@@ -107,7 +132,7 @@ function collectRemoteWebAddons({
   trustPolicyPath = undefined,
   remotePrefsPath = undefined,
   settingsDataDir = null,
-  hostVersion = '2.7.0',
+  hostVersion = '3.0.0',
   strictTrustPolicy = true,
   includeSettingsSnapshots = false,
   includeOfflineConfigBridge = false,
@@ -152,6 +177,7 @@ function collectRemoteWebAddons({
     supportedCapabilities: Array.isArray(profile.supportedCapabilities) ? profile.supportedCapabilities : ['renderer'],
     hostVersion,
     strictTrustPolicy,
+    forbiddenNetHosts: Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : [],
     fsPort: activeFsPort,
     isEnabled: enabledCheck,
   });

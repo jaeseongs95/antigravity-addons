@@ -640,13 +640,35 @@ function createRemoteHostBridge({
           anonymous: true,
           timeout: Number.isFinite(Number(init.timeoutMs)) ? Math.min(30000, Math.max(500, Number(init.timeoutMs))) : 15000,
           onload(resp) {
+            // NB-03: Re-validate redirect finalUrl against the same fail-closed allowlist and cap response size
+            const finalUrl = resp && typeof resp.finalUrl === 'string' && resp.finalUrl ? resp.finalUrl : plan.url;
+            if (finalUrl !== plan.url) {
+              const finalCheck = evaluateNetRequest(finalUrl, { method: 'GET' }, {
+                httpsHosts: binding.httpsHosts,
+                localLoopback: [],
+                forbiddenHosts: Array.isArray(forbiddenNetHosts) ? forbiddenNetHosts : [],
+                allowLoopback: false,
+              });
+              if (!finalCheck.ok) {
+                resolve({ ok: false, reason: `ERR_NET_REDIRECT_FORBIDDEN:${finalCheck.reason}` });
+                return;
+              }
+            }
+            const bodyText = String((resp && resp.responseText) || '');
+            const maxBytes = Number.isFinite(Number(init.maxResponseBytes))
+              ? Math.min(4 * 1024 * 1024, Math.max(1024, Number(init.maxResponseBytes)))
+              : 2 * 1024 * 1024;
+            if (bodyText.length > maxBytes) {
+              resolve({ ok: false, reason: 'ERR_NET_RESPONSE_TOO_LARGE' });
+              return;
+            }
             resolve({
               ok: true,
               status: Number(resp && resp.status) || 0,
               statusText: String((resp && resp.statusText) || ''),
               headers: {},
-              bodyText: String((resp && resp.responseText) || ''),
-              url: plan.url,
+              bodyText,
+              url: finalUrl,
               channel: 'https',
             });
           },

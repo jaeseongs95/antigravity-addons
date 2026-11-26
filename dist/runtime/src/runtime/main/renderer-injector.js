@@ -440,6 +440,7 @@ ${verified.source}
           const execRes = await execInWorld(contents, runCode, `plugin:${addon.pluginId}`);
           if (!isStillCurrent()) {
             trustedConfigMap.delete(addon.pluginId);
+            pluginNetMap.delete(addon.pluginId);
             return;
           }
           if (execRes && execRes.ok) {
@@ -472,6 +473,7 @@ ${verified.source}
             injectedSet.add(addon.pluginId);
             trustedSettingsMap.delete(addon.pluginId);
             trustedConfigMap.delete(addon.pluginId);
+            pluginNetMap.delete(addon.pluginId);
             setWindowLifecycleState(wcId, addon.pluginId, LIFECYCLE_STATES.FAILED);
             recordRendererError(addon.pluginId, (execRes && execRes.error) || 'ERR_PLUGIN_EXEC');
             try {
@@ -484,6 +486,7 @@ ${verified.source}
           }
         } catch (err) {
           trustedConfigMap.delete(addon.pluginId);
+          pluginNetMap.delete(addon.pluginId);
           if (!isStillCurrent()) return;
           injectedSet.add(addon.pluginId);
           trustedSettingsMap.delete(addon.pluginId);

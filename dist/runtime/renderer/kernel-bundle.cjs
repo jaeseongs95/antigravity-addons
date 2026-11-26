@@ -558,13 +558,22 @@ function isPrivateOrReservedIp(rawIp) {
   if (allZeroPrefix6 && v6[5] === 0 && v6[6] === 0 && (v6[7] === 0 || v6[7] === 1)) {
     return true;
   }
-  // IPv4-mapped ::ffff:0:0/96 or IPv4-compatible ::/96 or NAT64 64:ff9b::/96
+  // IPv4-mapped ::ffff:0:0/96, IPv4-compatible ::/96, RFC 2765 ::ffff:0:0:0/96, or NAT64 64:ff9b::/96
   const isV4Mapped = allZeroPrefix6 && (v6[5] === 0xffff || v6[5] === 0);
+  const isV4Translated = v6[0] === 0 && v6[1] === 0 && v6[2] === 0 && v6[3] === 0 && v6[4] === 0xffff && v6[5] === 0;
   const isNat64 = v6[0] === 0x0064 && v6[1] === 0xff9b && v6[2] === 0 && v6[3] === 0 && v6[4] === 0 && v6[5] === 0;
-  if (isV4Mapped || isNat64) {
+  if (isV4Mapped || isV4Translated || isNat64) {
     const mappedOctets = [(v6[6] >> 8) & 0xff, v6[6] & 0xff, (v6[7] >> 8) & 0xff, v6[7] & 0xff];
     return isPrivateOrReservedIpv4Octets(mappedOctets);
   }
+  // RFC 8215 Local-Use NAT64 64:ff9b:1::/48
+  if (v6[0] === 0x0064 && v6[1] === 0xff9b && v6[2] === 0x0001) return true;
+  // RFC 6666 Discard-Only 100::/64
+  if (v6[0] === 0x0100 && v6[1] === 0 && v6[2] === 0 && v6[3] === 0) return true;
+  // 6to4 2002::/16 (always block to prevent tunneled SSRF)
+  if (v6[0] === 0x2002) return true;
+  // Teredo 2001:0000::/32
+  if (v6[0] === 0x2001 && v6[1] === 0x0000) return true;
   // Unique Local fc00::/7
   if ((v6[0] & 0xfe00) === 0xfc00) return true;
   // Link-Local fe80::/10
@@ -4086,15 +4095,23 @@ function createSchemaUiController(doc, containerEl, {
         if (ref.controlEl) ref.controlEl.checked = Boolean(val);
         return true;
       case 'input':
-      case 'textarea':
+      case 'textarea': {
         if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
-        if (ref.controlEl && doc.activeElement !== ref.controlEl) {
+        const activeEl =
+          ref.controlEl &&
+          typeof ref.controlEl.getRootNode === 'function' &&
+          ref.controlEl.getRootNode() &&
+          ref.controlEl.getRootNode().activeElement
+            ? ref.controlEl.getRootNode().activeElement
+            : doc.activeElement;
+        if (ref.controlEl && activeEl !== ref.controlEl) {
           ref.controlEl.value = val !== undefined && val !== null ? String(val) : '';
         }
         if (node.placeholder !== undefined && ref.controlEl) {
           ref.controlEl.setAttribute('placeholder', String(node.placeholder));
         }
         return true;
+      }
       case 'select':
         if (ref.labelEl) ref.labelEl.textContent = String(node.label || '');
         if (ref.controlEl) {
@@ -4132,6 +4149,35 @@ function createSchemaUiController(doc, containerEl, {
           ref.labelEl.textContent = String(node.title);
         }
         return true;
+      case 'list': {
+        const listSig = JSON.stringify(node.items || []);
+        if (ref.optSig !== listSig && ref.wrapperEl) {
+          while (ref.wrapperEl.firstChild) ref.wrapperEl.removeChild(ref.wrapperEl.firstChild);
+          const items = Array.isArray(node.items) ? node.items : [];
+          for (let i = 0; i < items.length; i += 1) {
+            const item = items[i];
+            const li = doc.createElement('li');
+            li.className = 'ag-list-item';
+            const textSpan = doc.createElement('span');
+            textSpan.textContent = String(item && typeof item === 'object' ? item.label || item.text || '' : item);
+            li.appendChild(textSpan);
+            if (item && typeof item === 'object' && item.actionId) {
+              const btn = doc.createElement('button');
+              btn.type = 'button';
+              btn.className = 'ag-btn';
+              btn.textContent = String(item.actionLabel || 'Open');
+              btn.addEventListener('click', (ev) => {
+                if (ev && ev.isTrusted === false) return;
+                emitAction(item.actionId, item.payload !== undefined ? item.payload : item.id);
+              });
+              li.appendChild(btn);
+            }
+            ref.wrapperEl.appendChild(li);
+          }
+          ref.optSig = listSig;
+        }
+        return true;
+      }
       default:
         return true;
     }
@@ -4254,7 +4300,7 @@ function createSchemaUiController(doc, containerEl, {
         });
         controlEl.addEventListener('keydown', (ev) => {
           if (!ev || ev.key !== 'Enter') return;
-          if (ev.isComposing || ev.keyCode === 229) return;
+          if (ev.isComposing || ev.keyCode === 229 || ev.isTrusted === false) return;
           if (node.submitActionId) {
             emitAction(node.submitActionId, { value: controlEl.value });
           }
@@ -4625,7 +4671,11 @@ const TOAST_CSS = `
 }
 `;
 
-function createToastAndDialogManager(doc, win, { themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
+function createToastAndDialogManager(
+  doc,
+  win,
+  { themeAndI18n = null, extraNoTranslateAttributes = [], onPortalClaimChange = null } = {}
+) {
   let toastHostEl = null;
   let toastShadowRoot = null;
   let toastListEl = null;
@@ -4787,9 +4837,19 @@ function createToastAndDialogManager(doc, win, { themeAndI18n = null, extraNoTra
       const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
 
       let settled = false;
+      seq += 1;
+      const claimId = `v3:dialog:${pluginMeta.pluginId}:${seq}`;
+      const notifyPortalClaim = (active) => {
+        if (typeof onPortalClaimChange === 'function') {
+          try {
+            onPortalClaimChange(claimId, active);
+          } catch (_e) {}
+        }
+      };
       const finish = (value) => {
         if (settled) return;
         settled = true;
+        notifyPortalClaim(false);
         const set = dialogsByPlugin.get(pluginMeta.pluginId);
         if (set) set.delete(tracker);
         try {
@@ -4830,7 +4890,7 @@ function createToastAndDialogManager(doc, win, { themeAndI18n = null, extraNoTra
         if (opts.placeholder) inputEl.setAttribute('placeholder', String(opts.placeholder));
         inputEl.addEventListener('keydown', (ev) => {
           if (!ev || ev.key !== 'Enter') return;
-          if (ev.isComposing || ev.keyCode === 229) return;
+          if (ev.isComposing || ev.keyCode === 229 || ev.isTrusted === false) return;
           finish(inputEl.value);
         });
         body.appendChild(inputEl);
@@ -4884,6 +4944,7 @@ function createToastAndDialogManager(doc, win, { themeAndI18n = null, extraNoTra
       if (parent && typeof parent.appendChild === 'function') {
         parent.appendChild(dlg);
       }
+      notifyPortalClaim(true);
       if (typeof dlg.showModal === 'function') {
         try {
           dlg.showModal();
@@ -4962,19 +5023,32 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
 
   function provide(pluginMeta, serviceName, impl, opts = {}) {
     const pluginId = pluginMeta && pluginMeta.pluginId;
+    const trustLevel = (pluginMeta && pluginMeta.trustLevel) || 'restricted';
+    const isV3 = Boolean(pluginMeta && (pluginMeta.sourceSchemaVersion === 3 || pluginMeta.apiVersion === 3));
     const declaredProvide =
       pluginMeta &&
       pluginMeta.permissions &&
       pluginMeta.permissions.services &&
       Array.isArray(pluginMeta.permissions.services.provide)
         ? pluginMeta.permissions.services.provide
-        : null;
-    const declaredEntry = declaredProvide ? declaredProvide.find((p) => p && p.name === serviceName) : null;
-    const allowWellKnown = Boolean(declaredEntry) || Boolean(opts && opts.allowWellKnownHostServices);
+        : [];
+    const declaredEntry = declaredProvide.find((p) => p && p.name === serviceName) || null;
+    const isHostWellKnown = typeof serviceName === 'string' && serviceName.startsWith('host.');
+
+    // BLK-01: Well-known `host.*` services strictly require trusted + manifest declaration.
+    // Never honor plugin-supplied `opts.allowWellKnownHostServices`.
+    if (isHostWellKnown && (trustLevel !== 'trusted' || !declaredEntry)) {
+      throw new Error(`ERR_SERVICE_HOST_TRUST_FORBIDDEN:${serviceName}`);
+    }
+    const allowWellKnown = isHostWellKnown && trustLevel === 'trusted' && Boolean(declaredEntry);
 
     const nameCheck = validateServiceName(pluginId, serviceName, { allowWellKnownHostServices: allowWellKnown });
     if (!nameCheck.ok) {
       throw new Error(`${nameCheck.reason}:${serviceName}`);
+    }
+    // Enforce manifest declaration when permissions.services.provide is used or on v3 manifests
+    if (isV3 && !declaredEntry) {
+      throw new Error(`ERR_SERVICE_NOT_DECLARED:${serviceName}`);
     }
     if (!impl || typeof impl !== 'object') {
       throw new Error('ERR_INVALID_SERVICE_IMPL');
@@ -4983,11 +5057,24 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
       throw new Error(`ERR_SERVICE_ALREADY_PROVIDED:${serviceName}`);
     }
 
-    const allowedCallers = Array.isArray(opts.allowedCallers)
-      ? opts.allowedCallers.slice()
-      : declaredEntry && Array.isArray(declaredEntry.allowedCallers)
-        ? declaredEntry.allowedCallers.slice()
-        : [];
+    // Runtime opts.allowedCallers may only narrow (never widen) manifest-declared allowedCallers
+    const manifestCallers =
+      declaredEntry && Array.isArray(declaredEntry.allowedCallers) ? declaredEntry.allowedCallers.slice() : [];
+    let allowedCallers;
+    if (declaredEntry) {
+      if (Array.isArray(opts && opts.allowedCallers)) {
+        if (manifestCallers.includes('*')) {
+          allowedCallers = opts.allowedCallers.slice();
+        } else {
+          const allowedSet = new Set(manifestCallers);
+          allowedCallers = opts.allowedCallers.filter((c) => allowedSet.has(c));
+        }
+      } else {
+        allowedCallers = manifestCallers;
+      }
+    } else {
+      allowedCallers = Array.isArray(opts && opts.allowedCallers) ? opts.allowedCallers.slice() : [];
+    }
 
     services.set(serviceName, {
       providerPluginId: pluginId,
@@ -5306,8 +5393,21 @@ function createStorageV3(win, { namespacePrefix = 'ag-v3-storage' } = {}) {
         }
         const ttlMs = opts && Number.isFinite(Number(opts.ttlMs)) && Number(opts.ttlMs) > 0 ? Number(opts.ttlMs) : null;
         const exp = ttlMs ? Date.now() + ttlMs : null;
+        const now = Date.now();
+        // NB-04: Enforce total bucket serialized byte quota across all live keys
+        const projected = {};
+        _MapForEach(bucket.map, (rec, existingKey) => {
+          if (existingKey === key) return;
+          if (rec.exp !== null && rec.exp <= now) return;
+          projected[existingKey] = rec;
+        });
+        projected[key] = { v: cleanVal, exp };
+        const totalSerialized = JSON.stringify(projected);
+        if (totalSerialized && totalSerialized.length > maxBytes) {
+          throw new Error('ERR_STORAGE_QUOTA_EXCEEDED');
+        }
         const prevRec = _MapGet(bucket.map, key);
-        const oldValue = prevRec && (prevRec.exp === null || prevRec.exp > Date.now()) ? sanitizeBusPayload(prevRec.v) : undefined;
+        const oldValue = prevRec && (prevRec.exp === null || prevRec.exp > now) ? sanitizeBusPayload(prevRec.v) : undefined;
         _MapSet(bucket.map, key, { v: cleanVal, exp });
         persistBucket(bucket);
         emitChange(bucket, { key, oldValue, newValue: sanitizeBusPayload(cleanVal) });
@@ -5924,6 +6024,8 @@ module.exports = {
 const { buildOverlayChrome, createSchemaUiController } = require('./ui-schema-renderer');
 const { validateSafeCssText } = require('./style-manager');
 
+const _ObjectCreate = Object.create;
+const _ObjectDefineProperty = Object.defineProperty;
 const _ObjectFreeze = Object.freeze;
 const _ReflectApply = Reflect.apply;
 const _ArrayIsArray = Array.isArray;
@@ -5932,6 +6034,21 @@ const _SetAdd = Function.prototype.call.bind(Set.prototype.add);
 const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
 const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
 const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
+
+// BLK-02: Null-prototype descriptor avoids both Object.prototype.<prop> setter theft
+// AND Object.prototype.get/set descriptor collision throws in shared World 998.
+function defineSafeReadOnlyProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.writable = false;
+  desc.configurable = false;
+  _ObjectDefineProperty(target, key, desc);
+}
+
+// NB-01: Module-scoped LIFO stack for v3 overlays so a single Escape closes only the top-most overlay.
+const v3EscapeStack = [];
+let v3OverlaySeq = 0;
 
 function detectLayoutMode(win) {
   const w = win && Number.isFinite(Number(win.innerWidth)) ? Number(win.innerWidth) : 1280;
@@ -6065,11 +6182,23 @@ function createAddonContextV3({
     let tracker = null;
     let outsideCleanup = null;
     let escCleanup = null;
+    v3OverlaySeq += 1;
+    const claimId = `v3:${pluginId}:${kind}:${v3OverlaySeq}`;
+    const notifyPortalClaim = (active) => {
+      if (hostBridge && typeof hostBridge.setPortalClaim === 'function') {
+        try {
+          hostBridge.setPortalClaim(claimId, active);
+        } catch (_e) {}
+      }
+    };
 
     const close = () => {
       if (closed) return false;
       closed = true;
       _SetDelete(activeOverlays, close);
+      const stackIdx = v3EscapeStack.indexOf(close);
+      if (stackIdx !== -1) v3EscapeStack.splice(stackIdx, 1);
+      notifyPortalClaim(false);
       if (tracker) {
         tracker.dispose();
         tracker = null;
@@ -6168,15 +6297,19 @@ function createAddonContextV3({
     if (win && typeof win.addEventListener === 'function') {
       const onKeyDown = (ev) => {
         if (closed || !ev || ev.key !== 'Escape') return;
+        if (v3EscapeStack.length > 0 && v3EscapeStack[v3EscapeStack.length - 1] !== close) return;
         if (ev.isComposing || ev.keyCode === 229 || ev.defaultPrevented) return;
         if (ev.isTrusted === false) return;
         if (typeof ev.preventDefault === 'function') ev.preventDefault();
+        if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
         close();
       };
       win.addEventListener('keydown', onKeyDown, true);
       escCleanup = () => win.removeEventListener('keydown', onKeyDown, true);
     }
 
+    v3EscapeStack.push(close);
+    notifyPortalClaim(true);
     _SetAdd(activeOverlays, close);
 
     return _ObjectFreeze({
@@ -6385,63 +6518,74 @@ function createAddonContextV3({
     dispose: disposeSelf,
   });
 
-  const ctx = {
-    apiVersion: 3,
-    meta,
-    env,
-    theme: themeAndI18n.createThemeHandle(addDisposer),
-    i18n: themeAndI18n.createI18nHandle(),
-    ui,
-    storage,
-    events,
-    services,
-    lifecycle,
-  };
+  const ctx = {};
+  defineSafeReadOnlyProp(ctx, 'apiVersion', 3);
+  defineSafeReadOnlyProp(ctx, 'meta', meta);
+  defineSafeReadOnlyProp(ctx, 'env', env);
+  defineSafeReadOnlyProp(ctx, 'theme', themeAndI18n.createThemeHandle(addDisposer));
+  defineSafeReadOnlyProp(ctx, 'i18n', themeAndI18n.createI18nHandle());
+  defineSafeReadOnlyProp(ctx, 'ui', ui);
+  defineSafeReadOnlyProp(ctx, 'storage', storage);
+  defineSafeReadOnlyProp(ctx, 'events', events);
+  defineSafeReadOnlyProp(ctx, 'services', services);
+  defineSafeReadOnlyProp(ctx, 'lifecycle', lifecycle);
 
   // Capability-gated namespaces: strictly omitted when not declared/permitted/supported.
-  // Direct own assignment prior to _ObjectFreeze(ctx) avoids Object.defineProperty descriptor
-  // inheritance breaks if a peer plugin pollutes Object.prototype.get/set in World 998.
+  // BLK-02: defineSafeReadOnlyProp uses a null-prototype descriptor so neither
+  // Object.prototype.<prop> setters nor Object.prototype.get/set can hijack or crash World 998.
   if (hasNetCapability) {
-    ctx.net = _ObjectFreeze({
-      fetch(url, init = {}) {
-        assertActive();
-        return hostBridge.netFetch(pluginId, url, init);
-      },
-    });
+    defineSafeReadOnlyProp(
+      ctx,
+      'net',
+      _ObjectFreeze({
+        fetch(url, init = {}) {
+          assertActive();
+          return hostBridge.netFetch(pluginId, url, init);
+        },
+      })
+    );
   }
 
   if (hasDomCapability) {
-    ctx.dom = _ObjectFreeze({
-      observeRegion(selector, callback, opts) {
-        assertActive();
-        return regionObserver.observeRegion(pluginId, selector, callback, opts);
-      },
-      isElementInsideIgnored(nodeOrEvent, opts) {
-        return isElementInsideIgnored(nodeOrEvent, opts);
-      },
-      mountSlot(slotId, opts) {
-        assertActive();
-        return slotManager.mountSlot(pluginMeta, slotId, opts);
-      },
-      unmountSlot(slotId) {
-        assertActive();
-        return slotManager.unmountSlot(pluginId, slotId);
-      },
-    });
+    defineSafeReadOnlyProp(
+      ctx,
+      'dom',
+      _ObjectFreeze({
+        observeRegion(selector, callback, opts) {
+          assertActive();
+          return regionObserver.observeRegion(pluginId, selector, callback, opts);
+        },
+        isElementInsideIgnored(nodeOrEvent, opts) {
+          return isElementInsideIgnored(nodeOrEvent, opts);
+        },
+        mountSlot(slotId, opts) {
+          assertActive();
+          return slotManager.mountSlot(pluginMeta, slotId, opts);
+        },
+        unmountSlot(slotId) {
+          assertActive();
+          return slotManager.unmountSlot(pluginId, slotId);
+        },
+      })
+    );
   }
 
   if (hasConfigBridge) {
-    ctx.configBridge = _ObjectFreeze({
-      scopes: frozenConfigScopes,
-      read(scopeId) {
-        assertActive();
-        return readConfigScope(scopeId);
-      },
-      write(scopeId, nextDataOrRawJson, opts) {
-        assertActive();
-        return writeConfigScope(scopeId, nextDataOrRawJson, opts);
-      },
-    });
+    defineSafeReadOnlyProp(
+      ctx,
+      'configBridge',
+      _ObjectFreeze({
+        scopes: frozenConfigScopes,
+        read(scopeId) {
+          assertActive();
+          return readConfigScope(scopeId);
+        },
+        write(scopeId, nextDataOrRawJson, opts) {
+          assertActive();
+          return writeConfigScope(scopeId, nextDataOrRawJson, opts);
+        },
+      })
+    );
   }
 
   return _ObjectFreeze(ctx);
@@ -8711,6 +8855,7 @@ const _Number = Number;
 const _NumberIsFinite = Number.isFinite;
 const _ReflectApply = Reflect.apply;
 const _ObjectKeys = Object.keys;
+const _ObjectCreate = Object.create;
 const _ObjectFreeze = Object.freeze;
 const _ObjectHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const _ObjectDefineProperty = Object.defineProperty;
@@ -8821,6 +8966,15 @@ function applyUiGridMerges(doc, uiGridMerges) {
   return true;
 }
 
+function defineSafeOwnProp(target, key, value) {
+  const desc = _ObjectCreate(null);
+  desc.value = value;
+  desc.enumerable = true;
+  desc.configurable = true;
+  desc.writable = true;
+  _ObjectDefineProperty(target, key, desc);
+}
+
 function deepFreezeClone(value, seen = new _WeakMap()) {
   if (value === null || typeof value !== 'object') {
     return value;
@@ -8832,12 +8986,7 @@ function deepFreezeClone(value, seen = new _WeakMap()) {
     const out = [];
     _WeakMapSet(seen, value, out);
     for (let i = 0; i < value.length; i++) {
-      _ObjectDefineProperty(out, i, {
-        value: deepFreezeClone(value[i], seen),
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
+      defineSafeOwnProp(out, i, deepFreezeClone(value[i], seen));
     }
     return _ObjectFreeze(out);
   }
@@ -8847,12 +8996,7 @@ function deepFreezeClone(value, seen = new _WeakMap()) {
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
     if (_SetHas(FORBIDDEN_CLONE_KEYS, k)) continue;
-    _ObjectDefineProperty(out, k, {
-      value: deepFreezeClone(value[k], seen),
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
+    defineSafeOwnProp(out, k, deepFreezeClone(value[k], seen));
   }
   return _ObjectFreeze(out);
 }
@@ -8876,12 +9020,7 @@ function sanitizeJsonPayload(value, seen = new _WeakSet()) {
       const out = [];
       for (let i = 0; i < value.length; i++) {
         const item = sanitizeJsonPayload(value[i], seen);
-        _ObjectDefineProperty(out, i, {
-          value: item === undefined ? null : item,
-          enumerable: true,
-          configurable: true,
-          writable: true,
-        });
+        defineSafeOwnProp(out, i, item === undefined ? null : item);
       }
       return out;
     }
@@ -8894,12 +9033,7 @@ function sanitizeJsonPayload(value, seen = new _WeakSet()) {
       }
       const nextVal = sanitizeJsonPayload(value[k], seen);
       if (nextVal !== undefined) {
-        _ObjectDefineProperty(out, k, {
-          value: nextVal,
-          enumerable: true,
-          configurable: true,
-          writable: true,
-        });
+        defineSafeOwnProp(out, k, nextVal);
       }
     }
     return out;
@@ -9047,17 +9181,18 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       surfaceGeometry,
       uiAnchors: cfg.uiAnchors || {},
     });
+    const onPortalClaimChange = (claimId, active) => {
+      if (hostBridge && typeof hostBridge.setPortalClaim === 'function') {
+        try {
+          hostBridge.setPortalClaim(claimId, active);
+        } catch (_e) {}
+      }
+    };
     modalPortal = createModalPortal(doc, win, {
       extraNoTranslateAttributes,
       styleManager,
       surfaceGeometry,
-      onPortalClaimChange: (claimId, active) => {
-        if (hostBridge && typeof hostBridge.setPortalClaim === 'function') {
-          try {
-            hostBridge.setPortalClaim(claimId, active);
-          } catch (_e) {}
-        }
-      },
+      onPortalClaimChange,
     });
     regionObserver = createRegionObserver(doc, win);
     settingsTabs = createSettingsTabCoordinator();
@@ -9065,6 +9200,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
     toastManager = createToastAndDialogManager(doc, win, {
       themeAndI18n,
       extraNoTranslateAttributes,
+      onPortalClaimChange,
     });
     eventBus = createEventBus({ reportPluginError });
     storageV3 = createStorageV3(win);

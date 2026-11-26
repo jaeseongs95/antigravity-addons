@@ -57,7 +57,11 @@ const TOAST_CSS = `
 }
 `;
 
-function createToastAndDialogManager(doc, win, { themeAndI18n = null, extraNoTranslateAttributes = [] } = {}) {
+function createToastAndDialogManager(
+  doc,
+  win,
+  { themeAndI18n = null, extraNoTranslateAttributes = [], onPortalClaimChange = null } = {}
+) {
   let toastHostEl = null;
   let toastShadowRoot = null;
   let toastListEl = null;
@@ -219,9 +223,19 @@ function createToastAndDialogManager(doc, win, { themeAndI18n = null, extraNoTra
       const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
 
       let settled = false;
+      seq += 1;
+      const claimId = `v3:dialog:${pluginMeta.pluginId}:${seq}`;
+      const notifyPortalClaim = (active) => {
+        if (typeof onPortalClaimChange === 'function') {
+          try {
+            onPortalClaimChange(claimId, active);
+          } catch (_e) {}
+        }
+      };
       const finish = (value) => {
         if (settled) return;
         settled = true;
+        notifyPortalClaim(false);
         const set = dialogsByPlugin.get(pluginMeta.pluginId);
         if (set) set.delete(tracker);
         try {
@@ -262,7 +276,7 @@ function createToastAndDialogManager(doc, win, { themeAndI18n = null, extraNoTra
         if (opts.placeholder) inputEl.setAttribute('placeholder', String(opts.placeholder));
         inputEl.addEventListener('keydown', (ev) => {
           if (!ev || ev.key !== 'Enter') return;
-          if (ev.isComposing || ev.keyCode === 229) return;
+          if (ev.isComposing || ev.keyCode === 229 || ev.isTrusted === false) return;
           finish(inputEl.value);
         });
         body.appendChild(inputEl);
@@ -316,6 +330,7 @@ function createToastAndDialogManager(doc, win, { themeAndI18n = null, extraNoTra
       if (parent && typeof parent.appendChild === 'function') {
         parent.appendChild(dlg);
       }
+      notifyPortalClaim(true);
       if (typeof dlg.showModal === 'function') {
         try {
           dlg.showModal();

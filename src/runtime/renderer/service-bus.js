@@ -28,19 +28,32 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
 
   function provide(pluginMeta, serviceName, impl, opts = {}) {
     const pluginId = pluginMeta && pluginMeta.pluginId;
+    const trustLevel = (pluginMeta && pluginMeta.trustLevel) || 'restricted';
+    const isV3 = Boolean(pluginMeta && (pluginMeta.sourceSchemaVersion === 3 || pluginMeta.apiVersion === 3));
     const declaredProvide =
       pluginMeta &&
       pluginMeta.permissions &&
       pluginMeta.permissions.services &&
       Array.isArray(pluginMeta.permissions.services.provide)
         ? pluginMeta.permissions.services.provide
-        : null;
-    const declaredEntry = declaredProvide ? declaredProvide.find((p) => p && p.name === serviceName) : null;
-    const allowWellKnown = Boolean(declaredEntry) || Boolean(opts && opts.allowWellKnownHostServices);
+        : [];
+    const declaredEntry = declaredProvide.find((p) => p && p.name === serviceName) || null;
+    const isHostWellKnown = typeof serviceName === 'string' && serviceName.startsWith('host.');
+
+    // BLK-01: Well-known `host.*` services strictly require trusted + manifest declaration.
+    // Never honor plugin-supplied `opts.allowWellKnownHostServices`.
+    if (isHostWellKnown && (trustLevel !== 'trusted' || !declaredEntry)) {
+      throw new Error(`ERR_SERVICE_HOST_TRUST_FORBIDDEN:${serviceName}`);
+    }
+    const allowWellKnown = isHostWellKnown && trustLevel === 'trusted' && Boolean(declaredEntry);
 
     const nameCheck = validateServiceName(pluginId, serviceName, { allowWellKnownHostServices: allowWellKnown });
     if (!nameCheck.ok) {
       throw new Error(`${nameCheck.reason}:${serviceName}`);
+    }
+    // Enforce manifest declaration when permissions.services.provide is used or on v3 manifests
+    if (isV3 && !declaredEntry) {
+      throw new Error(`ERR_SERVICE_NOT_DECLARED:${serviceName}`);
     }
     if (!impl || typeof impl !== 'object') {
       throw new Error('ERR_INVALID_SERVICE_IMPL');
@@ -49,11 +62,24 @@ function createServiceBus({ onServiceRegistryChange = null } = {}) {
       throw new Error(`ERR_SERVICE_ALREADY_PROVIDED:${serviceName}`);
     }
 
-    const allowedCallers = Array.isArray(opts.allowedCallers)
-      ? opts.allowedCallers.slice()
-      : declaredEntry && Array.isArray(declaredEntry.allowedCallers)
-        ? declaredEntry.allowedCallers.slice()
-        : [];
+    // Runtime opts.allowedCallers may only narrow (never widen) manifest-declared allowedCallers
+    const manifestCallers =
+      declaredEntry && Array.isArray(declaredEntry.allowedCallers) ? declaredEntry.allowedCallers.slice() : [];
+    let allowedCallers;
+    if (declaredEntry) {
+      if (Array.isArray(opts && opts.allowedCallers)) {
+        if (manifestCallers.includes('*')) {
+          allowedCallers = opts.allowedCallers.slice();
+        } else {
+          const allowedSet = new Set(manifestCallers);
+          allowedCallers = opts.allowedCallers.filter((c) => allowedSet.has(c));
+        }
+      } else {
+        allowedCallers = manifestCallers;
+      }
+    } else {
+      allowedCallers = Array.isArray(opts && opts.allowedCallers) ? opts.allowedCallers.slice() : [];
+    }
 
     services.set(serviceName, {
       providerPluginId: pluginId,

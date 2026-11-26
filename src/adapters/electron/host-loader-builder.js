@@ -134,6 +134,25 @@ function scanStringValueLiterals(text) {
   return out;
 }
 
+// BLK-03: Token-aware replacement that ONLY replaces JSON string values, NEVER object keys
+function replaceStringValueLiterals(text, repMap) {
+  if (!repMap || repMap.size === 0) return text;
+  const tokenRe = /"(?:\\.|[^"\\])*"/g;
+  let out = '';
+  let lastIdx = 0;
+  let m;
+  while ((m = tokenRe.exec(text)) !== null) {
+    const end = m.index + m[0].length;
+    if (text[end] === ':') continue; // Never mutate object keys!
+    const rep = repMap.get(m[0]);
+    if (rep !== undefined) {
+      out += text.slice(lastIdx, m.index) + rep;
+      lastIdx = end;
+    }
+  }
+  return lastIdx === 0 ? text : out + text.slice(lastIdx);
+}
+
 function serializeDeduplicatedConfigJs(obj) {
   const raw = serializeSafeInlineJson(obj);
   const arrBindings = [];
@@ -186,11 +205,11 @@ function serializeDeduplicatedConfigJs(obj) {
       matchedStrings.push(lit);
       try {
         const val = JSON.parse(lit);
-        if (typeof val === 'string' && (val.includes('\\') || val.startsWith('/'))) {
+        if (typeof val === 'string' && (val.includes('\\') || (val.includes('/') && !val.includes('://')))) {
           const sep = val.includes('\\') ? '\\' : '/';
           let cut = val.lastIndexOf(sep);
           let depth = 0;
-          while (cut >= 16 && depth < 3) {
+          while (cut >= 12 && depth < 3) {
             const dirPrefix = val.slice(0, cut);
             dirPrefixCounts.set(dirPrefix, (dirPrefixCounts.get(dirPrefix) || 0) + 1);
             cut = val.lastIndexOf(sep, cut - 1);
@@ -211,22 +230,20 @@ function serializeDeduplicatedConfigJs(obj) {
     }
     if (!bestPrefix || bestSavings < minSavings) break;
     const uniqueMatches = Array.from(new Set(matchedStrings));
-    const replacements = [];
+    const repMap = new Map();
     for (const lit of uniqueMatches) {
       try {
         const val = JSON.parse(lit);
         if (typeof val === 'string' && val.startsWith(bestPrefix)) {
           const rest = val.slice(bestPrefix.length);
           const rep = rest.length === 0 ? varName : `${varName}+${serializeSafeInlineJson(rest)}`;
-          replacements.push([lit, rep]);
+          repMap.set(lit, rep);
         }
       } catch (_e) {}
     }
-    if (replacements.length < minCount) break;
+    if (repMap.size < minCount) break;
     baseDefs.push(`const ${varName} = ${serializeSafeInlineJson(bestPrefix)};`);
-    for (const [lit, rep] of replacements) {
-      expr = expr.split(lit).join(rep);
-    }
+    expr = replaceStringValueLiterals(expr, repMap);
   }
 
   // 3. Deduplicate repeated non-key string value literals shared across defs & expr (e.g. uiAnchors & uiSurfaces selectors)
@@ -239,6 +256,7 @@ function serializeDeduplicatedConfigJs(obj) {
     }
   }
   const strBindings = [];
+  const strRepMap = new Map();
   let sIdx = 0;
   for (const [literal, count] of valCounts.entries()) {
     if (count < 2) continue;
@@ -248,13 +266,16 @@ function serializeDeduplicatedConfigJs(obj) {
     if (savings < 4) continue;
     sIdx += 1;
     strBindings.push(`${varName}=${literal}`);
+    strRepMap.set(literal, varName);
+  }
+  if (strRepMap.size > 0) {
     for (let i = 0; i < arrBindings.length; i += 1) {
-      arrBindings[i] = arrBindings[i].split(literal).join(varName);
+      arrBindings[i] = replaceStringValueLiterals(arrBindings[i], strRepMap);
     }
     for (let i = 0; i < objBindings.length; i += 1) {
-      objBindings[i] = objBindings[i].split(literal).join(varName);
+      objBindings[i] = replaceStringValueLiterals(objBindings[i], strRepMap);
     }
-    expr = expr.split(literal).join(varName);
+    expr = replaceStringValueLiterals(expr, strRepMap);
   }
 
   // 4. Hoist up to 2 high-frequency common string prefixes across remaining non-key string values (keeps thin shim well <4096 B)
@@ -292,29 +313,27 @@ function serializeDeduplicatedConfigJs(obj) {
       }
     }
     if (!bestValPfx || bestValPfxSavings < 16) break;
-    const pfxReps = [];
+    const pfxRepMap = new Map();
     for (const lit of prefLiterals) {
       try {
         const val = JSON.parse(lit);
         if (typeof val === 'string' && val.startsWith(bestValPfx) && val.length > bestValPfx.length) {
           const rest = val.slice(bestValPfx.length);
-          pfxReps.push([lit, `${pVar}+${serializeSafeInlineJson(rest)}`]);
+          pfxRepMap.set(lit, `${pVar}+${serializeSafeInlineJson(rest)}`);
         }
       } catch (_e) {}
     }
-    if (pfxReps.length >= 3) {
-      for (const [lit, rep] of pfxReps) {
-        for (let i = 0; i < strBindings.length; i += 1) {
-          strBindings[i] = strBindings[i].split(lit).join(rep);
-        }
-        for (let i = 0; i < arrBindings.length; i += 1) {
-          arrBindings[i] = arrBindings[i].split(lit).join(rep);
-        }
-        for (let i = 0; i < objBindings.length; i += 1) {
-          objBindings[i] = objBindings[i].split(lit).join(rep);
-        }
-        expr = expr.split(lit).join(rep);
+    if (pfxRepMap.size >= 3) {
+      for (let i = 0; i < strBindings.length; i += 1) {
+        strBindings[i] = replaceStringValueLiterals(strBindings[i], pfxRepMap);
       }
+      for (let i = 0; i < arrBindings.length; i += 1) {
+        arrBindings[i] = replaceStringValueLiterals(arrBindings[i], pfxRepMap);
+      }
+      for (let i = 0; i < objBindings.length; i += 1) {
+        objBindings[i] = replaceStringValueLiterals(objBindings[i], pfxRepMap);
+      }
+      expr = replaceStringValueLiterals(expr, pfxRepMap);
       strBindings.unshift(`${pVar}=${serializeSafeInlineJson(bestValPfx)}`);
     }
   }
@@ -349,29 +368,27 @@ function serializeDeduplicatedConfigJs(obj) {
     }
   }
   if (bestSfx && bestSfxSavings >= 14) {
-    const sfxReps = [];
+    const sfxRepMap = new Map();
     for (const lit of sufLiterals) {
       try {
         const val = JSON.parse(lit);
         if (typeof val === 'string' && val.endsWith(bestSfx) && val.length > bestSfx.length) {
           const head = val.slice(0, val.length - bestSfx.length);
-          sfxReps.push([lit, `${serializeSafeInlineJson(head)}+_X`]);
+          sfxRepMap.set(lit, `${serializeSafeInlineJson(head)}+_X`);
         }
       } catch (_e) {}
     }
-    if (sfxReps.length >= 3) {
-      for (const [lit, rep] of sfxReps) {
-        for (let i = 0; i < strBindings.length; i += 1) {
-          strBindings[i] = strBindings[i].split(lit).join(rep);
-        }
-        for (let i = 0; i < arrBindings.length; i += 1) {
-          arrBindings[i] = arrBindings[i].split(lit).join(rep);
-        }
-        for (let i = 0; i < objBindings.length; i += 1) {
-          objBindings[i] = objBindings[i].split(lit).join(rep);
-        }
-        expr = expr.split(lit).join(rep);
+    if (sfxRepMap.size >= 3) {
+      for (let i = 0; i < strBindings.length; i += 1) {
+        strBindings[i] = replaceStringValueLiterals(strBindings[i], sfxRepMap);
       }
+      for (let i = 0; i < arrBindings.length; i += 1) {
+        arrBindings[i] = replaceStringValueLiterals(arrBindings[i], sfxRepMap);
+      }
+      for (let i = 0; i < objBindings.length; i += 1) {
+        objBindings[i] = replaceStringValueLiterals(objBindings[i], sfxRepMap);
+      }
+      expr = replaceStringValueLiterals(expr, sfxRepMap);
       strBindings.unshift(`_X=${serializeSafeInlineJson(bestSfx)}`);
     }
   }
@@ -388,7 +405,7 @@ function buildHostLoaderScriptSource(
   paths,
   profile,
   {
-    hostVersion = '2.6.0',
+    hostVersion = '3.0.0',
     strictTrustPolicy = true,
     mainHookTimeoutMs = 5000,
     rendererExecTimeoutMs = 10000,

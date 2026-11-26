@@ -239,4 +239,94 @@ test('TC-V30-04: SOLID #0 zero-vendor-literal CI gate passes & thin shim stays s
   });
   const bytes = Buffer.byteLength(shim, 'utf8');
   assert.ok(bytes < 4096, `Thin shim must stay < 4096 bytes (got ${bytes})`);
+
+  // Linux-style slash paths (e.g. Ubuntu CI) must also trigger _B dedup and stay < 4096 B
+  const linuxStylePaths = {
+    ADDONS_DIR: 'C:/Users/ExampleUser/.gemini/antigravity/addons.d',
+    PLUGINS_ROOT_DIR: 'C:/Users/ExampleUser/.gemini/config/plugins',
+    CONFIG_JSON_PATH: 'C:/Users/ExampleUser/.gemini/config/config.json',
+    TRUST_POLICY_PATH: 'C:/Users/ExampleUser/.gemini/antigravity/trust-policy.json',
+    HOST_DATA_DIR: 'C:/Users/ExampleUser/.gemini/antigravity',
+    LOADER_SCRIPT_PATH: 'C:/Users/ExampleUser/.gemini/antigravity/addon-host-loader.js',
+  };
+  const linuxShim = buildHostLoaderScriptSource(linuxStylePaths, ANTIGRAVITY_HOST_PROFILE, {
+    hostVersion: '3.0.0',
+    buildSha8: '12345678',
+    runtimeEntryDir: 'C:/Users/ExampleUser/.gemini/antigravity/runtime/12345678',
+  });
+  assert.ok(Buffer.byteLength(linuxShim, 'utf8') < 4096, `Linux-style thin shim exceeded 4096B: ${Buffer.byteLength(linuxShim, 'utf8')}`);
+
+  // BLK-03: Token-aware dedup must NEVER corrupt object keys matching deduplicated string values or prefixes
+  const acorn = require('acorn');
+  const collisionProfile = {
+    ...ANTIGRAVITY_HOST_PROFILE,
+    namedLoopbackTargets: {
+      'antigravity-sidecar': 18910,
+      'antigravity.google.com': 18911,
+      '[data-testid="sidebar"]': 18912,
+    },
+    forbiddenNetHosts: [
+      'antigravity.google.com',
+      'accounts.google.com',
+      'oauth2.googleapis.com',
+      'myaccount.google.com',
+      'antigravity-sidecar',
+      'antigravity-sidecar',
+    ],
+  };
+  const collisionShim = buildHostLoaderScriptSource(winPaths, collisionProfile, {
+    hostVersion: '3.0.0',
+    buildSha8: '12345678',
+    runtimeEntryDir: path.join(winPaths.RUNTIME_DIR, '12345678'),
+  });
+  assert.doesNotThrow(() => acorn.parse(collisionShim, { ecmaVersion: 'latest' }), 'Deduped shim must parse cleanly');
+  const sandboxMod = { exports: {} };
+  const fn = new Function('require', 'module', 'exports', '__dirname', collisionShim);
+  fn(
+    (id) => (id === 'node:path' ? path : { initMain() {}, createHostRuntimeController() {} }),
+    sandboxMod,
+    sandboxMod.exports,
+    path.dirname(winPaths.LOADER_SCRIPT_PATH)
+  );
+  assert.equal(sandboxMod.exports.HOST_CFG.profile.namedLoopbackTargets['antigravity-sidecar'], 18910);
+  assert.equal(sandboxMod.exports.HOST_CFG.profile.namedLoopbackTargets['antigravity.google.com'], 18911);
+  assert.equal(sandboxMod.exports.HOST_CFG.profile.namedLoopbackTargets['[data-testid="sidebar"]'], 18912);
+
+  // BLK-01: Restricted plugin cannot declare well-known host.statusbar service in manifest
+  const badHostSvc = validateAddonManifest({
+    schemaVersion: 3,
+    pluginId: 'evil-bar',
+    displayName: 'Evil Bar',
+    version: '1.0.0',
+    capabilities: ['renderer'],
+    entry: { rendererScript: 'index.js' },
+    permissions: { services: { provide: [{ name: 'host.statusbar', allowedCallers: ['*'] }] } },
+  });
+  assert.equal(badHostSvc.ok, false);
+  assert.equal(badHostSvc.reason, 'ERR_RESTRICTED_HOST_SERVICE_FORBIDDEN');
+
+  const trustedHostSvc = validateAddonManifest({
+    schemaVersion: 3,
+    pluginId: 'good-bar',
+    displayName: 'Good Bar',
+    version: '1.0.0',
+    trustLevel: 'trusted',
+    capabilities: ['renderer'],
+    entry: { rendererScript: 'index.js' },
+    permissions: { services: { provide: [{ name: 'host.statusbar', allowedCallers: ['*'] }] } },
+  });
+  assert.equal(trustedHostSvc.ok, true);
+  assert.equal(trustedHostSvc.requiresTrustApproval, true);
+
+  // BLK-04: verifyRemoteBundleAst blocks require() traversal bypasses
+  const { verifyRemoteBundleAst } = require('../../scripts/build-remote');
+  assert.equal(verifyRemoteBundleAst("require('./../../../etc/passwd');").ok, false);
+  assert.equal(verifyRemoteBundleAst("require('../../../../core/..');").ok, false);
+  assert.equal(verifyRemoteBundleAst("require('../../core/net-policy');").ok, true);
+
+  // NB-04: Special-use IPv6 blocks (RFC 8215, 6to4, Teredo, Discard)
+  assert.equal(isPrivateOrReservedIp('64:ff9b:1::1'), true);
+  assert.equal(isPrivateOrReservedIp('2002:0a00:0001::1'), true);
+  assert.equal(isPrivateOrReservedIp('2001:0000:4136:e378::1'), true);
+  assert.equal(isPrivateOrReservedIp('100::1'), true);
 });

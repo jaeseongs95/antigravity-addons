@@ -114,8 +114,9 @@ function createHostRuntimeController(cfg, deps = {}) {
       hostProfileId: profile.id || null,
       compatibleHostProfiles: profile.compatibleHostProfiles || null,
       supportedCapabilities: profile.supportedCapabilities || null,
-      hostVersion: cfg.hostVersion || '2.6.0',
+      hostVersion: cfg.hostVersion || '3.0.0',
       strictTrustPolicy,
+      forbiddenNetHosts: Array.isArray(profile.forbiddenNetHosts) ? profile.forbiddenNetHosts : [],
       fsPort,
       isEnabled: (pluginId) => isPluginEnabledInConfig(cfg.configJsonPath, pluginId),
     });
@@ -193,7 +194,7 @@ function createHostRuntimeController(cfg, deps = {}) {
   });
 
   const hostAdminService = createHostAdminService({
-    hostVersion: cfg.hostVersion || '2.6.0',
+    hostVersion: cfg.hostVersion || '3.0.0',
     buildSha8: cfg.buildSha8 || 'dev',
     profile,
     addonsDir: cfg.addonsDir,
