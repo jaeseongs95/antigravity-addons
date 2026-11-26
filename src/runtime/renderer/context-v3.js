@@ -8,7 +8,7 @@
  *   `theme`, `i18n`, `ui` (Tier 1 + Tier 2 + Tier 3), `storage`, `events`, `services`, `lifecycle` (`AbortSignal`)
  *
  * Capability-gated namespaces (strictly omitted / `undefined` when undeclared, unapproved, or unsupported):
- *   `net?`, `dom?`, `configBridge?`
+ *   `net?`, `dom?`, `configBridge?`, `settingsBridge?`
  */
 
 const { buildOverlayChrome, createSchemaUiController } = require('./ui-schema-renderer');
@@ -110,6 +110,9 @@ function createAddonContextV3({
   hasConfigBridge,
   frozenConfigScopes,
   hasSettingsBridge,
+  getSettings,
+  onSettingsChange,
+  saveSettings,
   assertActive,
   addDisposer,
   disposeSelf,
@@ -379,14 +382,17 @@ function createAddonContextV3({
     assertActive();
     const canvasOpts = { ...opts, shadow: true };
     const slotHandle = slotManager.mountSlot(pluginMeta, slotId, canvasOpts);
-    if (slotHandle && slotHandle.shadowRoot && themeAndI18n) {
+    const targetRoot =
+      (slotHandle && slotHandle.shadowRoot) ||
+      (slotHandle && typeof slotHandle.getRootNode === 'function' ? slotHandle.getRootNode() : null);
+    if (targetRoot && targetRoot !== doc && themeAndI18n) {
       const tokenStyle = doc.createElement('style');
       tokenStyle.setAttribute('data-addon-host-tokens', '1');
       tokenStyle.textContent = themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode);
-      if (typeof slotHandle.shadowRoot.insertBefore === 'function' && slotHandle.shadowRoot.firstChild) {
-        slotHandle.shadowRoot.insertBefore(tokenStyle, slotHandle.shadowRoot.firstChild);
-      } else if (typeof slotHandle.shadowRoot.appendChild === 'function') {
-        slotHandle.shadowRoot.appendChild(tokenStyle);
+      if (typeof targetRoot.insertBefore === 'function' && targetRoot.firstChild) {
+        targetRoot.insertBefore(tokenStyle, targetRoot.firstChild);
+      } else if (typeof targetRoot.appendChild === 'function') {
+        targetRoot.appendChild(tokenStyle);
       }
     }
     return slotHandle;
@@ -626,6 +632,38 @@ function createAddonContextV3({
           assertActive();
           return writeConfigScope(scopeId, nextDataOrRawJson, opts);
         },
+      })
+    );
+  }
+
+  if (
+    hasSettingsBridge &&
+    typeof getSettings === 'function' &&
+    typeof onSettingsChange === 'function' &&
+    typeof saveSettings === 'function'
+  ) {
+    const readSnap = () => {
+      assertActive();
+      return getSettings();
+    };
+    const subscribeSnap = (callback) => {
+      assertActive();
+      return onSettingsChange(callback);
+    };
+    const persistSnap = (nextData) => {
+      assertActive();
+      return saveSettings(nextData);
+    };
+    defineSafeReadOnlyProp(
+      ctx,
+      'settingsBridge',
+      _ObjectFreeze({
+        getSettings: readSnap,
+        getSnapshot: readSnap,
+        onSettingsChange: subscribeSnap,
+        onDidChange: subscribeSnap,
+        saveSettings: persistSnap,
+        save: persistSnap,
       })
     );
   }

@@ -154,15 +154,16 @@ function createMockElement(tagName, ownerDocument) {
       const results = [];
       const attrMatch = String(selector || '').match(/^\[([^=\]]+)(?:="([^"]*)")?\]$/);
       const walk = (node) => {
-        if (!node) return;
+        if (!node || !Array.isArray(node.childNodes)) return;
         for (let i = 0; i < node.childNodes.length; i += 1) {
           const c = node.childNodes[i];
+          if (!c || c.nodeType !== 1) continue;
           if (attrMatch) {
-            const val = c.getAttribute(attrMatch[1]);
+            const val = typeof c.getAttribute === 'function' ? c.getAttribute(attrMatch[1]) : null;
             if (val !== null && (attrMatch[2] === undefined || val === attrMatch[2])) {
               results.push(c);
             }
-          } else if (c.tagName.toLowerCase() === String(selector).toLowerCase()) {
+          } else if (typeof c.tagName === 'string' && c.tagName.toLowerCase() === String(selector).toLowerCase()) {
             results.push(c);
           }
           walk(c);
@@ -184,6 +185,17 @@ function createMockDocumentAndWindow({ viewport = { width: 1280, height: 800 }, 
     activeElement: null,
     createElement(tag) {
       return createMockElement(tag, doc);
+    },
+    createTextNode(text) {
+      const value = String(text === undefined || text === null ? '' : text);
+      return {
+        nodeType: 3,
+        nodeName: '#text',
+        ownerDocument: doc,
+        parentNode: null,
+        nodeValue: value,
+        textContent: value,
+      };
     },
     addEventListener(type, fn) {
       if (!docListeners.has(type)) docListeners.set(type, new Set());
@@ -244,18 +256,26 @@ function createTestHost({
   themeMode = 'dark',
   netHandler = null,
   configScopes = {},
+  initialSettings = {},
 } = {}) {
   const effectiveSurface = surface === 'remote-web' ? 'remote-web' : 'desktop';
   const { doc, win } = createMockDocumentAndWindow({ viewport, locale, themeMode });
   const kernel = createRendererKernel(doc, win);
   const hostToken = 'sdk-test-host-token-0123456789abcdef';
   const scopeStore = new Map(Object.entries(configScopes || {}));
+  const settingsStore = new Map(Object.entries(initialSettings || {}));
 
   const hostBridge = {
     docGenId: 1,
     profileId: effectiveSurface === 'remote-web' ? 'sdk-test-remote-web' : 'sdk-test-desktop',
     setPortalClaim: () => ({ ok: true }),
-    saveSettings: (_pid, rawJson) => Promise.resolve({ ok: true, snapshot: { status: 'ok', data: JSON.parse(rawJson) } }),
+    saveSettings: (pid, rawJson) => {
+      const parsed = JSON.parse(rawJson);
+      const snapshot = { status: 'ok', data: parsed };
+      settingsStore.set(pid, snapshot);
+      kernel.pushPluginSettings(pid, snapshot, hostToken);
+      return Promise.resolve({ ok: true, snapshot });
+    },
     reportError: () => {},
     ping: () => Promise.resolve({ ok: true }),
     readConfigScope: (_pid, scopeId) => {
@@ -306,7 +326,8 @@ function createTestHost({
       isolation: manifest.isolation || {},
     };
 
-    const ctx = kernel.createPluginHandle(pluginMeta, hostToken, null);
+    const initialSnap = settingsStore.has(pluginId) ? settingsStore.get(pluginId) : null;
+    const ctx = kernel.createPluginHandle(pluginMeta, hostToken, initialSnap);
     if (typeof setupFn === 'function') {
       await setupFn(ctx);
     }

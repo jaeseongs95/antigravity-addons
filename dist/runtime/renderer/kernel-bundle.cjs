@@ -6268,6 +6268,15 @@ module.exports = {
 
 function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = null, openTier3Modal = null } = {}) {
   const pagesByKey = new Map(); // `${pluginId}:${pageId}` -> record
+  const changeListeners = new Set();
+
+  function notifyChange() {
+    for (const fn of Array.from(changeListeners)) {
+      try {
+        fn();
+      } catch (_e) {}
+    }
+  }
 
   function registerSettingsPage(pluginMeta, spec = {}) {
     if (!spec || typeof spec !== 'object' || typeof spec.id !== 'string' || !spec.id.trim()) {
@@ -6276,7 +6285,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     const pageId = spec.id.trim();
     const key = `${pluginMeta.pluginId}:${pageId}`;
     const title = String(spec.title || spec.label || pageId);
-    const hasSchema = Boolean(spec.schema && typeof spec.schema === 'object');
+    const hasSchema = Boolean((spec.schema && typeof spec.schema === 'object') || typeof spec.getSchema === 'function');
     const hasRender = typeof spec.render === 'function';
     if (!hasSchema && !hasRender) {
       throw new Error('ERR_SETTINGS_PAGE_REQUIRES_SCHEMA_OR_RENDER');
@@ -6341,6 +6350,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       tabHandle,
     };
     pagesByKey.set(key, record);
+    notifyChange();
 
     return Object.freeze({
       id: pageId,
@@ -6364,7 +6374,8 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
             tabHandle.unregister();
           } catch (_e) {}
         }
-        pagesByKey.delete(key);
+        const deleted = pagesByKey.delete(key);
+        if (deleted) notifyChange();
       },
     });
   }
@@ -6391,6 +6402,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
   }
 
   function disposePlugin(pluginId) {
+    let removed = false;
     for (const [key, rec] of Array.from(pagesByKey.entries())) {
       if (rec.pluginId !== pluginId) continue;
       if (rec.tabHandle && typeof rec.tabHandle.unregister === 'function') {
@@ -6398,8 +6410,17 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
           rec.tabHandle.unregister();
         } catch (_e) {}
       }
-      pagesByKey.delete(key);
+      if (pagesByKey.delete(key)) removed = true;
     }
+    if (removed) notifyChange();
+  }
+
+  function onChange(listener) {
+    if (typeof listener !== 'function') return () => {};
+    changeListeners.add(listener);
+    return () => {
+      changeListeners.delete(listener);
+    };
   }
 
   return Object.freeze({
@@ -6407,6 +6428,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     listSettingsPages,
     openSettingsPage,
     disposePlugin,
+    onChange,
   });
 }
 
@@ -6426,7 +6448,7 @@ module.exports = {
  *   `theme`, `i18n`, `ui` (Tier 1 + Tier 2 + Tier 3), `storage`, `events`, `services`, `lifecycle` (`AbortSignal`)
  *
  * Capability-gated namespaces (strictly omitted / `undefined` when undeclared, unapproved, or unsupported):
- *   `net?`, `dom?`, `configBridge?`
+ *   `net?`, `dom?`, `configBridge?`, `settingsBridge?`
  */
 
 const { buildOverlayChrome, createSchemaUiController } = require('./ui-schema-renderer');
@@ -6528,6 +6550,9 @@ function createAddonContextV3({
   hasConfigBridge,
   frozenConfigScopes,
   hasSettingsBridge,
+  getSettings,
+  onSettingsChange,
+  saveSettings,
   assertActive,
   addDisposer,
   disposeSelf,
@@ -6797,14 +6822,17 @@ function createAddonContextV3({
     assertActive();
     const canvasOpts = { ...opts, shadow: true };
     const slotHandle = slotManager.mountSlot(pluginMeta, slotId, canvasOpts);
-    if (slotHandle && slotHandle.shadowRoot && themeAndI18n) {
+    const targetRoot =
+      (slotHandle && slotHandle.shadowRoot) ||
+      (slotHandle && typeof slotHandle.getRootNode === 'function' ? slotHandle.getRootNode() : null);
+    if (targetRoot && targetRoot !== doc && themeAndI18n) {
       const tokenStyle = doc.createElement('style');
       tokenStyle.setAttribute('data-addon-host-tokens', '1');
       tokenStyle.textContent = themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode);
-      if (typeof slotHandle.shadowRoot.insertBefore === 'function' && slotHandle.shadowRoot.firstChild) {
-        slotHandle.shadowRoot.insertBefore(tokenStyle, slotHandle.shadowRoot.firstChild);
-      } else if (typeof slotHandle.shadowRoot.appendChild === 'function') {
-        slotHandle.shadowRoot.appendChild(tokenStyle);
+      if (typeof targetRoot.insertBefore === 'function' && targetRoot.firstChild) {
+        targetRoot.insertBefore(tokenStyle, targetRoot.firstChild);
+      } else if (typeof targetRoot.appendChild === 'function') {
+        targetRoot.appendChild(tokenStyle);
       }
     }
     return slotHandle;
@@ -7044,6 +7072,38 @@ function createAddonContextV3({
           assertActive();
           return writeConfigScope(scopeId, nextDataOrRawJson, opts);
         },
+      })
+    );
+  }
+
+  if (
+    hasSettingsBridge &&
+    typeof getSettings === 'function' &&
+    typeof onSettingsChange === 'function' &&
+    typeof saveSettings === 'function'
+  ) {
+    const readSnap = () => {
+      assertActive();
+      return getSettings();
+    };
+    const subscribeSnap = (callback) => {
+      assertActive();
+      return onSettingsChange(callback);
+    };
+    const persistSnap = (nextData) => {
+      assertActive();
+      return saveSettings(nextData);
+    };
+    defineSafeReadOnlyProp(
+      ctx,
+      'settingsBridge',
+      _ObjectFreeze({
+        getSettings: readSnap,
+        getSnapshot: readSnap,
+        onSettingsChange: subscribeSnap,
+        onDidChange: subscribeSnap,
+        saveSettings: persistSnap,
+        save: persistSnap,
       })
     );
   }
@@ -7321,6 +7381,7 @@ module.exports = {
  */
 
 const NAV_ATTR = 'data-addon-host-admin-nav';
+const PLUGIN_NAV_ATTR = 'data-addon-host-plugin-settings-nav';
 const PANE_ATTR = 'data-addon-host-admin-pane';
 const IGNORE_ATTR = 'data-addon-host-ignore';
 const NO_TRANSLATE_ATTR = 'data-addon-host-no-translate';
@@ -7362,7 +7423,9 @@ const COPY = Object.freeze({
     bundleNotBuilt: 'Not built yet',
     sectionAddons: 'Installed Native Host Addons',
     emptyTitle: 'No addons registered yet',
-    emptyBody: 'Register an AddonManifest.v2 plugin with the host CLI to manage it here.',
+    emptyBody: 'Register an AddonManifest.v3 / v2 plugin with the host CLI to manage it here.',
+    openSettings: 'Settings',
+    sectionPluginPages: 'Plugin Settings Pages',
     statusActive: 'Running',
     statusDisabled: 'Disabled',
     statusRejected: 'Blocked',
@@ -7421,7 +7484,9 @@ const COPY = Object.freeze({
     bundleNotBuilt: '미빌드',
     sectionAddons: '네이티브 호스트 애드온 목록',
     emptyTitle: '등록된 애드온이 없습니다',
-    emptyBody: '호스트 CLI로 AddonManifest.v2 플러그인을 등록하면 이 화면에서 관리할 수 있습니다.',
+    emptyBody: '호스트 CLI로 AddonManifest.v3 / v2 플러그인을 등록하면 이 화면에서 관리할 수 있습니다.',
+    openSettings: '설정',
+    sectionPluginPages: '플러그인 설정 페이지',
     statusActive: '실행 중',
     statusDisabled: '비활성',
     statusRejected: '차단됨',
@@ -7849,8 +7914,22 @@ const PANEL_CSS = `
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 6px;
+  gap: 8px;
   flex: 0 0 auto;
+}
+
+.ah-addon-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ah-plugin-pages-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .ah-toggle-row {
@@ -8152,6 +8231,7 @@ function removeStyleProp(el, prop, restoreValue) {
 
 function createHostSettingsUi(doc, win, opts = {}) {
   const hostBridge = opts.hostBridge || null;
+  const settingsPageCoordinator = opts.settingsPageCoordinator || null;
   const settingsUiCfg = opts.settingsUi && typeof opts.settingsUi === 'object' ? opts.settingsUi : DEFAULT_SETTINGS_UI_CONFIG;
   const extraNoTranslateAttributes = Array.isArray(opts.extraNoTranslateAttributes) ? opts.extraNoTranslateAttributes : [];
   const anchorGroups =
@@ -8168,9 +8248,12 @@ function createHostSettingsUi(doc, win, opts = {}) {
   let mountedListParent = null;
   let mountedOuterSidebar = null;
   let mountedContentPane = null;
+  let mountedReferenceItem = null;
   let mountedLang = null;
   let navElement = null;
   let navInactiveColor = '';
+  let pluginNavElements = [];
+  let unsubSettingsPages = null;
   let paneHostElement = null;
   let shadowRoot = null;
   let isOpen = false;
@@ -8664,7 +8747,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const actions = createEl('div', 'ah-header-actions');
     if (lastState && lastState.host) {
       actions.appendChild(
-        createEl('span', 'ah-meta-pill', `${t.hostLabel} v${lastState.host.version || '2.5.0'}`)
+        createEl('span', 'ah-meta-pill', `${t.hostLabel} v${lastState.host.version || '3.0.1'}`)
       );
       if (lastState.host.buildSha8) {
         actions.appendChild(createEl('span', 'ah-meta-pill', `${t.buildLabel} ${lastState.host.buildSha8}`));
@@ -8752,6 +8835,19 @@ function createHostSettingsUi(doc, win, opts = {}) {
     root.appendChild(summaryGrid);
 
     // 3. Addon list
+    const registeredPages =
+      settingsPageCoordinator && typeof settingsPageCoordinator.listSettingsPages === 'function'
+        ? settingsPageCoordinator.listSettingsPages()
+        : [];
+    const pagesByPlugin = new Map();
+    for (let p = 0; p < registeredPages.length; p += 1) {
+      const pg = registeredPages[p];
+      if (!pg || !pg.pluginId) continue;
+      if (!pagesByPlugin.has(pg.pluginId)) pagesByPlugin.set(pg.pluginId, []);
+      pagesByPlugin.get(pg.pluginId).push(pg);
+    }
+    const renderedPageKeys = new Set();
+
     root.appendChild(createEl('h3', 'ah-section-title', t.sectionAddons));
     const addons = Array.isArray(lastState.addons) ? lastState.addons : [];
     if (addons.length === 0) {
@@ -8804,8 +8900,28 @@ function createHostSettingsUi(doc, win, opts = {}) {
         main.appendChild(badges);
         card.appendChild(main);
 
-        // Right control: Remote Web visibility toggle
+        // Right control: Plugin Settings Page button(s) + Remote Web visibility toggle
         const ctrl = createEl('div', 'ah-addon-control');
+        const pluginPages = pagesByPlugin.get(addon.pluginId) || [];
+        if (pluginPages.length > 0 && settingsPageCoordinator && typeof settingsPageCoordinator.openSettingsPage === 'function') {
+          const actionRow = createEl('div', 'ah-addon-actions');
+          for (let j = 0; j < pluginPages.length; j += 1) {
+            const page = pluginPages[j];
+            const pageKey = `${addon.pluginId}:${page.id}`;
+            renderedPageKeys.add(pageKey);
+            const btnLabel = pluginPages.length === 1 ? t.openSettings : page.title;
+            const openBtn = createEl('button', 'ah-btn ah-btn-primary', btnLabel);
+            openBtn.setAttribute('type', 'button');
+            openBtn.setAttribute('title', page.title);
+            openBtn.setAttribute('aria-label', page.title);
+            openBtn.setAttribute('data-ah-settings-page', pageKey);
+            openBtn.addEventListener('click', () => {
+              settingsPageCoordinator.openSettingsPage(addon.pluginId, page.id);
+            });
+            actionRow.appendChild(openBtn);
+          }
+          ctrl.appendChild(actionRow);
+        }
         const toggleRow = createEl('div', 'ah-toggle-row');
         const toggleLabel = createEl('span', 'ah-toggle-label', t.remoteToggleLabel);
         toggleRow.appendChild(toggleLabel);
@@ -8840,6 +8956,24 @@ function createHostSettingsUi(doc, win, opts = {}) {
         list.appendChild(card);
       }
       root.appendChild(list);
+    }
+
+    const extraPages = registeredPages.filter((pg) => pg && !renderedPageKeys.has(`${pg.pluginId}:${pg.id}`));
+    if (extraPages.length > 0 && settingsPageCoordinator && typeof settingsPageCoordinator.openSettingsPage === 'function') {
+      root.appendChild(createEl('h3', 'ah-section-title', t.sectionPluginPages));
+      const extraBar = createEl('div', 'ah-plugin-pages-bar');
+      for (let e = 0; e < extraPages.length; e += 1) {
+        const pg = extraPages[e];
+        const pageKey = `${pg.pluginId}:${pg.id}`;
+        const btn = createEl('button', 'ah-btn ah-btn-primary', pg.title);
+        btn.setAttribute('type', 'button');
+        btn.setAttribute('data-ah-settings-page', pageKey);
+        btn.addEventListener('click', () => {
+          settingsPageCoordinator.openSettingsPage(pg.pluginId, pg.id);
+        });
+        extraBar.appendChild(btn);
+      }
+      root.appendChild(extraBar);
     }
 
     // 4. Remote Web Bundle Sync Footer
@@ -9092,6 +9226,91 @@ function createHostSettingsUi(doc, win, opts = {}) {
     return idx + 1 < siblings.length ? siblings[idx + 1] : null;
   }
 
+  function removePluginNavItems() {
+    for (let i = 0; i < pluginNavElements.length; i += 1) {
+      const el = pluginNavElements[i];
+      if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
+        try {
+          el.parentNode.removeChild(el);
+        } catch (_err) {}
+      }
+    }
+    pluginNavElements = [];
+  }
+
+  function buildPluginNavItem(referenceItem, page) {
+    let btn;
+    if (referenceItem && typeof referenceItem.cloneNode === 'function') {
+      btn = referenceItem.cloneNode(true);
+      btn.removeAttribute('id');
+      btn.removeAttribute('aria-current');
+      btn.removeAttribute('data-state');
+      btn.removeAttribute('data-active');
+      if (btn.tagName && String(btn.tagName).toUpperCase() === 'BUTTON') {
+        btn.setAttribute('type', 'button');
+      }
+      if (typeof btn.querySelectorAll === 'function') {
+        const innerBtns = btn.querySelectorAll('button');
+        for (let i = 0; i < innerBtns.length; i += 1) {
+          innerBtns[i].removeAttribute('id');
+          innerBtns[i].setAttribute('type', 'button');
+        }
+      }
+      replaceLeafText(btn, page.title, doc);
+    } else {
+      btn = doc.createElement('button');
+      btn.setAttribute('type', 'button');
+      btn.textContent = page.title;
+    }
+
+    const pageKey = `${page.pluginId}:${page.id}`;
+    btn.setAttribute(PLUGIN_NAV_ATTR, pageKey);
+    btn.setAttribute('data-addon-host-owner', page.pluginId);
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-selected', 'false');
+    applyShieldAttributes(btn, extraNoTranslateAttributes);
+    if (btn.style && !btn.style.cursor) {
+      btn.style.cursor = 'pointer';
+    }
+
+    btn.addEventListener('click', (ev) => {
+      if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+      if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+      if (settingsPageCoordinator && typeof settingsPageCoordinator.openSettingsPage === 'function') {
+        settingsPageCoordinator.openSettingsPage(page.pluginId, page.id);
+      }
+    });
+
+    return btn;
+  }
+
+  function syncPluginNavItems() {
+    if (disposed || !mountedListParent || !mountedListParent.isConnected || !navElement || !navElement.isConnected) {
+      return;
+    }
+    removePluginNavItems();
+    if (!settingsPageCoordinator || typeof settingsPageCoordinator.listSettingsPages !== 'function') {
+      return;
+    }
+    const pages = settingsPageCoordinator.listSettingsPages();
+    if (!Array.isArray(pages) || pages.length === 0) return;
+
+    let anchor = navElement;
+    for (let i = 0; i < pages.length; i += 1) {
+      const page = pages[i];
+      if (!page || !page.pluginId || !page.id) continue;
+      const btn = buildPluginNavItem(mountedReferenceItem, page);
+      const nextSib = anchor.nextSibling || null;
+      if (nextSib && typeof mountedListParent.insertBefore === 'function') {
+        mountedListParent.insertBefore(btn, nextSib);
+      } else if (typeof mountedListParent.appendChild === 'function') {
+        mountedListParent.appendChild(btn);
+      }
+      pluginNavElements.push(btn);
+      anchor = btn;
+    }
+  }
+
   function ensureMount() {
     if (disposed || !doc) return false;
 
@@ -9108,6 +9327,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     // Previous Settings modal was unmounted; clean stale references
     restoreNativeActiveSiblings();
     detachNavListeners();
+    removePluginNavItems();
     navElement = null;
     navInactiveColor = '';
     paneHostElement = null;
@@ -9115,6 +9335,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     mountedListParent = null;
     mountedOuterSidebar = null;
     mountedContentPane = null;
+    mountedReferenceItem = null;
     mountedLang = null;
     isOpen = false;
 
@@ -9128,7 +9349,9 @@ function createHostSettingsUi(doc, win, opts = {}) {
       mountedListParent = listParent;
       mountedOuterSidebar = outerSidebar || listParent;
       mountedContentPane = contentPane;
+      mountedReferenceItem = referenceItem || null;
       mountedLang = detectLanguage(doc, listParent);
+      syncPluginNavItems();
       return true;
     }
 
@@ -9151,8 +9374,10 @@ function createHostSettingsUi(doc, win, opts = {}) {
     mountedListParent = listParent;
     mountedOuterSidebar = outerSidebar || listParent;
     mountedContentPane = contentPane;
+    mountedReferenceItem = referenceItem || null;
     mountedLang = lang;
     navElement = btn;
+    syncPluginNavItems();
 
     // Close our panel smoothly whenever the user selects any other tab/item in the sidebar (native OR peer addon)
     const clickHost = mountedOuterSidebar || listParent;
@@ -9162,6 +9387,12 @@ function createHostSettingsUi(doc, win, opts = {}) {
       if (!target || !navElement || !isOpen) return;
       if (target === navElement || (navElement.contains && navElement.contains(target))) {
         return;
+      }
+      for (let i = 0; i < pluginNavElements.length; i += 1) {
+        const pNav = pluginNavElements[i];
+        if (pNav && (target === pNav || (pNav.contains && pNav.contains(target)))) {
+          return;
+        }
       }
       if (clickHost && clickHost.contains && clickHost.contains(target)) {
         closePanel();
@@ -9182,6 +9413,13 @@ function createHostSettingsUi(doc, win, opts = {}) {
   function start() {
     if (disposed || started) return false;
     started = true;
+    if (settingsPageCoordinator && typeof settingsPageCoordinator.onChange === 'function') {
+      unsubSettingsPages = settingsPageCoordinator.onChange(() => {
+        if (disposed) return;
+        syncPluginNavItems();
+        if (isOpen) renderPanel();
+      });
+    }
     ensureMount();
     const MO = (win && win.MutationObserver) || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
     const observeTarget = doc && (doc.documentElement || doc.body);
@@ -9227,9 +9465,16 @@ function createHostSettingsUi(doc, win, opts = {}) {
       } catch (_err) {}
       observer = null;
     }
+    if (unsubSettingsPages) {
+      try {
+        unsubSettingsPages();
+      } catch (_err) {}
+      unsubSettingsPages = null;
+    }
     closePanel();
     restoreNativeActiveSiblings();
     detachNavListeners();
+    removePluginNavItems();
     if (navElement && navElement.parentNode) {
       try {
         navElement.parentNode.removeChild(navElement);
@@ -9247,6 +9492,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     mountedListParent = null;
     mountedOuterSidebar = null;
     mountedContentPane = null;
+    mountedReferenceItem = null;
     mountedLang = null;
   }
 
@@ -9261,6 +9507,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     isOpen: () => isOpen,
     getElements: () => ({
       navElement,
+      pluginNavElements: pluginNavElements.slice(),
       paneHostElement,
       shadowRoot,
     }),
@@ -9269,6 +9516,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
 module.exports = {
   NAV_ATTR,
+  PLUGIN_NAV_ATTR,
   PANE_ATTR,
   DEFAULT_SETTINGS_UI_CONFIG,
   createHostSettingsUi,
@@ -9698,6 +9946,7 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         hostBridge,
         settingsUi: cfg.settingsUi,
         extraNoTranslateAttributes,
+        settingsPageCoordinator,
       });
       hostSettingsUi.start();
     }
@@ -10055,6 +10304,67 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         ignoreElements: (opts && opts.ignoreElements) || [],
       });
 
+    const getSettingsFn = () => {
+      assertActive();
+      if (!hasSettingsBridge) return null;
+      return _MapGet(pluginSettingsSnapshots, pluginId) || null;
+    };
+
+    const onSettingsChangeFn = (callback) => {
+      assertActive();
+      if (typeof callback !== 'function') {
+        throw new _Error('ERR_INVALID_SETTINGS_CALLBACK');
+      }
+      if (!hasSettingsBridge) {
+        throw new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
+      }
+      let subs = _MapGet(pluginSettingsListeners, pluginId);
+      if (!subs) {
+        subs = new _Set();
+        _MapSet(pluginSettingsListeners, pluginId, subs);
+      }
+      _SetAdd(subs, callback);
+      const unsub = () => {
+        _SetDelete(subs, callback);
+      };
+      addPluginDisposer(pluginId, unsub);
+      return unsub;
+    };
+
+    const saveSettingsFn = (nextData) => {
+      assertActive();
+      if (!hasSettingsBridge) {
+        return _PromiseReject(new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED'));
+      }
+      if (!nextData || typeof nextData !== 'object' || _ArrayIsArray(nextData)) {
+        return _PromiseReject(new _Error('ERR_SETTINGS_MUST_BE_OBJECT'));
+      }
+      if (!hostBridge || typeof hostBridge.saveSettings !== 'function') {
+        return _PromiseReject(new _Error('ERR_SETTINGS_SAVE_UNAVAILABLE'));
+      }
+      let rawJson;
+      try {
+        const clean = sanitizeJsonPayload(nextData);
+        rawJson = _JSONStringify(clean);
+      } catch (err) {
+        return _PromiseReject(new _Error(err && err.message ? err.message : 'ERR_SETTINGS_INVALID_JSON'));
+      }
+      if (typeof rawJson !== 'string') {
+        return _PromiseReject(new _Error('ERR_SETTINGS_INVALID_JSON'));
+      }
+      return _PromiseResolve(hostBridge.saveSettings(pluginId, rawJson)).then((res) => {
+        if (res && res.ok === true && res.snapshot && typeof res.snapshot === 'object') {
+          const frozen = deepFreezeClone(res.snapshot);
+          return _ObjectFreeze({ ok: true, reason: null, snapshot: frozen });
+        }
+        return _ObjectFreeze({
+          ok: false,
+          reason: (res && res.reason) || 'ERR_SETTINGS_SAVE_FAILED',
+          snapshot: null,
+        });
+      });
+    };
+
     const v3Context = createAddonContextV3({
       doc,
       win,
@@ -10084,6 +10394,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
       hasConfigBridge,
       frozenConfigScopes,
       hasSettingsBridge,
+      getSettings: getSettingsFn,
+      onSettingsChange: onSettingsChangeFn,
+      saveSettings: saveSettingsFn,
       assertActive,
       addDisposer: (fn) => addPluginDisposer(pluginId, fn),
       disposeSelf: disposeSelfFn,
@@ -10126,62 +10439,9 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
         return settingsTabs.registerSettingsTab(pluginId, tabId, opts);
       },
       isElementInsideIgnored: isIgnoredFn,
-      getSettings() {
-        assertActive();
-        if (!hasSettingsBridge) return null;
-        return _MapGet(pluginSettingsSnapshots, pluginId) || null;
-      },
-      onSettingsChange(callback) {
-        assertActive();
-        if (typeof callback !== 'function') {
-          throw new _Error('ERR_INVALID_SETTINGS_CALLBACK');
-        }
-        if (!hasSettingsBridge) {
-          throw new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED');
-        }
-        let subs = _MapGet(pluginSettingsListeners, pluginId);
-        if (!subs) {
-          subs = new _Set();
-          _MapSet(pluginSettingsListeners, pluginId, subs);
-        }
-        _SetAdd(subs, callback);
-        return () => {
-          _SetDelete(subs, callback);
-        };
-      },
-      saveSettings(nextData) {
-        assertActive();
-        if (!hasSettingsBridge) {
-          return _PromiseReject(new _Error('ERR_SETTINGS_BRIDGE_NOT_DECLARED'));
-        }
-        if (!nextData || typeof nextData !== 'object' || _ArrayIsArray(nextData)) {
-          return _PromiseReject(new _Error('ERR_SETTINGS_MUST_BE_OBJECT'));
-        }
-        if (!hostBridge || typeof hostBridge.saveSettings !== 'function') {
-          return _PromiseReject(new _Error('ERR_SETTINGS_SAVE_UNAVAILABLE'));
-        }
-        let rawJson;
-        try {
-          const clean = sanitizeJsonPayload(nextData);
-          rawJson = _JSONStringify(clean);
-        } catch (err) {
-          return _PromiseReject(new _Error(err && err.message ? err.message : 'ERR_SETTINGS_INVALID_JSON'));
-        }
-        if (typeof rawJson !== 'string') {
-          return _PromiseReject(new _Error('ERR_SETTINGS_INVALID_JSON'));
-        }
-        return _PromiseResolve(hostBridge.saveSettings(pluginId, rawJson)).then((res) => {
-          if (res && res.ok === true && res.snapshot && typeof res.snapshot === 'object') {
-            const frozen = deepFreezeClone(res.snapshot);
-            return _ObjectFreeze({ ok: true, reason: null, snapshot: frozen });
-          }
-          return _ObjectFreeze({
-            ok: false,
-            reason: (res && res.reason) || 'ERR_SETTINGS_SAVE_FAILED',
-            snapshot: null,
-          });
-        });
-      },
+      getSettings: getSettingsFn,
+      onSettingsChange: onSettingsChangeFn,
+      saveSettings: saveSettingsFn,
       readConfigScope,
       writeConfigScope,
     });

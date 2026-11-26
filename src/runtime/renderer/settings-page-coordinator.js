@@ -13,6 +13,15 @@
 
 function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = null, openTier3Modal = null } = {}) {
   const pagesByKey = new Map(); // `${pluginId}:${pageId}` -> record
+  const changeListeners = new Set();
+
+  function notifyChange() {
+    for (const fn of Array.from(changeListeners)) {
+      try {
+        fn();
+      } catch (_e) {}
+    }
+  }
 
   function registerSettingsPage(pluginMeta, spec = {}) {
     if (!spec || typeof spec !== 'object' || typeof spec.id !== 'string' || !spec.id.trim()) {
@@ -21,7 +30,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     const pageId = spec.id.trim();
     const key = `${pluginMeta.pluginId}:${pageId}`;
     const title = String(spec.title || spec.label || pageId);
-    const hasSchema = Boolean(spec.schema && typeof spec.schema === 'object');
+    const hasSchema = Boolean((spec.schema && typeof spec.schema === 'object') || typeof spec.getSchema === 'function');
     const hasRender = typeof spec.render === 'function';
     if (!hasSchema && !hasRender) {
       throw new Error('ERR_SETTINGS_PAGE_REQUIRES_SCHEMA_OR_RENDER');
@@ -86,6 +95,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       tabHandle,
     };
     pagesByKey.set(key, record);
+    notifyChange();
 
     return Object.freeze({
       id: pageId,
@@ -109,7 +119,8 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
             tabHandle.unregister();
           } catch (_e) {}
         }
-        pagesByKey.delete(key);
+        const deleted = pagesByKey.delete(key);
+        if (deleted) notifyChange();
       },
     });
   }
@@ -136,6 +147,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
   }
 
   function disposePlugin(pluginId) {
+    let removed = false;
     for (const [key, rec] of Array.from(pagesByKey.entries())) {
       if (rec.pluginId !== pluginId) continue;
       if (rec.tabHandle && typeof rec.tabHandle.unregister === 'function') {
@@ -143,8 +155,17 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
           rec.tabHandle.unregister();
         } catch (_e) {}
       }
-      pagesByKey.delete(key);
+      if (pagesByKey.delete(key)) removed = true;
     }
+    if (removed) notifyChange();
+  }
+
+  function onChange(listener) {
+    if (typeof listener !== 'function') return () => {};
+    changeListeners.add(listener);
+    return () => {
+      changeListeners.delete(listener);
+    };
   }
 
   return Object.freeze({
@@ -152,6 +173,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     listSettingsPages,
     openSettingsPage,
     disposePlugin,
+    onChange,
   });
 }
 

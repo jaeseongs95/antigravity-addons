@@ -6,7 +6,19 @@
 > **언어**: [English (README.md)](./README.md) | 한국어  
 > *(구 `antigravity-native-addon-host` — 기존 `addon-host` CLI 명령, `ADDON_HOST_LOADER_V2` 패치 마커 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 데스크톱 `trusted` 전용 `localLoopback`), 별도 `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크(`v3.0.0`)입니다.**
+**3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 데스크톱 `trusted` 전용 `localLoopback`), 별도 `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크(`v3.0.1`)입니다.**
+
+## v3.0.1 주요 업데이트 (v3 생태계 패리티 및 품질 보강)
+
+- **`AddonContextV3` 전용 `ctx.settingsBridge` 노출**:
+  - `settingsBridge`를 선언하고 신뢰 승인된 v3 플러그인에 한해 World 998 프로토타입 방어가 적용된 동결 `ctx.settingsBridge`(`getSettings`/`getSnapshot`, `onSettingsChange`/`onDidChange`, `saveSettings`/`save`)를 노출하며, `lifecycle.onDispose` 시 구독 자동 해제 및 SDK `createTestHost({ initialSettings })` 패리티를 지원합니다.
+- **데스크톱 Settings 좌측 사이드바 및 Addon Manager 카드에서 `ui.registerSettingsPage` 공식 노출**:
+  - `settingsPageCoordinator`를 `createHostSettingsUi`에 연동하여, `ctx.ui.registerSettingsPage`로 등록된 모든 v3 플러그인 설정 페이지가 **데스크톱 Settings 좌측 사이드바(`Addon Manager` 바로 아래)** 와 **Addon Manager 카드 내 `설정` 버튼** 양쪽에서 표시·실행되며 마운트/해제에 실시간 반응합니다.
+- **Userscript 헤더·SDK·Canvas·동적 스키마 보강**:
+  - `scripts/build-remote.js`: `--build-addon-userscript`의 `@description`이 매니페스트 버전에 맞춰 `AddonManifest.v3` / `v2`를 동적으로 표기합니다.
+  - `packages/sdk/src/test-host.js`: mock DOM `querySelectorAll`의 텍스트 노드(`nodeType: 3`) 예외 가드 및 `doc.createTextNode()`를 추가했습니다.
+  - `src/runtime/renderer/context-v3.js`: `ui.mountCanvas`에서 `slotHandle.getRootNode()`를 통해 ShadowRoot 토큰 CSS가 안정적으로 주입되도록 수정했습니다.
+  - `src/runtime/renderer/settings-page-coordinator.js`: `ui.registerSettingsPage`에서 `getSchema` 단독 선언도 허용하도록 수정했습니다.
 
 ## v3.0.0 주요 업데이트 (API-First 3-Tier 프레임워크 · `@antigravity-addons/sdk` · 1-Click Hub)
 

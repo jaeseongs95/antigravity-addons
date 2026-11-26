@@ -6,7 +6,19 @@
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
 > *(Formerly `antigravity-native-addon-host` — existing `addon-host` CLI command, `ADDON_HOST_LOADER_V2` marker, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Single, vendor-independent API-First native desktop & universal remote web addon host framework (`v3.0.0`) with 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + Desktop-only `localLoopback`), separate `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+**Single, vendor-independent API-First native desktop & universal remote web addon host framework (`v3.0.1`) with 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + Desktop-only `localLoopback`), separate `@antigravity-addons/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+
+## Key Updates in v3.0.1 (v3 Ecosystem Parity & Polish)
+
+- **Capability-Gated `ctx.settingsBridge` on `AddonContextV3`**:
+  - Exposes primordial-hardened, frozen `ctx.settingsBridge` (`getSettings`/`getSnapshot`, `onSettingsChange`/`onDidChange`, `saveSettings`/`save`) strictly when a v3 plugin declares `settingsBridge` and is trust-approved, with automatic `lifecycle.onDispose` listener cleanup and full `createTestHost({ initialSettings })` SDK parity.
+- **Desktop Settings Sidebar & Addon Manager Integration for `ui.registerSettingsPage`**:
+  - Connects `settingsPageCoordinator` to `createHostSettingsUi`: every v3 plugin calling `ctx.ui.registerSettingsPage` now automatically appears in the **Desktop Settings left sidebar** (directly below `Addon Manager`) AND as a quick **`Settings` / `설정`** button inside its `Addon Manager` card, reacting live to plugin mount/dispose with zero plugin DOM scraping.
+- **Userscript Header, SDK & Canvas/Schema Fixes**:
+  - `scripts/build-remote.js`: `--build-addon-userscript` `@description` now dynamically emits `AddonManifest.v3` / `v2` according to `manifest.schemaVersion`.
+  - `packages/sdk/src/test-host.js`: guards mock `querySelectorAll` against text nodes (`nodeType: 3`) and adds `doc.createTextNode()`.
+  - `src/runtime/renderer/context-v3.js`: fixes `ui.mountCanvas` token CSS injection via `slotHandle.getRootNode()` fallback.
+  - `src/runtime/renderer/settings-page-coordinator.js`: accepts `getSchema`-only dynamic pages in `ui.registerSettingsPage`.
 
 ## Key Updates in v3.0.0 (API-First 3-Tier Framework, `@antigravity-addons/sdk` & 1-Click Hub)
 
