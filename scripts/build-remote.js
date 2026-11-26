@@ -367,7 +367,8 @@ function normalizeHostLibUrl(
 
 // Public DNS FQDN only (strictly bans localhost, raw IPv4/IPv6 literals, and wildcards).
 const CONNECT_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
-const FORBIDDEN_CONNECT_HOSTS = new Set([
+const MAX_CONNECT_HOST_LEN = 253;
+const FORBIDDEN_CONNECT_HOSTS = Object.freeze([
   'localhost',
   'antigravity.google.com',
   'accounts.google.com',
@@ -378,9 +379,22 @@ const FORBIDDEN_CONNECT_SUFFIXES = Object.freeze([
   '.local',
   '.internal',
   '.localhost',
+  '.localdomain',
   '.lan',
+  '.home',
+  '.corp',
+  '.intranet',
+  '.arpa',
   '.home.arpa',
 ]);
+
+function isForbiddenConnectHost(host) {
+  for (let i = 0; i < FORBIDDEN_CONNECT_HOSTS.length; i += 1) {
+    const f = FORBIDDEN_CONNECT_HOSTS[i];
+    if (host === f || host.endsWith(`.${f}`)) return true;
+  }
+  return FORBIDDEN_CONNECT_SUFFIXES.some((suffix) => host.endsWith(suffix));
+}
 
 function normalizeConnectHosts(rawHosts) {
   if (!Array.isArray(rawHosts) || rawHosts.length === 0) return [];
@@ -389,13 +403,10 @@ function normalizeConnectHosts(rawHosts) {
   for (let i = 0; i < rawHosts.length; i += 1) {
     const h = String(rawHosts[i] || '').trim().toLowerCase();
     if (!h) continue;
-    if (!CONNECT_HOST_RE.test(h)) {
+    if (h.length > MAX_CONNECT_HOST_LEN || !CONNECT_HOST_RE.test(h)) {
       throw new Error(`ERR_INVALID_CONNECT_HOST:${rawHosts[i]}`);
     }
-    if (
-      FORBIDDEN_CONNECT_HOSTS.has(h) ||
-      FORBIDDEN_CONNECT_SUFFIXES.some((suffix) => h.endsWith(suffix))
-    ) {
+    if (isForbiddenConnectHost(h)) {
       throw new Error(`ERR_FORBIDDEN_CONNECT_HOST:${rawHosts[i]}`);
     }
     if (!seen.has(h)) {
@@ -537,17 +548,21 @@ function buildAddonUserscript({
     }
   }
 
+  // Fail closed on unpinned trusted manifests: downgrade effective trustLevel to restricted
+  // so unpinned modular userscripts cannot gain privileged renderer capabilities.
+  const finalTrustLevel = effectiveTrustLevel === 'trusted' && trustPinned ? 'trusted' : 'restricted';
+
   const pluginMeta = {
     schemaVersion: 2,
     sourceSchemaVersion: manifest.sourceSchemaVersion || manifest.schemaVersion || 2,
     pluginId: manifest.pluginId,
     displayName: manifest.displayName || manifest.pluginId,
     version: manifest.version || '1.0.0',
-    trustLevel: effectiveTrustLevel,
+    trustLevel: finalTrustLevel,
     capabilities: ['renderer'],
     skippedCapabilities,
-    hasDocumentTransformSlot: Boolean(validation.hasDocumentTransformSlot),
-    hasSettingsBridge: Boolean(validation.hasSettingsBridge && effectiveTrustLevel === 'trusted' && trustPinned),
+    hasDocumentTransformSlot: Boolean(validation.hasDocumentTransformSlot && finalTrustLevel === 'trusted'),
+    hasSettingsBridge: Boolean(validation.hasSettingsBridge && finalTrustLevel === 'trusted'),
     hasConfigBridge: false,
     configScopes: [],
     uiSlots: Array.isArray(manifest.uiSlots) ? manifest.uiSlots : [],

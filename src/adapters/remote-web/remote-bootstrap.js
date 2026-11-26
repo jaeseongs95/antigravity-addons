@@ -853,7 +853,7 @@ function createHostDrawerUi({ doc, win, profile, getState, onSelectSettingsTab =
   });
 
   const onKeyDown = (ev) => {
-    if (isOpen && ev && ev.key === 'Escape') {
+    if (isOpen && ev && ev.key === 'Escape' && ev.isTrusted !== false) {
       setOpen(false);
       if (typeof pillBtn.focus === 'function') pillBtn.focus();
     }

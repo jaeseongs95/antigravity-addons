@@ -27,7 +27,8 @@ const { readAsarArchive, verifyAllAsarIntegrity, sha256Hex } = require('./asar-p
 
 function safeRealpath(targetPath) {
   try {
-    return fs.realpathSync(targetPath);
+    const fn = typeof fs.realpathSync.native === 'function' ? fs.realpathSync.native : fs.realpathSync;
+    return fn(targetPath);
   } catch (_err) {
     return path.resolve(targetPath);
   }
@@ -38,18 +39,23 @@ function normalizeComparePath(p, platform = process.platform) {
   return platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
+function isRelInside(rel) {
+  return (
+    rel === '' ||
+    (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !rel.startsWith('../') && !path.isAbsolute(rel))
+  );
+}
+
 function isPathInsideDir(candidatePath, baseDir, platform = process.platform) {
   if (!candidatePath || !baseDir) return false;
   const candNorm = normalizeComparePath(candidatePath, platform);
   const baseNorm = normalizeComparePath(baseDir, platform);
-  const rel = path.relative(baseNorm, candNorm);
-  if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+  if (isRelInside(path.relative(baseNorm, candNorm))) {
     return true;
   }
   const candReal = normalizeComparePath(safeRealpath(candidatePath), platform);
   const baseReal = normalizeComparePath(safeRealpath(baseDir), platform);
-  const realRel = path.relative(baseReal, candReal);
-  return realRel === '' || (!realRel.startsWith('..') && !path.isAbsolute(realRel));
+  return isRelInside(path.relative(baseReal, candReal));
 }
 
 function collectForbiddenInstallDirs({ appExecutablePath = null, asarPath = null } = {}) {
@@ -274,19 +280,48 @@ function probeAsarReady(asarPath, prevAsarSha = null) {
   return { ready: true, size: st.size, mtimeMs: st.mtimeMs, prevAsarSha };
 }
 
-function verifyAsarReadyForPatch(asarPath, prevAsarSha = null) {
+function verifyAsarReadyForPatch(asarPath, prevBundleSha = null, { ctx = null, lifecyclePort = null } = {}) {
   try {
     const archive = readAsarArchive(asarPath);
     const sha = sha256Hex(archive.buf);
-    if (prevAsarSha && sha.toLowerCase() === String(prevAsarSha).toLowerCase()) {
+    if (prevBundleSha && sha.toLowerCase() === String(prevBundleSha).toLowerCase()) {
       return { ok: false, reason: 'WAITING_FOR_ASAR_CHANGE', sha };
     }
     if (!verifyAllAsarIntegrity(archive)) {
       return { ok: false, reason: 'WAITING_FOR_ASAR_INTEGRITY', sha };
     }
+    // F4: Never treat an already-patched archive as ready when prevBundleSha is absent/stale.
+    if (lifecyclePort && typeof lifecyclePort.diagnoseHost === 'function' && ctx) {
+      try {
+        const diag = lifecyclePort.diagnoseHost(ctx);
+        if (diag && diag.hostInstalled === true) {
+          return { ok: false, reason: 'WAITING_FOR_UNPATCHED_ASAR', sha };
+        }
+      } catch (_diagErr) {
+        return { ok: false, reason: 'WAITING_FOR_ASAR_DIAG' };
+      }
+    }
     return { ok: true, sha, appVersion: archive.appVersion };
   } catch (_err) {
     return { ok: false, reason: 'WAITING_FOR_ASAR_READABLE' };
+  }
+}
+
+function isHandoffCancelled(ackFilePath) {
+  if (typeof ackFilePath !== 'string' || !ackFilePath.trim()) return false;
+  try {
+    return fs.existsSync(`${ackFilePath}.cancel`);
+  } catch (_err) {
+    return false;
+  }
+}
+
+function cleanupHandoffSignals(ackFilePath) {
+  if (typeof ackFilePath !== 'string' || !ackFilePath.trim()) return;
+  for (const p of [ackFilePath, `${ackFilePath}.cancel`]) {
+    try {
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    } catch (_err) {}
   }
 }
 
@@ -300,10 +335,20 @@ function spawnAppDetached(appExecutablePath, spawnFn = spawn) {
     shell: false,
     windowsHide: false,
   });
+  let asyncError = null;
+  if (child && typeof child.on === 'function') {
+    child.on('error', (err) => {
+      asyncError = err && err.message ? err.message : String(err);
+    });
+  }
   if (child && typeof child.unref === 'function') {
     child.unref();
   }
-  return { launched: true, pid: child && child.pid ? child.pid : null };
+  return {
+    launched: !asyncError,
+    pid: child && child.pid ? child.pid : null,
+    error: asyncError,
+  };
 }
 
 async function runDetachedHandoffReconcile(
@@ -312,6 +357,7 @@ async function runDetachedHandoffReconcile(
   {
     hostVersion,
     parentPid = null,
+    prevBundleSha = null,
     prevAsarSha = null,
     ackFilePath = null,
     relaunch = false,
@@ -323,12 +369,27 @@ async function runDetachedHandoffReconcile(
     sleepFn = sleepMs,
     spawnFn = spawn,
     reconcileFn = null,
+    verifyAsarFn = null,
   } = {}
 ) {
+  const effectivePrevSha = prevBundleSha || prevAsarSha || null;
   const deadline = Date.now() + (Number.isInteger(waitTimeoutMs) && waitTimeoutMs > 0 ? waitTimeoutMs : DEFAULT_WAIT_TIMEOUT_MS);
   const pollMs = Number.isInteger(pollIntervalMs) && pollIntervalMs >= 5 ? pollIntervalMs : 200;
   const appExecutablePath = ctx && ctx.paths ? ctx.paths.APP_EXECUTABLE_PATH : null;
   const asarPath = ctx && ctx.paths ? ctx.paths.ASAR_PATH : null;
+
+  // F2: If parent already timed out and wrote the cancel sentinel, exit cleanly without reconciling or relaunching.
+  if (isHandoffCancelled(ackFilePath)) {
+    cleanupHandoffSignals(ackFilePath);
+    return {
+      ok: false,
+      handoff: true,
+      cancelled: true,
+      reconcile: null,
+      relaunch: null,
+      error: null,
+    };
+  }
 
   // 1. Emit startup ACK immediately so Layer-1 parent knows this detached helper is alive.
   if (typeof ackFilePath === 'string' && ackFilePath.trim()) {
@@ -337,24 +398,56 @@ async function runDetachedHandoffReconcile(
     } catch (_ackErr) {}
   }
 
+  // Re-check cancel right after emitting ACK in case parent timed out concurrently.
+  if (isHandoffCancelled(ackFilePath)) {
+    cleanupHandoffSignals(ackFilePath);
+    return {
+      ok: false,
+      handoff: true,
+      cancelled: true,
+      reconcile: null,
+      relaunch: null,
+      error: null,
+    };
+  }
+
   let result = null;
   let relaunchResult = null;
   let thrownErr = null;
+  let cancelled = false;
 
   try {
     // 2. Wait cleanly for old parent process to exit (NEVER taskkill).
     if (Number.isInteger(parentPid) && parentPid > 0) {
       while (Date.now() < deadline && isPidAliveFn(parentPid)) {
+        if (isHandoffCancelled(ackFilePath)) {
+          cancelled = true;
+          break;
+        }
         await sleepFn(pollMs);
       }
     }
 
+    if (!cancelled && isHandoffCancelled(ackFilePath)) {
+      cancelled = true;
+    }
+
     // 3. Wait for target ASAR to stabilize across 2 consecutive polls and pass integrity check.
-    if (asarPath) {
+    // Memoize lastCheckedSig so we NEVER synchronously re-read/hash unchanged app.asar every poll tick.
+    if (!cancelled && asarPath) {
       let lastSig = null;
       let stableTicks = 0;
+      let lastCheckedSig = null;
+      const runVerify =
+        typeof verifyAsarFn === 'function'
+          ? verifyAsarFn
+          : (p, prev) => verifyAsarReadyForPatch(p, prev, { ctx, lifecyclePort });
       while (Date.now() < deadline) {
-        const probe = probeAsarReady(asarPath, prevAsarSha);
+        if (isHandoffCancelled(ackFilePath)) {
+          cancelled = true;
+          break;
+        }
+        const probe = probeAsarReady(asarPath, effectivePrevSha);
         if (probe.ready) {
           const sig = `${probe.size}:${probe.mtimeMs}`;
           if (sig === lastSig) {
@@ -363,34 +456,50 @@ async function runDetachedHandoffReconcile(
             lastSig = sig;
             stableTicks = 1;
           }
-          if (stableTicks >= 2) {
-            const check = verifyAsarReadyForPatch(asarPath, prevAsarSha);
-            if (check.ok) break;
+          if (stableTicks >= 2 && sig !== lastCheckedSig) {
+            const check = runVerify(asarPath, effectivePrevSha);
+            if (check && check.ok) {
+              lastCheckedSig = sig;
+              break;
+            }
+            if (check && (check.reason === 'WAITING_FOR_ASAR_CHANGE' || check.reason === 'WAITING_FOR_UNPATCHED_ASAR')) {
+              lastCheckedSig = sig;
+            }
           }
         }
         await sleepFn(pollMs);
       }
     }
 
-    // 4. Execute reconcile with bounded retry on transient Windows file lock.
-    const execReconcile =
-      typeof reconcileFn === 'function'
-        ? reconcileFn
-        : () =>
-            reconcileElectronHost(ctx, lifecyclePort, {
-              hostVersion,
-              platform,
-              forceMacAutoRepatch,
-            });
+    if (!cancelled && isHandoffCancelled(ackFilePath)) {
+      cancelled = true;
+    }
 
-    do {
-      result = execReconcile();
-      if (!result || result.ok || result.reason !== 'ERR_TARGET_LOCKED_APP_RUNNING') {
-        break;
-      }
-      if (Date.now() >= deadline) break;
-      await sleepFn(pollMs);
-    } while (Date.now() < deadline);
+    // 4. Execute reconcile with bounded retry on transient Windows file lock.
+    if (!cancelled) {
+      const execReconcile =
+        typeof reconcileFn === 'function'
+          ? reconcileFn
+          : () =>
+              reconcileElectronHost(ctx, lifecyclePort, {
+                hostVersion,
+                platform,
+                forceMacAutoRepatch,
+              });
+
+      do {
+        if (isHandoffCancelled(ackFilePath)) {
+          cancelled = true;
+          break;
+        }
+        result = execReconcile();
+        if (!result || result.ok || result.reason !== 'ERR_TARGET_LOCKED_APP_RUNNING') {
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await sleepFn(pollMs);
+      } while (Date.now() < deadline);
+    }
   } catch (err) {
     thrownErr = err;
     result = {
@@ -399,8 +508,11 @@ async function runDetachedHandoffReconcile(
       reason: err && err.message ? err.message : String(err),
     };
   } finally {
-    // 5. UNCONDITIONAL FAIL-OPEN RELAUNCH: never leave target app unlaunched after handoff.
-    if (relaunch && appExecutablePath) {
+    if (cancelled || isHandoffCancelled(ackFilePath)) {
+      cancelled = true;
+      cleanupHandoffSignals(ackFilePath);
+    } else if (relaunch && appExecutablePath) {
+      // 5. UNCONDITIONAL FAIL-OPEN RELAUNCH: never leave target app unlaunched after an active handoff.
       try {
         relaunchResult = spawnAppDetached(appExecutablePath, spawnFn);
       } catch (spawnErr) {
@@ -413,8 +525,9 @@ async function runDetachedHandoffReconcile(
   }
 
   return {
-    ok: Boolean(result && result.ok),
+    ok: !cancelled && Boolean(result && result.ok),
     handoff: true,
+    cancelled,
     reconcile: result,
     relaunch: relaunchResult,
     error: thrownErr ? (thrownErr.message || String(thrownErr)) : null,
@@ -431,11 +544,20 @@ function launchHostWithReconcile(
     spawnFn = spawn,
   } = {}
 ) {
-  const reconcile = reconcileElectronHost(ctx, lifecyclePort, {
-    hostVersion,
-    platform,
-    forceMacAutoRepatch,
-  });
+  let reconcile;
+  try {
+    reconcile = reconcileElectronHost(ctx, lifecyclePort, {
+      hostVersion,
+      platform,
+      forceMacAutoRepatch,
+    });
+  } catch (err) {
+    reconcile = {
+      ok: false,
+      action: 'FAILED',
+      reason: err && err.message ? err.message : String(err),
+    };
+  }
   const appExecutablePath = ctx && ctx.paths ? ctx.paths.APP_EXECUTABLE_PATH : null;
   const launch = spawnAppDetached(appExecutablePath, spawnFn);
   return {
@@ -457,4 +579,5 @@ module.exports = {
   runDetachedHandoffReconcile,
   launchHostWithReconcile,
   spawnAppDetached,
+  verifyAsarReadyForPatch,
 };

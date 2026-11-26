@@ -27,7 +27,12 @@ const {
   resolveExternalNodeExecutable,
   reconcileElectronHost,
   runDetachedHandoffReconcile,
+  launchHostWithReconcile,
+  spawnAppDetached,
+  verifyAsarReadyForPatch,
 } = require('../../src/adapters/electron/update-reconciler');
+const asar = require('@electron/asar');
+const { EventEmitter } = require('node:events');
 const {
   createUpdateSurvivalHook,
   isValidExternalNodeBinary,
@@ -201,6 +206,19 @@ test('TC-V29-02: External Node resolver strictly rejects binaries inside $INSTDI
 
     assert.equal(isPathInsideDir(insideNode, installDir), true);
     assert.equal(isPathInsideDir(extNode, installDir), false);
+    // F7: subdirectory whose name starts with ".." inside $INSTDIR must still be treated as inside
+    const dotDotSubdirNode = path.join(installDir, '..hidden', nodeBinName);
+    assert.equal(isPathInsideDir(dotDotSubdirNode, installDir), true);
+    // F7: Electron execPath fallback rejects node inside Electron directory even if appExecutablePath/asarPath omitted
+    assert.equal(
+      isValidExternalNodeBinary(insideNode, {
+        appExecutablePath: null,
+        asarPath: null,
+        platform: process.platform,
+        electronExecPath: appExe,
+      }),
+      false
+    );
 
     // Rejects app executable (wrong basename AND inside $INSTDIR)
     assert.equal(isAllowedExternalNodePath(appExe, { appExecutablePath: appExe, asarPath }), false);
@@ -288,7 +306,10 @@ test('TC-V29-03: Layer-1 Module._load hook fails open verbatim on ACK timeout / 
       },
     };
 
-    // Case A: ACK times out -> MUST FAIL OPEN with original isForceRunAfter = true
+    // Case A: ACK times out -> MUST FAIL OPEN with original isForceRunAfter = true,
+    // write .cancel sentinel, and terminate ONLY the unacked helper child (F2)
+    let killedUnackedChild = false;
+    let timedOutAckPath = null;
     const hookTimeout = createUpdateSurvivalHook({
       updateSurvival: {
         updaterModule: 'electron-updater',
@@ -300,7 +321,17 @@ test('TC-V29-03: Layer-1 Module._load hook fails open verbatim on ACK timeout / 
       hostDataDir,
       platform: process.platform,
       moduleApi: fakeModuleApi,
-      spawnFn: () => ({ pid: 99999, unref() {} }), // Never writes ACK file
+      spawnFn: (_bin, args) => {
+        const ackIdx = args.indexOf('--ack-file');
+        timedOutAckPath = ackIdx !== -1 ? args[ackIdx + 1] : null;
+        return {
+          pid: 99999,
+          unref() {},
+          kill() {
+            killedUnackedChild = true;
+          },
+        };
+      },
       sleepSyncFn: () => {},
     });
     assert.equal(hookTimeout.install(), true);
@@ -309,6 +340,9 @@ test('TC-V29-03: Layer-1 Module._load hook fails open verbatim on ACK timeout / 
     assert.deepEqual(calls[0], { isSilent: true, isForceRunAfter: true });
     assert.equal(hookTimeout.getStatus().lastHandoff.failOpen, true);
     assert.equal(hookTimeout.getStatus().lastHandoff.reason, 'ERR_RECONCILE_ACK_TIMEOUT');
+    assert.equal(killedUnackedChild, true, 'Timed-out helper must be cancelled/killed');
+    assert.equal(fs.existsSync(`${timedOutAckPath}.cancel`), true, 'Cancel sentinel must be written on ACK timeout');
+    try { fs.unlinkSync(`${timedOutAckPath}.cancel`); } catch (_e) {}
     hookTimeout.dispose();
 
     // Case B: Helper emits READY:<pid> ACK -> suppresses isForceRunAfter = false
@@ -344,6 +378,97 @@ test('TC-V29-03: Layer-1 Module._load hook fails open verbatim on ACK timeout / 
     assert.ok(spawnedArgs.includes('--handoff'));
     assert.ok(spawnedArgs.includes('--relaunch'));
     hookAck.dispose();
+
+    // Case C (F1): Pre-cached updater module in Module._cache is wrapped during install() and restored on dispose()
+    const cachedCalls = [];
+    const origCachedFn = function (isSilent, isForceRunAfter) {
+      cachedCalls.push({ isSilent, isForceRunAfter });
+    };
+    const preCachedMod = {
+      exports: { autoUpdater: { quitAndInstall: origCachedFn } },
+    };
+    const fakeModuleApiWithCache = {
+      _cache: {
+        '/app/resources/app.asar/node_modules/electron-updater/out/main.js': preCachedMod,
+      },
+      _load() {
+        return null;
+      },
+    };
+    const hookCached = createUpdateSurvivalHook({
+      updateSurvival: {
+        updaterModule: 'electron-updater',
+        method: 'quitAndInstall',
+        platforms: [process.platform],
+        ackTimeoutMs: 100,
+        waitTimeoutMs: 5000,
+      },
+      hostDataDir,
+      platform: process.platform,
+      moduleApi: fakeModuleApiWithCache,
+      spawnFn: (_bin, args) => {
+        const ackIdx = args.indexOf('--ack-file');
+        if (ackIdx !== -1 && args[ackIdx + 1]) {
+          fs.writeFileSync(args[ackIdx + 1], 'READY:7777\n');
+        }
+        return { pid: 7777, unref() {} };
+      },
+      sleepSyncFn: () => {},
+    });
+    assert.equal(hookCached.install(), true);
+    preCachedMod.exports.autoUpdater.quitAndInstall(true, true);
+    assert.deepEqual(cachedCalls[0], { isSilent: true, isForceRunAfter: false });
+    hookCached.dispose();
+    assert.equal(preCachedMod.exports.autoUpdater.quitAndInstall, origCachedFn);
+
+    // Case D (F3): Async/sync EventEmitter 'error' on spawn must fail open without uncaughtException
+    const errCalls = [];
+    const errUpdater = {
+      autoUpdater: {
+        quitAndInstall(isSilent, isForceRunAfter) {
+          errCalls.push({ isSilent, isForceRunAfter });
+        },
+      },
+    };
+    let caseDAckPath = null;
+    const hookSpawnErr = createUpdateSurvivalHook({
+      updateSurvival: {
+        updaterModule: 'electron-updater',
+        method: 'quitAndInstall',
+        platforms: [process.platform],
+        ackTimeoutMs: 50,
+        waitTimeoutMs: 5000,
+      },
+      hostDataDir,
+      platform: process.platform,
+      moduleApi: { _cache: { 'electron-updater': { exports: errUpdater } }, _load: () => errUpdater },
+      spawnFn: (_bin, args) => {
+        const ee = new EventEmitter();
+        ee.unref = () => {};
+        const ackIdx = args.indexOf('--ack-file');
+        caseDAckPath = ackIdx !== -1 ? args[ackIdx + 1] : null;
+        // Emit error on next tick (proving listener is attached so no uncaughtException)
+        setImmediate(() => ee.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })));
+        return ee;
+      },
+      sleepSyncFn: () => {},
+    });
+    assert.equal(hookSpawnErr.install(), true);
+    errUpdater.autoUpdater.quitAndInstall(true, true);
+    assert.deepEqual(errCalls[0], { isSilent: true, isForceRunAfter: true });
+    assert.equal(hookSpawnErr.getStatus().lastHandoff.failOpen, true);
+    if (caseDAckPath) {
+      try { fs.unlinkSync(`${caseDAckPath}.cancel`); } catch (_e) {}
+    }
+    hookSpawnErr.dispose();
+
+    // F3: spawnAppDetached attaches error listener so EventEmitter 'error' does not throw uncaughtException
+    const detachedMock = new EventEmitter();
+    detachedMock.pid = 8888;
+    detachedMock.unref = () => {};
+    const detachedRes = spawnAppDetached(appExe, () => detachedMock);
+    assert.equal(detachedRes.launched, true);
+    assert.doesNotThrow(() => detachedMock.emit('error', new Error('ENOENT')));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -427,6 +552,102 @@ test('TC-V29-04: Detached handoff reconciler emits startup ACK and UNCONDITIONAL
     assert.equal(second.action, 'SKIPPED');
     assert.equal(second.reason, 'CIRCUIT_BREAKER_TRIPPED');
     assert.equal(installCalls, 1);
+
+    // F2: Cancelled handoff (.cancel sentinel present) MUST NOT reconcile or relaunch (zero double-relaunch)
+    const cancelAckFile = path.join(tmp, 'cancelled-ack.tmp');
+    fs.writeFileSync(`${cancelAckFile}.cancel`, 'CANCEL\n');
+    let cancelledReconcileCalls = 0;
+    let cancelledRelaunchCalls = 0;
+    const cancelRes = await runDetachedHandoffReconcile(ctx, fakeLifecycle, {
+      ackFilePath: cancelAckFile,
+      relaunch: true,
+      waitTimeoutMs: 200,
+      pollIntervalMs: 5,
+      isPidAliveFn: () => false,
+      sleepFn: async () => {},
+      spawnFn: () => {
+        cancelledRelaunchCalls += 1;
+        return { pid: 6666, unref() {} };
+      },
+      reconcileFn: () => {
+        cancelledReconcileCalls += 1;
+        return { ok: true };
+      },
+    });
+    assert.equal(cancelRes.cancelled, true);
+    assert.equal(cancelledReconcileCalls, 0);
+    assert.equal(cancelledRelaunchCalls, 0);
+    assert.equal(fs.existsSync(`${cancelAckFile}.cancel`), false);
+
+    // F4: ASAR wait loop memoizes unchanged signature (only checks once per distinct size:mtimeMs)
+    const dummyAsar = path.join(tmp, 'dummy.asar');
+    fs.writeFileSync(dummyAsar, 'unchanged-bytes');
+    let verifyCalls = 0;
+    let pollTicks = 0;
+    const waitCtx = {
+      paths: {
+        ...ctx.paths,
+        ASAR_PATH: dummyAsar,
+      },
+    };
+    await runDetachedHandoffReconcile(waitCtx, fakeLifecycle, {
+      relaunch: false,
+      waitTimeoutMs: 60,
+      pollIntervalMs: 5,
+      isPidAliveFn: () => false,
+      sleepFn: async () => {
+        pollTicks += 1;
+        await new Promise((r) => setTimeout(r, 6));
+      },
+      verifyAsarFn: () => {
+        verifyCalls += 1;
+        return { ok: false, reason: 'WAITING_FOR_UNPATCHED_ASAR' };
+      },
+      reconcileFn: () => ({ ok: true, action: 'SKIPPED' }),
+    });
+    assert.ok(pollTicks >= 3, `Expected multiple poll ticks, got ${pollTicks}`);
+    assert.equal(verifyCalls, 1, 'Unchanged ASAR signature must only be read/hashed once');
+
+    // F4(a): verifyAsarReadyForPatch rejects an already-patched real ASAR even when prevBundleSha is null
+    const asarSrcDir = path.join(tmp, 'asar-src');
+    fs.mkdirSync(asarSrcDir, { recursive: true });
+    fs.writeFileSync(path.join(asarSrcDir, 'package.json'), JSON.stringify({ name: 'test-app', version: '2.35.2' }));
+    fs.writeFileSync(path.join(asarSrcDir, 'main.js'), 'console.log("ok");\n');
+    const realAsarPath = path.join(tmp, 'real-test.asar');
+    await asar.createPackage(asarSrcDir, realAsarPath);
+    const patchedCheck = verifyAsarReadyForPatch(realAsarPath, null, {
+      ctx,
+      lifecyclePort: { diagnoseHost: () => ({ hostInstalled: true }) },
+    });
+    assert.equal(patchedCheck.ok, false);
+    assert.equal(patchedCheck.reason, 'WAITING_FOR_UNPATCHED_ASAR');
+    const unpatchedCheck = verifyAsarReadyForPatch(realAsarPath, null, {
+      ctx,
+      lifecyclePort: { diagnoseHost: () => ({ hostInstalled: false }) },
+    });
+    assert.equal(unpatchedCheck.ok, true);
+
+    // F9: launchHostWithReconcile still launches target app even if reconcile throws
+    let launchedAfterError = 0;
+    const launchRes = launchHostWithReconcile(
+      ctx,
+      {
+        diagnoseHost() {
+          throw new Error('DIAG_CRASH');
+        },
+      },
+      {
+        hostVersion: '2.9.0',
+        platform: 'win32',
+        spawnFn: () => {
+          launchedAfterError += 1;
+          return { pid: 7778, unref() {} };
+        },
+      }
+    );
+    assert.equal(launchRes.ok, true);
+    assert.equal(launchRes.reconcile.ok, false);
+    assert.equal(launchedAfterError, 1);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -440,6 +661,7 @@ test('TC-V29-05: Remote Web Phase-0 security fixes — CONNECT_HOST_RE bans loca
   ]);
   for (const badHost of [
     'localhost',
+    'localhost.localdomain',
     '127.0.0.1',
     '169.254.169.254',
     '10.0.0.1',
@@ -448,10 +670,14 @@ test('TC-V29-05: Remote Web Phase-0 security fixes — CONNECT_HOST_RE bans loca
     'foo.local',
     'db.internal',
     'sub.localhost',
+    'corp.intranet',
     '*',
     '*.example.com',
     'antigravity.google.com',
+    'sub.antigravity.google.com',
     'accounts.google.com',
+    'sub.accounts.google.com',
+    `${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.${'d'.repeat(60)}.${'e'.repeat(20)}.com`,
   ]) {
     assert.throws(() => normalizeConnectHosts([badHost]), /ERR_(INVALID|FORBIDDEN)_CONNECT_HOST/, `Should reject ${badHost}`);
   }
@@ -510,7 +736,7 @@ test('TC-V29-05: Remote Web Phase-0 security fixes — CONNECT_HOST_RE bans loca
     fs.writeFileSync(hostLibFile, '// host lib\n');
     const hostLibSha = crypto.createHash('sha256').update(fs.readFileSync(hostLibFile)).digest('hex');
 
-    // Without trustPolicyPath -> fail-closed: hasSettingsBridge MUST be false
+    // Without trustPolicyPath -> fail-closed: trustLevel MUST downgrade to restricted & hasSettingsBridge MUST be false (F5)
     const unpinned = buildAddonUserscript({
       manifestPath,
       pluginDir,
@@ -522,7 +748,9 @@ test('TC-V29-05: Remote Web Phase-0 security fixes — CONNECT_HOST_RE bans loca
     assert.ok(unpinned.buildManifest.hostLibUrl.endsWith(`#sha256=${hostLibSha}`));
     const unpinnedJs = fs.readFileSync(unpinned.userscriptPath, 'utf8');
     assert.ok(unpinnedJs.includes(`#sha256=${hostLibSha}`));
+    assert.ok(unpinnedJs.includes('"trustLevel":"restricted"'));
     assert.ok(unpinnedJs.includes('"hasSettingsBridge":false'));
+    assert.ok(unpinnedJs.includes('"hasDocumentTransformSlot":false'));
 
     // With mismatched trust-policy.json -> throws ERR_ADDON_TRUST_NOT_APPROVED
     const badPolicyPath = path.join(tmp, 'bad-trust.json');
@@ -567,6 +795,7 @@ test('TC-V29-05: Remote Web Phase-0 security fixes — CONNECT_HOST_RE bans loca
     assert.equal(pinned.buildManifest.trustPinned, true);
     assert.equal(pinned.buildManifest.hasSettingsBridge, true);
     const pinnedJs = fs.readFileSync(pinned.userscriptPath, 'utf8');
+    assert.ok(pinnedJs.includes('"trustLevel":"trusted"'));
     assert.ok(pinnedJs.includes('"hasSettingsBridge":true'));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -637,7 +866,14 @@ test('TC-V29-06: Remote Web drawer click handlers ignore synthetic untrusted cli
     querySelector: (s) => html.querySelector(s),
     querySelectorAll: (s) => html.querySelectorAll(s),
   };
-  const win = { location: new URL('https://antigravity.google.com/workspace'), document: doc, addEventListener() {}, removeEventListener() {} };
+  const winListeners = new Map();
+  const win = {
+    location: new URL('https://antigravity.google.com/workspace'),
+    document: doc,
+    addEventListener(t, fn) { if (!winListeners.has(t)) winListeners.set(t, new Set()); winListeners.get(t).add(fn); },
+    removeEventListener(t, fn) { if (winListeners.has(t)) winListeners.get(t).delete(fn); },
+    dispatchEvent(ev) { const s = winListeners.get(ev.type); if (s) for (const fn of s) fn(ev); return true; },
+  };
 
   let actionCalls = 0;
   let tabCalls = 0;
@@ -676,6 +912,15 @@ test('TC-V29-06: Remote Web drawer click handlers ignore synthetic untrusted cli
   assert.equal(panel.hasAttribute('hidden'), true);
 
   // Trusted user click opens drawer
+  pill.dispatchEvent({ type: 'click', isTrusted: true });
+  assert.equal(panel.hasAttribute('hidden'), false);
+
+  // F8: Synthetic untrusted Escape keydown MUST NOT close drawer; trusted Escape closes it
+  win.dispatchEvent({ type: 'keydown', key: 'Escape', isTrusted: false });
+  assert.equal(panel.hasAttribute('hidden'), false);
+  win.dispatchEvent({ type: 'keydown', key: 'Escape', isTrusted: true });
+  assert.equal(panel.hasAttribute('hidden'), true);
+  // Re-open with trusted click for subsequent assertions
   pill.dispatchEvent({ type: 'click', isTrusted: true });
   assert.equal(panel.hasAttribute('hidden'), false);
 
