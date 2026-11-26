@@ -174,9 +174,12 @@ const REMOTE_WEB_UI_GRID_MERGES = Object.freeze([
 
 const REMOTE_WEB_UI_SECTION_TARGETS = Object.freeze({
   'customizations.mcp-servers.header': Object.freeze({
-    rootSelectors: Object.freeze(['[data-testid="customizations-view"]']),
+    excludeAncestorSelectors: Object.freeze([
+      '[data-testid="conversation-view"]',
+      '[data-testid="conversation-list-sidebar"]',
+    ]),
     headingTexts: Object.freeze(['MCP Servers', 'MCP 서버']),
-    insertPosition: 'before-first-child',
+    requireSiblingActions: true,
   }),
 });
 

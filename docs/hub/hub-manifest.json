@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "hostVersion": "3.3.0",
+  "hostVersion": "3.3.1",
   "releaseBaseUrl": "https://github.com/jaeseongs95/extenra/releases/latest/download",
   "safariRequiresCuratedBundle": true,
   "channels": {
