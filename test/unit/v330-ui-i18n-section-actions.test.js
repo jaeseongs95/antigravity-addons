@@ -8,6 +8,7 @@ const { createSchemaUiController } = require('../../src/runtime/renderer/ui-sche
 const { createThemeAndI18n, HOST_LOCALE_STORAGE_KEY } = require('../../src/runtime/renderer/theme-i18n');
 const { createHostSettingsUi } = require('../../src/runtime/renderer/host-settings-ui');
 const { createRendererKernel } = require('../../src/runtime/renderer/kernel');
+const { createSectionActionRegistry } = require('../../src/runtime/renderer/section-action-registry');
 const { bootRemoteWebHost } = require('../../src/adapters/remote-web/remote-bootstrap');
 const { ANTIGRAVITY_HOST_PROFILE } = require('../../src/profiles/antigravity');
 const { ANTIGRAVITY_REMOTE_WEB_PROFILE, toBrowserRemoteWebProfile } = require('../../src/profiles/antigravity-remote-web');
@@ -633,4 +634,211 @@ test('TC-V332-HEADER-LOCALE-06: Settings Page header renders host [한국어|EN]
 
   remoteHost.disposePlugin('statusbar-remote');
   kernel.disposePlugin('statusbar-test', token);
+});
+
+test('TC-V335-SEC-07: section-action-registry avoids 30ms MutationObserver self-recreation loop, preserves button identity/clicks across updates & reordering, and remounts after SPA teardown', async () => {
+  const host = createTestHost({
+    surface: 'desktop',
+    uiSectionTargets: ANTIGRAVITY_HOST_PROFILE.uiSectionTargets,
+  });
+  const { doc, win } = host;
+
+  const observers = [];
+  let observerDeliveries = 0;
+  function notifyObservers(target, addedNodes, removedNodes) {
+    const rec = { type: 'childList', target, addedNodes, removedNodes };
+    for (const obs of observers) {
+      if (!obs.active) continue;
+      if (obs.root === target || (typeof obs.root.contains === 'function' && obs.root.contains(target))) {
+        obs.queue.push(rec);
+        if (!obs.scheduled) {
+          obs.scheduled = true;
+          queueMicrotask(() => {
+            obs.scheduled = false;
+            if (!obs.active || obs.queue.length === 0) return;
+            const batch = obs.queue.splice(0, obs.queue.length);
+            observerDeliveries += 1;
+            obs.cb(batch, obs);
+          });
+        }
+      }
+    }
+  }
+  const origCreate = doc.createElement.bind(doc);
+  let buttonCreateCount = 0;
+  function instrumentNode(node) {
+    if (node.__instrumented) return node;
+    node.__instrumented = true;
+    const origAppend = node.appendChild.bind(node);
+    const origRemove = node.removeChild.bind(node);
+    const origInsert = node.insertBefore.bind(node);
+    node.appendChild = (child) => {
+      const r = origAppend(child);
+      notifyObservers(node, [child], []);
+      return r;
+    };
+    node.removeChild = (child) => {
+      const r = origRemove(child);
+      notifyObservers(node, [], [child]);
+      return r;
+    };
+    node.insertBefore = (child, ref) => {
+      const r = origInsert(child, ref);
+      notifyObservers(node, [child], []);
+      return r;
+    };
+    return node;
+  }
+  instrumentNode(doc.body);
+  instrumentNode(doc.head);
+  doc.createElement = (tag) => {
+    const el = instrumentNode(origCreate(tag));
+    if (String(tag).toLowerCase() === 'button') buttonCreateCount += 1;
+    return el;
+  };
+  win.MutationObserver = class RealLikeMO {
+    constructor(cb) {
+      this.cb = cb;
+      this.active = false;
+      this.root = null;
+      this.queue = [];
+      this.scheduled = false;
+      observers.push(this);
+    }
+    observe(root) {
+      this.root = root;
+      this.active = true;
+    }
+    disconnect() {
+      this.active = false;
+      this.queue.length = 0;
+    }
+    takeRecords() {
+      return this.queue.splice(0, this.queue.length);
+    }
+  };
+
+  function buildMcpHeader() {
+    const page = doc.createElement('div');
+    const headerRow = doc.createElement('div');
+    const heading = doc.createElement('h2');
+    heading.textContent = 'MCP 서버';
+    const rightActions = doc.createElement('div');
+    const nativeBtn = doc.createElement('button');
+    nativeBtn.textContent = '설정';
+    rightActions.appendChild(nativeBtn);
+    headerRow.appendChild(heading);
+    headerRow.appendChild(rightActions);
+    page.appendChild(headerRow);
+    doc.body.appendChild(page);
+    return { page, rightActions };
+  }
+
+  const firstView = buildMcpHeader();
+  buttonCreateCount = 0;
+  let clickCount = 0;
+
+  const reg = createSectionActionRegistry(doc, win, {
+    uiSectionTargets: ANTIGRAVITY_HOST_PROFILE.uiSectionTargets,
+  });
+  const handle1 = reg.registerSectionAction('antigravity-mcp-manager', {
+    id: 'manage-mcp',
+    target: 'customizations.mcp-servers.header',
+    label: 'MCP 매니저',
+    onClick: () => {
+      clickCount += 1;
+    },
+  });
+
+  const initialBtn = firstView.rightActions.querySelector(
+    '[data-addon-host-section-action-btn="antigravity-mcp-manager:manage-mcp"]'
+  );
+  assert.ok(initialBtn);
+  assert.equal(buttonCreateCount, 1);
+
+  // Trigger 1 unrelated external DOM mutation and verify button survives mousedown->50ms->mouseup without loop
+  const unrelated = doc.createElement('span');
+  doc.body.appendChild(unrelated);
+
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(Boolean(initialBtn.parentNode), true);
+  initialBtn.click({ isTrusted: true });
+  assert.equal(clickCount, 1);
+
+  await new Promise((r) => setTimeout(r, 100));
+  const afterWaitBtn = firstView.rightActions.querySelector(
+    '[data-addon-host-section-action-btn="antigravity-mcp-manager:manage-mcp"]'
+  );
+  assert.equal(afterWaitBtn, initialBtn);
+  assert.equal(buttonCreateCount, 1);
+  assert.equal(observerDeliveries, 1);
+
+  // Self-owned mutation records (inside grp or styleEl) must be ignored without scheduling a sync
+  const grpEl = firstView.rightActions.querySelector('[data-addon-host-section-actions="customizations.mcp-servers.header"]');
+  const styleEl = doc.head.querySelector('style[data-addon-host-section-action-style="1"]');
+  assert.ok(grpEl);
+  assert.ok(styleEl);
+  observers[0].cb([{ type: 'childList', target: grpEl }, { type: 'childList', target: styleEl }], observers[0]);
+  observers[0].cb([null], observers[0]);
+  await new Promise((r) => setTimeout(r, 45));
+  assert.equal(buttonCreateCount, 1);
+
+  // In-place update (add/change/remove icon, tooltip, badge, label) must keep the exact same button element
+  const findSpan = (btn, cls) => Array.from(btn.childNodes).find((c) => c.className === cls) || null;
+  handle1.update({ icon: '⚙', tooltip: 'Open MCP', badge: '3', label: 'MCP 관리' });
+  assert.equal(initialBtn.getAttribute('title'), 'Open MCP');
+  assert.equal(findSpan(initialBtn, 'ag-sec-act-icon').textContent, '⚙');
+  assert.equal(findSpan(initialBtn, 'ag-sec-act-label').textContent, 'MCP 관리');
+  assert.equal(findSpan(initialBtn, 'ag-sec-act-badge').textContent, '3');
+  assert.equal(buttonCreateCount, 1);
+
+  handle1.update({ icon: '★', tooltip: 'Manage MCP', badge: '5', label: 'MCP 관리' });
+  assert.equal(initialBtn.getAttribute('title'), 'Manage MCP');
+  assert.equal(findSpan(initialBtn, 'ag-sec-act-icon').textContent, '★');
+  assert.equal(findSpan(initialBtn, 'ag-sec-act-badge').textContent, '5');
+
+  handle1.update({ icon: '', tooltip: '', badge: null });
+  assert.equal(initialBtn.getAttribute('title'), null);
+  assert.equal(findSpan(initialBtn, 'ag-sec-act-icon'), null);
+  assert.equal(findSpan(initialBtn, 'ag-sec-act-badge'), null);
+  assert.equal(buttonCreateCount, 1);
+
+  // Adding, reordering, and removing a second button must keep surviving button node intact
+  const handle2 = reg.registerSectionAction('antigravity-mcp-manager', {
+    id: 'refresh-mcp',
+    target: 'customizations.mcp-servers.header',
+    label: '새로고침',
+    order: 200,
+    onClick: () => {},
+  });
+  assert.equal(buttonCreateCount, 2);
+  assert.equal(grpEl.childNodes.length, 2);
+  assert.equal(grpEl.childNodes[0], initialBtn);
+  const secondBtn = grpEl.childNodes[1];
+
+  handle2.update({ order: 1 });
+  assert.equal(grpEl.childNodes[0], secondBtn);
+  assert.equal(grpEl.childNodes[1], initialBtn);
+  assert.equal(buttonCreateCount, 2);
+
+  handle2.dispose();
+  assert.equal(grpEl.childNodes.length, 1);
+  assert.equal(grpEl.childNodes[0], initialBtn);
+
+  // SPA teardown -> mounted becomes false; SPA re-render -> observer re-mounts same button and clicks keep working
+  doc.body.removeChild(firstView.page);
+  await new Promise((r) => setTimeout(r, 45));
+  assert.equal(reg.listSectionActions()[0].mounted, false);
+
+  const secondView = buildMcpHeader();
+  await new Promise((r) => setTimeout(r, 45));
+  assert.equal(reg.listSectionActions()[0].mounted, true);
+  const remountedBtn = secondView.rightActions.querySelector(
+    '[data-addon-host-section-action-btn="antigravity-mcp-manager:manage-mcp"]'
+  );
+  assert.equal(remountedBtn, initialBtn);
+  remountedBtn.click({ isTrusted: true });
+  assert.equal(clickCount, 2);
+
+  reg.dispose();
 });

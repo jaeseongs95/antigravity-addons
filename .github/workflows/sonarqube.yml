@@ -1,0 +1,58 @@
+name: SonarQube
+
+on:
+  push:
+    branches: ['develop']
+  workflow_dispatch:
+
+concurrency:
+  group: sonarqube-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sonarqube:
+    name: SonarQube Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pre-download Electron binary
+        run: node -e "require('electron')"
+
+      - name: Build runtime and remote bundles
+        run: npm run build:runtime && npm run build:remote -- --no-addons
+
+      - name: Run tests with LCOV coverage
+        run: xvfb-run -a npm run test:coverage
+
+      - name: Read package version
+        id: pkg
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Extenra SonarQube
+        uses: SonarSource/sonarqube-scan-action@v8.5.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=extenra
+            -Dsonar.projectVersion=${{ steps.pkg.outputs.version }}
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
+            -Dsonar.verbose=false
+            -Dsonar.log.level=INFO
