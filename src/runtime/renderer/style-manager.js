@@ -35,7 +35,7 @@ function preprocessCssInput(css) {
   return String(css || '')
     .replace(/\r\n/g, '\n')
     .replace(/[\r\f]/g, '\n')
-    .replace(/\u0000/g, '\uFFFD');
+    .replaceAll('\0', '\uFFFD');
 }
 
 function stripCssComments(css, replacement = ' ') {
@@ -82,7 +82,7 @@ function decodeCssEscapesRaw(s) {
   return preprocessCssInput(s)
     .replace(/\\\n/g, '')
     .replace(/\\([0-9a-fA-F]{1,6})[ \t\n]?/g, (_m, hex) => {
-      const cp = parseInt(hex, 16);
+      const cp = Number.parseInt(hex, 16);
       if (!Number.isFinite(cp) || cp <= 0 || cp > 0x10ffff) return '';
       try {
         return String.fromCodePoint(cp);
@@ -139,7 +139,7 @@ function decodeIdentEscapesForUrlCheck(css) {
     if (ch === '\\') {
       const hexMatch = s.slice(i + 1).match(/^([0-9a-fA-F]{1,6})[ \t\n]?/);
       if (hexMatch) {
-        const cp = parseInt(hexMatch[1], 16);
+        const cp = Number.parseInt(hexMatch[1], 16);
         const decodedCh = Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
         if (/^[a-zA-Z0-9_-]$/.test(decodedCh)) {
           out += decodedCh;
@@ -276,7 +276,7 @@ function hasDangerousUnquotedEscape(cssText) {
     if (ch === '\\') {
       const hexMatch = s.slice(i + 1).match(/^([0-9a-fA-F]{1,6})[ \t\n]?/);
       if (hexMatch) {
-        const cp = parseInt(hexMatch[1], 16);
+        const cp = Number.parseInt(hexMatch[1], 16);
         if (!Number.isFinite(cp) || cp <= 0x20 || cp === 0x7f || cp > 0x10ffff) return true;
         const decodedCh = String.fromCodePoint(cp);
         if (DANGEROUS_UNQUOTED_ESCAPED_CHARS.has(decodedCh)) return true;
@@ -296,35 +296,40 @@ function hasInvalidUnquotedUrlToken(str) {
   const s = preprocessCssInput(str);
   let quote = null;
   let inComment = false;
-  for (let i = 0; i < s.length; i++) {
+  let i = 0;
+  while (i < s.length) {
     const ch = s[i];
     const next = s[i + 1];
     if (inComment) {
       if (ch === '*' && next === '/') {
         inComment = false;
-        i++;
+        i += 2;
+      } else {
+        i += 1;
       }
       continue;
     }
     if (quote) {
       if (ch === '\\') {
-        i++;
+        i += 2;
         continue;
       }
       if (ch === quote) quote = null;
+      i += 1;
       continue;
     }
     if (ch === '\\') {
-      i++;
+      i += 2;
       continue;
     }
     if (ch === '/' && next === '*') {
       inComment = true;
-      i++;
+      i += 2;
       continue;
     }
     if (ch === '"' || ch === "'") {
       quote = ch;
+      i += 1;
       continue;
     }
     if (
@@ -336,7 +341,7 @@ function hasInvalidUnquotedUrlToken(str) {
       while (k < s.length && /\s/.test(s[k])) k++;
       if (k >= s.length) return true;
       if (s[k] === '"' || s[k] === "'") {
-        i += 3;
+        i += 4;
         continue;
       }
       // F4: W3C CSS Syntax L3 §4.3.6 unquoted <url-token> — reject any <bad-url-token> / quote / brace desync chars
@@ -372,8 +377,10 @@ function hasInvalidUnquotedUrlToken(str) {
         }
       }
       if (!closed) return true;
-      i = k;
+      i = k + 1;
+      continue;
     }
+    i += 1;
   }
   return false;
 }
@@ -588,7 +595,7 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
   if (scope === 'owner') {
     // S-2: Reject backslash escapes inside @-rule identifiers (prevents @\media / @\6d edia scoping bypass)
     const strippedCollapsed = stripCssComments(normalized, '');
-    if (/@[^;{}\s"'()]*\\/.test(strippedSpace) || /@[^;{}\s"'()]*\\/.test(strippedCollapsed)) {
+    if (/@[^@;{}\s"'()]*\\/.test(strippedSpace) || /@[^@;{}\s"'()]*\\/.test(strippedCollapsed)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_AT_RULE' };
     }
     // Enforce strict lowercased @-rule allowlist (rejects @scope, @property, @starting-style, @font-face, @container, etc.)
@@ -603,7 +610,7 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SELECTOR' };
     }
     if (
-      /(?:&[^;{}]*[+~]|:\s*has\s*\()/i.test(decoded) ||
+      /(?:&[^&;{}]*[+~]|:\s*has\s*\()/i.test(decoded) ||
       hasForbiddenOwnerNesting(strippedSpace) ||
       hasForbiddenOwnerNesting(decoded)
     ) {

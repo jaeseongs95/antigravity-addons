@@ -333,7 +333,7 @@ function startRemoteLanServer({
         res.on('finish', () => {
           if (!onceTimer && !closed) {
             onceTimer = setTimeout(() => {
-              close('once_completed');
+              void close('once_completed');
             }, 150);
           }
         });
@@ -385,7 +385,7 @@ function startRemoteLanServer({
       const qrAscii = renderQrAscii(userscriptUrl, { quietZone: 2 });
 
       ttlTimer = setTimeout(() => {
-        close('ttl_expired');
+        void close('ttl_expired');
       }, effectiveTtlSec * 1000);
 
       resolve(

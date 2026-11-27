@@ -21,7 +21,7 @@ const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
 const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
 const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
 
-const _RGB_COLOR_RE = /^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)$/i;
+const _RGB_COLOR_RE = /^rgba?\(\s*([0-9.]+)(?:\s*,\s*|\s+)([0-9.]+)(?:\s*,\s*|\s+)([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)$/i;
 const HOST_LOCALE_STORAGE_KEY = 'addon-host:settings-ui-lang';
 const _SAFE_LOCALE_RE = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i;
 

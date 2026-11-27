@@ -18,11 +18,13 @@
     "check:hub": "node scripts/build-hub.js --check",
     "check:solid": "node scripts/check-solid-zero.js",
     "test": "node --test \"test/unit/**/*.test.js\" \"test/e2e/electron-real-runtime.test.js\"",
+    "test:coverage": "node -e \"require('fs').mkdirSync('coverage',{recursive:true})\" && node --test --test-concurrency=4 --experimental-test-coverage --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \"test/unit/**/*.test.js\" \"test/e2e/electron-real-runtime.test.js\"",
     "test:e2e:remote": "node --test \"test/e2e/v23-remote-web-chromium.test.js\" \"test/e2e/v30-api-first-chromium.test.js\"",
     "test:e2e:isolated": "node scripts/e2e-isolated-runtime.cjs",
     "test:all": "npm run check:solid && npm run check:runtime && npm run check:remote && npm run check:hub && npm test && npm run test:e2e:remote && npm run test:e2e:isolated",
     "status": "node ./bin/addon-host.js --status",
-    "doctor": "node ./bin/addon-host.js --doctor"
+    "doctor": "node ./bin/addon-host.js --doctor",
+    "sonar": "sonar-scanner-npm"
   },
   "engines": {
     "node": ">=20.0.0"

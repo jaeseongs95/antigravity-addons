@@ -200,7 +200,7 @@ function createSecretsVault({
       const entryKeys = Object.keys(entries || {});
       if (entryKeys.length === 0) continue;
       plainPlugins[pid] = {};
-      for (const k of entryKeys.sort()) {
+      for (const k of entryKeys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
         plainPlugins[pid][k] = entries[k];
       }
     }
@@ -381,7 +381,7 @@ function createSecretsVault({
     const loaded = readVaultFile();
     if (!loaded.ok) return { ok: false, keys: [], reason: loaded.reason };
     const bucket = loaded.data.plugins[b.pluginId];
-    const keys = bucket ? Object.keys(bucket).sort() : [];
+    const keys = bucket ? Object.keys(bucket).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) : [];
     return { ok: true, keys, persistence: isAvailable() ? 'os-encrypted' : 'unavailable', reason: null };
   }
 

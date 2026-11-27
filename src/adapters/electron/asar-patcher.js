@@ -320,6 +320,19 @@ function findSafeStandaloneCommentRanges(sourceText) {
   return ranges;
 }
 
+function isSafeStandaloneAsciiComment(lineText) {
+  let idx = 0;
+  while (idx < lineText.length && (lineText[idx] === ' ' || lineText[idx] === '\t')) {
+    idx += 1;
+  }
+  if (lineText[idx] !== '/' || lineText[idx + 1] !== '/') return false;
+  idx += 2;
+  while (idx < lineText.length && (lineText[idx] === ' ' || lineText[idx] === '\t')) {
+    idx += 1;
+  }
+  return /^[A-Za-z0-9#*\-_=.,:;()[\]{}@/'" ]*$/.test(lineText.slice(idx));
+}
+
 function transformExactSize(origBuf, targetStr, replacementStr, marker) {
   const origText = origBuf.toString('utf8');
   const firstIdx = origText.indexOf(targetStr);
@@ -335,7 +348,7 @@ function transformExactSize(origBuf, targetStr, replacementStr, marker) {
     for (const r of safeRanges) {
       if (delta <= 0) break;
       if (marker && r.text.includes(marker)) continue;
-      if (!/^[ \t]*\/\/[ \t]*[A-Za-z0-9#*\-_=.,:;()[\]{}@/'" ]*$/.test(r.text)) continue;
+      if (!isSafeStandaloneAsciiComment(r.text)) continue;
       const sliceBytes = Buffer.byteLength(nextText.slice(r.lineStart, r.lineEnd), 'utf8');
       if (sliceBytes <= 0) continue;
       toRemove.push(r);
@@ -445,7 +458,7 @@ function findCandidateBackup(paths, safeVer, currentSha256, { preferPatchedMatch
 
   if (fs.existsSync(backupsDir)) {
     const prefix = `app.asar.v${safeVer}.`;
-    for (const name of fs.readdirSync(backupsDir).sort()) {
+    for (const name of fs.readdirSync(backupsDir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
       if (!name.startsWith(prefix) || !name.endsWith('.orig')) continue;
       const bp = path.join(backupsDir, name);
       if (candidates.some((c) => path.resolve(c.backupPath) === path.resolve(bp))) continue;

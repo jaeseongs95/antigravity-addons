@@ -239,7 +239,7 @@ function buildDistRuntime(targetDistDir, sourceGenDir) {
   }
   hashWalk(targetDistDir);
 
-  const sortedKeys = Object.keys(fileHashes).sort();
+  const sortedKeys = Object.keys(fileHashes).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const rootHasher = crypto.createHash('sha256');
   for (const k of sortedKeys) {
     rootHasher.update(k + '\0' + fileHashes[k] + '\n', 'utf8');
@@ -358,8 +358,8 @@ function snapshotDirHashes(rootDir) {
 function compareTrees(label, expectedDir, actualDir) {
   const exp = snapshotDirHashes(expectedDir);
   const act = snapshotDirHashes(actualDir);
-  const expKeys = Object.keys(exp).sort();
-  const actKeys = Object.keys(act).sort();
+  const expKeys = Object.keys(exp).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const actKeys = Object.keys(act).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const diffs = [];
   for (const k of expKeys) {
     if (!Object.prototype.hasOwnProperty.call(act, k)) diffs.push(`${label}: MISSING ${k}`);

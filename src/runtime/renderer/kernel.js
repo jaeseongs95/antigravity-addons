@@ -76,7 +76,6 @@ const _StringTrim = Function.prototype.call.bind(String.prototype.trim);
 const _ArrayJoin = Function.prototype.call.bind(Array.prototype.join);
 const _MathRound = Math.round;
 const _DateNow = Date.now;
-const _MathRandom = Math.random;
 const _JSONStringify = JSON.stringify;
 const _PromiseResolve = Promise.resolve.bind(Promise);
 const _PromiseReject = Promise.reject.bind(Promise);
@@ -266,23 +265,21 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
   function generateRunNonce() {
     nonceSeq += 1;
-    try {
-      const getRandom =
-        _CryptoGetRandomValues ||
-        (win && win.crypto && typeof win.crypto.getRandomValues === 'function'
-          ? (arr) => win.crypto.getRandomValues(arr)
-          : null);
-      if (getRandom) {
-        const bytes = new _Uint8Array(16);
-        getRandom(bytes);
-        let hex = '';
-        for (let i = 0; i < 16; i++) {
-          hex += _StringPadStart(_NumberToString(bytes[i], 16), 2, '0');
-        }
-        return `rn-${nonceSeq}-${hex}`;
-      }
-    } catch (_e) {}
-    return `rn-${nonceSeq}-${_NumberToString(_DateNow(), 36)}-${_StringSlice(_NumberToString(_MathRandom(), 36), 2)}-${_StringSlice(_NumberToString(_MathRandom(), 36), 2)}`;
+    const getRandom =
+      _CryptoGetRandomValues ||
+      (win && win.crypto && typeof win.crypto.getRandomValues === 'function'
+        ? (arr) => win.crypto.getRandomValues(arr)
+        : null);
+    if (!getRandom) {
+      throw new _Error('ERR_WEBCRYPTO_UNAVAILABLE');
+    }
+    const bytes = new _Uint8Array(16);
+    getRandom(bytes);
+    let hex = '';
+    for (let i = 0; i < 16; i++) {
+      hex += _StringPadStart(_NumberToString(bytes[i], 16), 2, '0');
+    }
+    return `rn-${nonceSeq}-${hex}`;
   }
 
   function assertHostToken(providedToken) {

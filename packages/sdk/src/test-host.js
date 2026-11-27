@@ -385,7 +385,7 @@ function createTestHost({
       const binding = secretsBindings.get(pid);
       if (!binding) return Promise.resolve({ ok: false, keys: [], reason: 'ERR_SECRETS_NOT_DECLARED' });
       const bucket = getSecretBucket(pid, false);
-      return Promise.resolve({ ok: true, keys: bucket ? Array.from(bucket.keys()).sort() : [], persistence: defaultPersistence, reason: null });
+      return Promise.resolve({ ok: true, keys: bucket ? Array.from(bucket.keys()).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) : [], persistence: defaultPersistence, reason: null });
     },
     netFetch: (pluginId, url, init) => {
       const safeInit = init && typeof init === 'object' ? { ...init } : {};

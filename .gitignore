@@ -1,5 +1,8 @@
 node_modules/
 dist/remote/
+.scannerwork/
+coverage/
+sonar-project.local.properties
 *.log
 .DS_Store
 Thumbs.db

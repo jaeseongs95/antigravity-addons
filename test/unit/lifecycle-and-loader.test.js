@@ -141,6 +141,7 @@ function createFakeDomEnv({ url = 'http://127.0.0.1:4173/home', anchors = {} } =
   const parsed = new URL(url);
   const win = {
     document: doc,
+    crypto: globalThis.crypto,
     location: { protocol: parsed.protocol, host: parsed.host, origin: parsed.origin },
     addEventListener(ev, fn) {
       if (!winListeners[ev]) winListeners[ev] = [];
@@ -158,6 +159,7 @@ function createFakeDomEnv({ url = 'http://127.0.0.1:4173/home', anchors = {} } =
     window: win,
     globalThis: win,
     document: doc,
+    crypto: globalThis.crypto,
     setTimeout,
     clearTimeout,
     Promise,
