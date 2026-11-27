@@ -4544,6 +4544,49 @@ const SCHEMA_UI_CSS = `
   flex: 0 0 auto;
 }
 .ag-ui-header-meta { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ag-ui-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.ag-ui-lang-switch {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--ag-border-strong, rgba(255, 255, 255, 0.14));
+  background: var(--ag-surface-elevated, rgba(255, 255, 255, 0.04));
+  gap: 2px;
+  flex-shrink: 0;
+}
+.ag-ui-lang-btn {
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ag-text-muted, #94a3b8);
+  font-size: 11.5px;
+  font-weight: 500;
+  font-family: inherit;
+  padding: 4px 8px;
+  cursor: pointer;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.ag-ui-lang-btn:hover {
+  color: var(--ag-text, #f1f5f9);
+}
+.ag-ui-lang-btn[aria-pressed="true"] {
+  background: var(--ag-primary, #2563eb);
+  color: var(--ag-primary-fg, #ffffff);
+  font-weight: 600;
+}
+.ag-ui-lang-btn:focus-visible {
+  outline: 2px solid var(--ag-focus-ring, rgba(59, 130, 246, 0.32));
+  outline-offset: 1px;
+}
 .ag-ui-title {
   font-weight: 600;
   font-size: 14.5px;
@@ -5585,12 +5628,89 @@ function createSchemaUiController(doc, containerEl, {
   });
 }
 
+function normalizeHeaderLang(locale) {
+  return String(locale || '').trim().toLowerCase().startsWith('ko') ? 'ko' : 'en';
+}
+
+function createHeaderLocaleSwitch(doc, themeAndI18n) {
+  const group = doc.createElement('div');
+  group.className = 'ag-ui-lang-switch';
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', 'Language');
+  group.setAttribute('data-addon-host-control', 'locale-switch');
+
+  const defs = [
+    { code: 'ko', label: '한국어' },
+    { code: 'en', label: 'EN' },
+  ];
+  const buttons = [];
+  const sync = (nextLocale) => {
+    const active = normalizeHeaderLang(
+      nextLocale !== undefined
+        ? nextLocale
+        : themeAndI18n && typeof themeAndI18n.getLocale === 'function'
+          ? themeAndI18n.getLocale()
+          : 'en'
+    );
+    for (let i = 0; i < buttons.length; i += 1) {
+      const entry = buttons[i];
+      entry.btn.setAttribute('aria-pressed', active === entry.code ? 'true' : 'false');
+    }
+  };
+
+  for (let i = 0; i < defs.length; i += 1) {
+    const def = defs[i];
+    const btn = doc.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ag-ui-lang-btn';
+    btn.setAttribute('data-addon-host-lang', def.code);
+    btn.textContent = def.label;
+    btn.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
+      if (themeAndI18n && typeof themeAndI18n.setLocale === 'function') {
+        themeAndI18n.setLocale(def.code);
+      }
+      sync(def.code);
+    });
+    buttons.push({ code: def.code, btn });
+    group.appendChild(btn);
+  }
+
+  sync();
+
+  let unsub = null;
+  if (themeAndI18n && typeof themeAndI18n.onLocaleDidChange === 'function') {
+    try {
+      unsub = themeAndI18n.onLocaleDidChange((nextLocale) => {
+        sync(nextLocale);
+      });
+    } catch (_e) {
+      unsub = null;
+    }
+  }
+
+  return Object.freeze({
+    element: group,
+    sync,
+    dispose() {
+      if (typeof unsub === 'function') {
+        try {
+          unsub();
+        } catch (_e) {}
+        unsub = null;
+      }
+    },
+  });
+}
+
 function buildOverlayChrome(doc, shadowRoot, {
   title,
   displayName,
   tokenCss,
   closable = true,
   onClose,
+  showLocaleSwitch = false,
+  themeAndI18n = null,
 }) {
   const styleEl = doc.createElement('style');
   styleEl.textContent = `${tokenCss || ''}\n${SCHEMA_UI_CSS}`;
@@ -5605,8 +5725,9 @@ function buildOverlayChrome(doc, shadowRoot, {
   const meta = doc.createElement('div');
   meta.className = 'ag-ui-header-meta';
 
+  let titleEl = null;
   if (title) {
-    const titleEl = doc.createElement('div');
+    titleEl = doc.createElement('div');
     titleEl.className = 'ag-ui-title';
     titleEl.textContent = String(title);
     meta.appendChild(titleEl);
@@ -5620,6 +5741,14 @@ function buildOverlayChrome(doc, shadowRoot, {
   meta.appendChild(badge);
   header.appendChild(meta);
 
+  let localeSwitch = null;
+  const actionsWrap = doc.createElement('div');
+  actionsWrap.className = 'ag-ui-header-actions';
+  if (showLocaleSwitch && themeAndI18n && typeof themeAndI18n.setLocale === 'function') {
+    localeSwitch = createHeaderLocaleSwitch(doc, themeAndI18n);
+    actionsWrap.appendChild(localeSwitch.element);
+  }
+
   if (closable) {
     const closeBtn = doc.createElement('button');
     closeBtn.type = 'button';
@@ -5630,7 +5759,11 @@ function buildOverlayChrome(doc, shadowRoot, {
       if (ev && ev.isTrusted === false) return;
       if (typeof onClose === 'function') onClose();
     });
-    header.appendChild(closeBtn);
+    actionsWrap.appendChild(closeBtn);
+  }
+
+  if (actionsWrap.childNodes && actionsWrap.childNodes.length > 0) {
+    header.appendChild(actionsWrap);
   }
 
   const body = doc.createElement('div');
@@ -5640,12 +5773,36 @@ function buildOverlayChrome(doc, shadowRoot, {
   shell.appendChild(body);
   shadowRoot.appendChild(shell);
 
-  return { shell, header, body, badge };
+  const setTitle = (nextTitle) => {
+    const text = String(nextTitle || '');
+    if (!titleEl && text) {
+      titleEl = doc.createElement('div');
+      titleEl.className = 'ag-ui-title';
+      if (typeof meta.insertBefore === 'function') {
+        meta.insertBefore(titleEl, badge);
+      } else {
+        meta.appendChild(titleEl);
+      }
+    }
+    if (titleEl) {
+      titleEl.textContent = text;
+    }
+  };
+
+  const disposeChrome = () => {
+    if (localeSwitch && typeof localeSwitch.dispose === 'function') {
+      localeSwitch.dispose();
+      localeSwitch = null;
+    }
+  };
+
+  return { shell, header, body, badge, titleEl, setTitle, disposeChrome };
 }
 
 module.exports = {
   SCHEMA_UI_CSS,
   createSchemaUiController,
+  createHeaderLocaleSwitch,
   buildOverlayChrome,
 };
 
@@ -8153,7 +8310,16 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     }
     const pageId = spec.id.trim();
     const key = `${pluginMeta.pluginId}:${pageId}`;
-    const title = String(spec.title || spec.label || pageId);
+    const resolveTitle = () => {
+      if (typeof spec.getTitle === 'function') {
+        try {
+          const dynamic = spec.getTitle();
+          if (typeof dynamic === 'string' && dynamic.trim()) return dynamic.trim();
+        } catch (_e) {}
+      }
+      return String(spec.title || spec.label || pageId);
+    };
+    const showLocaleSwitch = spec.showLocaleSwitch !== false;
     const hasSchema = Boolean((spec.schema && typeof spec.schema === 'object') || typeof spec.getSchema === 'function');
     const hasRender = typeof spec.render === 'function';
     if (!hasSchema && !hasRender) {
@@ -8162,6 +8328,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
 
     const openPage = () => {
       closeActiveHandle();
+      const liveTitle = resolveTitle();
 
       let openedHandle = null;
       const onClosed = () => {
@@ -8176,7 +8343,8 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
           pluginMeta,
           pageId,
           key,
-          title,
+          title: liveTitle,
+          showLocaleSwitch,
           kind: hasSchema ? 'schema' : 'canvas',
           spec,
           onClosed,
@@ -8190,7 +8358,9 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
 
       if (hasSchema && typeof openTier2Modal === 'function') {
         openedHandle = openTier2Modal(pluginMeta, {
-          title,
+          title: liveTitle,
+          getTitle: typeof spec.getTitle === 'function' ? resolveTitle : null,
+          showLocaleSwitch,
           placement: { zone: 'surface-center', width: spec.width || 560 },
           tree: typeof spec.getSchema === 'function' ? spec.getSchema() : spec.schema,
           state: typeof spec.getState === 'function' ? spec.getState() : spec.state || {},
@@ -8209,7 +8379,9 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       }
       if (hasRender && typeof openTier3Modal === 'function') {
         openedHandle = openTier3Modal(pluginMeta, {
-          title,
+          title: liveTitle,
+          getTitle: typeof spec.getTitle === 'function' ? resolveTitle : null,
+          showLocaleSwitch,
           placement: { zone: 'surface-center', width: spec.width || 560 },
           onClose: () => {
             onClosed();
@@ -8231,7 +8403,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     let tabHandle = null;
     if (settingsTabs && typeof settingsTabs.registerSettingsTab === 'function') {
       tabHandle = settingsTabs.registerSettingsTab(pluginMeta.pluginId, pageId, {
-        label: title,
+        label: resolveTitle(),
         onSelect: () => openPage(),
       });
     }
@@ -8240,7 +8412,8 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       key,
       pluginId: pluginMeta.pluginId,
       id: pageId,
-      title,
+      resolveTitle,
+      showLocaleSwitch,
       order: Number.isFinite(Number(spec.order)) ? Number(spec.order) : 100,
       kind: hasSchema ? 'schema' : 'canvas',
       openPage,
@@ -8281,9 +8454,10 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
         Object.freeze({
           pluginId: r.pluginId,
           id: r.id,
-          title: r.title,
+          title: typeof r.resolveTitle === 'function' ? r.resolveTitle() : r.title,
           order: r.order,
           kind: r.kind,
+          showLocaleSwitch: r.showLocaleSwitch !== false,
         })
       );
   }
@@ -8650,6 +8824,8 @@ function createAddonContextV3({
     let tracker = null;
     let outsideCleanup = null;
     let escCleanup = null;
+    let chromeCleanup = null;
+    let titleLocaleCleanup = null;
     v3OverlaySeq += 1;
     const claimId = `v3:${pluginId}:${kind}:${v3OverlaySeq}`;
     const notifyPortalClaim = (active) => {
@@ -8666,6 +8842,18 @@ function createAddonContextV3({
       _SetDelete(activeOverlays, close);
       removeFromEscapeStack(close);
       notifyPortalClaim(false);
+      if (titleLocaleCleanup) {
+        try {
+          titleLocaleCleanup();
+        } catch (_e) {}
+        titleLocaleCleanup = null;
+      }
+      if (chromeCleanup) {
+        try {
+          chromeCleanup();
+        } catch (_e) {}
+        chromeCleanup = null;
+      }
       if (tracker) {
         tracker.dispose();
         tracker = null;
@@ -8699,13 +8887,30 @@ function createAddonContextV3({
     };
 
     const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
-    const { body, badge } = buildOverlayChrome(doc, sr, {
-      title: opts.title || '',
+    const resolvedTitle =
+      typeof opts.getTitle === 'function' ? String(opts.getTitle() || opts.title || '') : opts.title || '';
+    const { body, badge, setTitle, disposeChrome } = buildOverlayChrome(doc, sr, {
+      title: resolvedTitle,
       displayName,
       tokenCss,
       closable: opts.closable !== false,
       onClose: close,
+      showLocaleSwitch: opts.showLocaleSwitch === true,
+      themeAndI18n,
     });
+    chromeCleanup = disposeChrome;
+    if (typeof opts.getTitle === 'function' && themeAndI18n && typeof themeAndI18n.onLocaleDidChange === 'function') {
+      try {
+        titleLocaleCleanup = themeAndI18n.onLocaleDidChange(() => {
+          if (closed) return;
+          try {
+            setTitle(String(opts.getTitle() || opts.title || ''));
+          } catch (_e) {}
+        });
+      } catch (_e) {
+        titleLocaleCleanup = null;
+      }
+    }
 
     let schemaController = null;
     if (opts.tree && typeof opts.tree === 'object') {
@@ -8792,6 +8997,9 @@ function createAddonContextV3({
         }
         schemaController.update(nextTree, nextState);
         if (tracker) tracker.reposition();
+      },
+      setTitle(nextTitle) {
+        if (!closed && typeof setTitle === 'function') setTitle(nextTitle);
       },
       getState: () => (schemaController ? schemaController.getState() : null),
       getElementById: (nodeId) => (schemaController ? schemaController.getElementById(nodeId) : null),
@@ -9498,7 +9706,7 @@ module.exports = {
  * - Coexists cleanly with native Settings tabs and peer plugin tabs (e.g. MCP Manager).
  */
 
-const { SCHEMA_UI_CSS, createSchemaUiController } = require('./ui-schema-renderer');
+const { SCHEMA_UI_CSS, createSchemaUiController, createHeaderLocaleSwitch } = require('./ui-schema-renderer');
 
 const NAV_ATTR = 'data-addon-host-admin-nav';
 const PLUGIN_NAV_ATTR = 'data-addon-host-plugin-settings-nav';
@@ -10399,9 +10607,16 @@ const INLINE_PLUGIN_PANE_CSS = `
   border-bottom: 1px solid var(--ag-border, rgba(255, 255, 255, 0.1));
 }
 .ag-inline-header--compact {
-  justify-content: flex-start;
+  justify-content: space-between;
   padding-bottom: 6px;
   border-bottom: none;
+}
+.ag-inline-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 .ag-inline-title {
   margin: 0;
@@ -11828,7 +12043,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     return Boolean(!disposed && mountedContentPane && mountedContentPane.isConnected);
   }
 
-  function mountInlinePage({ pluginMeta, pageId, key, title, kind, spec, onClosed }) {
+  function mountInlinePage({ pluginMeta, pageId, key, title, kind, spec, showLocaleSwitch = true, onClosed }) {
     if (!canMountInline()) return null;
 
     closePanel({ restoreNative: false });
@@ -11865,12 +12080,22 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const isCanvas = kind === 'canvas';
     const pageWrap = createEl('div', isCanvas ? 'ag-inline-page ag-inline-page--canvas' : 'ag-inline-page');
     const header = createEl('div', isCanvas ? 'ag-inline-header ag-inline-header--compact' : 'ag-inline-header');
+    let titleEl = null;
     if (!isCanvas) {
-      header.appendChild(createEl('h2', 'ag-inline-title', title));
+      titleEl = createEl('h2', 'ag-inline-title', title);
+      header.appendChild(titleEl);
     }
+    const headerActions = createEl('div', 'ag-inline-header-actions');
     const badge = createEl('span', 'ag-ui-attribution', `Addon: ${String(pluginMeta.displayName || pluginMeta.pluginId)}`);
     badge.setAttribute('data-addon-host-attribution', '1');
-    header.appendChild(badge);
+    headerActions.appendChild(badge);
+
+    let localeSwitch = null;
+    if (showLocaleSwitch !== false && themeAndI18n && typeof themeAndI18n.setLocale === 'function') {
+      localeSwitch = createHeaderLocaleSwitch(doc, themeAndI18n);
+      headerActions.appendChild(localeSwitch.element);
+    }
+    header.appendChild(headerActions);
     pageWrap.appendChild(header);
 
     const bodyEl = createEl('div', 'ag-inline-body');
@@ -11879,9 +12104,38 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
     let closed = false;
     let schemaController = null;
+    let unsubTitleLocale = null;
+    if (titleEl && spec && typeof spec.getTitle === 'function' && themeAndI18n && typeof themeAndI18n.onLocaleDidChange === 'function') {
+      try {
+        unsubTitleLocale = themeAndI18n.onLocaleDidChange(() => {
+          if (closed || !titleEl) return;
+          try {
+            const nextTitle = spec.getTitle();
+            if (typeof nextTitle === 'string' && nextTitle.trim()) {
+              titleEl.textContent = nextTitle.trim();
+            }
+          } catch (_e) {}
+        });
+      } catch (_e) {
+        unsubTitleLocale = null;
+      }
+    }
+
     const notifyClosedOnce = () => {
       if (closed) return;
       closed = true;
+      if (typeof unsubTitleLocale === 'function') {
+        try {
+          unsubTitleLocale();
+        } catch (_e) {}
+        unsubTitleLocale = null;
+      }
+      if (localeSwitch && typeof localeSwitch.dispose === 'function') {
+        try {
+          localeSwitch.dispose();
+        } catch (_e) {}
+        localeSwitch = null;
+      }
       if (typeof onClosed === 'function') {
         try {
           onClosed();
@@ -11904,6 +12158,11 @@ function createHostSettingsUi(doc, win, opts = {}) {
       update(nextTree, nextState) {
         if (closed || !schemaController) return;
         schemaController.update(nextTree, nextState);
+      },
+      setTitle(nextTitle) {
+        if (!closed && titleEl && typeof nextTitle === 'string') {
+          titleEl.textContent = nextTitle;
+        }
       },
       getState: () => (schemaController ? schemaController.getState() : null),
       getElementById: (nodeId) => (schemaController ? schemaController.getElementById(nodeId) : null),
@@ -12279,6 +12538,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         if (navElement && navElement.isConnected) {
           replaceLeafText(navElement, getNavLabel(norm), doc);
         }
+        syncPluginNavItems();
         if (isOpen) renderPanel();
       });
     }

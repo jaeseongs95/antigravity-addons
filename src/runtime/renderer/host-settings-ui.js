@@ -11,7 +11,7 @@
  * - Coexists cleanly with native Settings tabs and peer plugin tabs (e.g. MCP Manager).
  */
 
-const { SCHEMA_UI_CSS, createSchemaUiController } = require('./ui-schema-renderer');
+const { SCHEMA_UI_CSS, createSchemaUiController, createHeaderLocaleSwitch } = require('./ui-schema-renderer');
 
 const NAV_ATTR = 'data-addon-host-admin-nav';
 const PLUGIN_NAV_ATTR = 'data-addon-host-plugin-settings-nav';
@@ -912,9 +912,16 @@ const INLINE_PLUGIN_PANE_CSS = `
   border-bottom: 1px solid var(--ag-border, rgba(255, 255, 255, 0.1));
 }
 .ag-inline-header--compact {
-  justify-content: flex-start;
+  justify-content: space-between;
   padding-bottom: 6px;
   border-bottom: none;
+}
+.ag-inline-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 .ag-inline-title {
   margin: 0;
@@ -2341,7 +2348,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     return Boolean(!disposed && mountedContentPane && mountedContentPane.isConnected);
   }
 
-  function mountInlinePage({ pluginMeta, pageId, key, title, kind, spec, onClosed }) {
+  function mountInlinePage({ pluginMeta, pageId, key, title, kind, spec, showLocaleSwitch = true, onClosed }) {
     if (!canMountInline()) return null;
 
     closePanel({ restoreNative: false });
@@ -2378,12 +2385,22 @@ function createHostSettingsUi(doc, win, opts = {}) {
     const isCanvas = kind === 'canvas';
     const pageWrap = createEl('div', isCanvas ? 'ag-inline-page ag-inline-page--canvas' : 'ag-inline-page');
     const header = createEl('div', isCanvas ? 'ag-inline-header ag-inline-header--compact' : 'ag-inline-header');
+    let titleEl = null;
     if (!isCanvas) {
-      header.appendChild(createEl('h2', 'ag-inline-title', title));
+      titleEl = createEl('h2', 'ag-inline-title', title);
+      header.appendChild(titleEl);
     }
+    const headerActions = createEl('div', 'ag-inline-header-actions');
     const badge = createEl('span', 'ag-ui-attribution', `Addon: ${String(pluginMeta.displayName || pluginMeta.pluginId)}`);
     badge.setAttribute('data-addon-host-attribution', '1');
-    header.appendChild(badge);
+    headerActions.appendChild(badge);
+
+    let localeSwitch = null;
+    if (showLocaleSwitch !== false && themeAndI18n && typeof themeAndI18n.setLocale === 'function') {
+      localeSwitch = createHeaderLocaleSwitch(doc, themeAndI18n);
+      headerActions.appendChild(localeSwitch.element);
+    }
+    header.appendChild(headerActions);
     pageWrap.appendChild(header);
 
     const bodyEl = createEl('div', 'ag-inline-body');
@@ -2392,9 +2409,38 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
     let closed = false;
     let schemaController = null;
+    let unsubTitleLocale = null;
+    if (titleEl && spec && typeof spec.getTitle === 'function' && themeAndI18n && typeof themeAndI18n.onLocaleDidChange === 'function') {
+      try {
+        unsubTitleLocale = themeAndI18n.onLocaleDidChange(() => {
+          if (closed || !titleEl) return;
+          try {
+            const nextTitle = spec.getTitle();
+            if (typeof nextTitle === 'string' && nextTitle.trim()) {
+              titleEl.textContent = nextTitle.trim();
+            }
+          } catch (_e) {}
+        });
+      } catch (_e) {
+        unsubTitleLocale = null;
+      }
+    }
+
     const notifyClosedOnce = () => {
       if (closed) return;
       closed = true;
+      if (typeof unsubTitleLocale === 'function') {
+        try {
+          unsubTitleLocale();
+        } catch (_e) {}
+        unsubTitleLocale = null;
+      }
+      if (localeSwitch && typeof localeSwitch.dispose === 'function') {
+        try {
+          localeSwitch.dispose();
+        } catch (_e) {}
+        localeSwitch = null;
+      }
       if (typeof onClosed === 'function') {
         try {
           onClosed();
@@ -2417,6 +2463,11 @@ function createHostSettingsUi(doc, win, opts = {}) {
       update(nextTree, nextState) {
         if (closed || !schemaController) return;
         schemaController.update(nextTree, nextState);
+      },
+      setTitle(nextTitle) {
+        if (!closed && titleEl && typeof nextTitle === 'string') {
+          titleEl.textContent = nextTitle;
+        }
       },
       getState: () => (schemaController ? schemaController.getState() : null),
       getElementById: (nodeId) => (schemaController ? schemaController.getElementById(nodeId) : null),
@@ -2792,6 +2843,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         if (navElement && navElement.isConnected) {
           replaceLeafText(navElement, getNavLabel(norm), doc);
         }
+        syncPluginNavItems();
         if (isOpen) renderPanel();
       });
     }

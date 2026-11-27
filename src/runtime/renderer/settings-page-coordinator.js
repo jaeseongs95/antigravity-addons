@@ -55,7 +55,16 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     }
     const pageId = spec.id.trim();
     const key = `${pluginMeta.pluginId}:${pageId}`;
-    const title = String(spec.title || spec.label || pageId);
+    const resolveTitle = () => {
+      if (typeof spec.getTitle === 'function') {
+        try {
+          const dynamic = spec.getTitle();
+          if (typeof dynamic === 'string' && dynamic.trim()) return dynamic.trim();
+        } catch (_e) {}
+      }
+      return String(spec.title || spec.label || pageId);
+    };
+    const showLocaleSwitch = spec.showLocaleSwitch !== false;
     const hasSchema = Boolean((spec.schema && typeof spec.schema === 'object') || typeof spec.getSchema === 'function');
     const hasRender = typeof spec.render === 'function';
     if (!hasSchema && !hasRender) {
@@ -64,6 +73,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
 
     const openPage = () => {
       closeActiveHandle();
+      const liveTitle = resolveTitle();
 
       let openedHandle = null;
       const onClosed = () => {
@@ -78,7 +88,8 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
           pluginMeta,
           pageId,
           key,
-          title,
+          title: liveTitle,
+          showLocaleSwitch,
           kind: hasSchema ? 'schema' : 'canvas',
           spec,
           onClosed,
@@ -92,7 +103,9 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
 
       if (hasSchema && typeof openTier2Modal === 'function') {
         openedHandle = openTier2Modal(pluginMeta, {
-          title,
+          title: liveTitle,
+          getTitle: typeof spec.getTitle === 'function' ? resolveTitle : null,
+          showLocaleSwitch,
           placement: { zone: 'surface-center', width: spec.width || 560 },
           tree: typeof spec.getSchema === 'function' ? spec.getSchema() : spec.schema,
           state: typeof spec.getState === 'function' ? spec.getState() : spec.state || {},
@@ -111,7 +124,9 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       }
       if (hasRender && typeof openTier3Modal === 'function') {
         openedHandle = openTier3Modal(pluginMeta, {
-          title,
+          title: liveTitle,
+          getTitle: typeof spec.getTitle === 'function' ? resolveTitle : null,
+          showLocaleSwitch,
           placement: { zone: 'surface-center', width: spec.width || 560 },
           onClose: () => {
             onClosed();
@@ -133,7 +148,7 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
     let tabHandle = null;
     if (settingsTabs && typeof settingsTabs.registerSettingsTab === 'function') {
       tabHandle = settingsTabs.registerSettingsTab(pluginMeta.pluginId, pageId, {
-        label: title,
+        label: resolveTitle(),
         onSelect: () => openPage(),
       });
     }
@@ -142,7 +157,8 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
       key,
       pluginId: pluginMeta.pluginId,
       id: pageId,
-      title,
+      resolveTitle,
+      showLocaleSwitch,
       order: Number.isFinite(Number(spec.order)) ? Number(spec.order) : 100,
       kind: hasSchema ? 'schema' : 'canvas',
       openPage,
@@ -183,9 +199,10 @@ function createSettingsPageCoordinator({ settingsTabs = null, openTier2Modal = n
         Object.freeze({
           pluginId: r.pluginId,
           id: r.id,
-          title: r.title,
+          title: typeof r.resolveTitle === 'function' ? r.resolveTitle() : r.title,
           order: r.order,
           kind: r.kind,
+          showLocaleSwitch: r.showLocaleSwitch !== false,
         })
       );
   }

@@ -466,3 +466,162 @@ test('TC-V331-SEC-05: Desktop host-loader serializes uiSectionTargets and sectio
   assert.equal(directRow.childNodes[2], settingsBtn);
   host2.disposePlugin('antigravity-mcp-manager');
 });
+
+test('TC-V332-HEADER-LOCALE-06: Settings Page header renders host [한국어|EN] switcher in Desktop inline & modal/Remote Web, syncs global locale + Addon Manager + getTitle, and honors showLocaleSwitch:false', async () => {
+  const baseHost = createTestHost({ locale: 'en' });
+  const { doc, win } = baseHost;
+  const storage = new Map();
+  win.localStorage = {
+    getItem: (k) => (storage.has(k) ? storage.get(k) : null),
+    setItem: (k, v) => storage.set(String(k), String(v)),
+    removeItem: (k) => storage.delete(String(k)),
+  };
+
+  // Build mock Desktop Settings container with real geometry so host-settings-ui mounts inline
+  const shell = doc.createElement('div');
+  shell.setMockRect({ left: 0, top: 0, width: 960, height: 640, right: 960, bottom: 640 });
+  const sidebarCol = doc.createElement('div');
+  sidebarCol.setMockRect({ left: 0, top: 0, width: 220, height: 640, right: 220, bottom: 640 });
+  const sidebar = doc.createElement('div');
+  sidebar.setMockRect({ left: 0, top: 0, width: 220, height: 400, right: 220, bottom: 400 });
+  for (const label of ['General', 'Application', 'Appearance', 'Shortcuts']) {
+    const btn = doc.createElement('button');
+    btn.setAttribute('type', 'button');
+    const sp = doc.createElement('span');
+    sp.appendChild(doc.createTextNode(label));
+    btn.appendChild(sp);
+    sidebar.appendChild(btn);
+  }
+  sidebarCol.appendChild(sidebar);
+  const contentPane = doc.createElement('div');
+  contentPane.setMockRect({ left: 220, top: 0, width: 740, height: 640, right: 960, bottom: 640 });
+  const nativePanel = doc.createElement('div');
+  nativePanel.textContent = 'Native General View';
+  contentPane.appendChild(nativePanel);
+  shell.appendChild(sidebarCol);
+  shell.appendChild(contentPane);
+  doc.body.appendChild(shell);
+  win.getComputedStyle = () => ({ display: 'flex', visibility: 'visible', opacity: '1', backgroundColor: 'transparent', color: '#cbd5e1' });
+
+  const kernel = createRendererKernel(doc, win);
+  const token = 'test-token-v332-header-locale';
+  kernel.boot({
+    docGenId: 1,
+    hostToken: token,
+    hostProfileId: 'antigravity-desktop',
+    surface: 'desktop',
+    settingsUi: { navId: 'addon-manager', navLabel: { en: 'Addon Manager', ko: '애드온 관리' } },
+    hostBridge: {
+      docGenId: 1,
+      profileId: 'antigravity-desktop',
+      setPortalClaim: () => ({ ok: true }),
+      saveSettings: async () => ({ ok: true }),
+      reportError: () => {},
+      ping: async () => ({ ok: true }),
+      getHostAdminState: async () => ({ ok: true, state: { host: { version: '3.3.2', buildSha8: 'testsha8' }, addons: [] } }),
+      setRemoteAddonPreference: async () => ({ ok: true }),
+    },
+  });
+
+  const seenLocales = [];
+  const ctx = kernel.createPluginHandle(
+    {
+      pluginId: 'statusbar-test',
+      displayName: 'Statusbar',
+      version: '3.5.0',
+      apiVersion: 3,
+      sourceSchemaVersion: 3,
+      trustLevel: 'trusted',
+      permissions: { ui: { settingsPages: true } },
+    },
+    token
+  );
+  ctx.i18n.onDidChange((loc) => seenLocales.push(loc));
+
+  const pageHandle = ctx.ui.registerSettingsPage({
+    id: 'main',
+    title: 'Statusbar Settings',
+    getTitle: () => (ctx.i18n.getLocale().startsWith('ko') ? '상태바 설정' : 'Statusbar Settings'),
+    getSchema: () => ({ type: 'text', id: 'body-txt', text: 'ok' }),
+  });
+
+  // 1. Desktop inline Settings Page mounts header-right [한국어|EN] switch by default
+  const inlineOpen = pageHandle.open();
+  assert.ok(inlineOpen);
+  assert.equal(inlineOpen.kind, 'inline-settings');
+  const sr = inlineOpen.element.shadowRoot;
+  assert.ok(sr);
+  const langGroup = sr.querySelector('[data-addon-host-control="locale-switch"]');
+  assert.ok(langGroup, 'Inline Settings header must render host locale switch by default');
+  const koBtn = sr.querySelector('[data-addon-host-lang="ko"]');
+  const enBtn = sr.querySelector('[data-addon-host-lang="en"]');
+  assert.ok(koBtn && enBtn);
+  assert.equal(enBtn.getAttribute('aria-pressed'), 'true');
+  assert.equal(sr.querySelector('h2').textContent, 'Statusbar Settings');
+
+  // Clicking [한국어] updates global host locale storage, fires ctx.i18n.onDidChange, and updates dynamic getTitle()
+  koBtn.click({ isTrusted: true });
+  assert.equal(storage.get(HOST_LOCALE_STORAGE_KEY), 'ko');
+  assert.equal(ctx.i18n.getLocale(), 'ko');
+  assert.deepEqual(seenLocales, ['ko']);
+  assert.equal(koBtn.getAttribute('aria-pressed'), 'true');
+  assert.equal(enBtn.getAttribute('aria-pressed'), 'false');
+  assert.equal(sr.querySelector('h2').textContent, '상태바 설정');
+
+  // Untrusted synthetic click is ignored
+  enBtn.click({ isTrusted: false });
+  assert.equal(ctx.i18n.getLocale(), 'ko');
+
+  // Closing inline page disposes header locale listeners cleanly
+  inlineOpen.close();
+
+  // 2. Opt-out: showLocaleSwitch: false omits switcher in inline header
+  const quietPage = ctx.ui.registerSettingsPage({
+    id: 'quiet',
+    title: 'Quiet Page',
+    showLocaleSwitch: false,
+    schema: { type: 'text', id: 'q-txt', text: 'quiet' },
+  });
+  const quietOpen = quietPage.open();
+  assert.equal(quietOpen.element.shadowRoot.querySelector('[data-addon-host-control="locale-switch"]'), null);
+  quietOpen.close();
+
+  // 3. Modal / Remote Web Settings Page (.ag-ui-header) also mounts [한국어|EN] switch and syncs global locale
+  const remoteHost = createTestHost({ surface: 'remote-web', locale: 'en' });
+  const remoteLocales = [];
+  let remotePage = null;
+  await remoteHost.mountPlugin(
+    {
+      schemaVersion: 3,
+      pluginId: 'statusbar-remote',
+      displayName: 'Statusbar',
+      version: '3.5.0',
+      capabilities: ['renderer'],
+      entry: { rendererScript: 'renderer.js' },
+      permissions: { ui: { settingsPages: true } },
+    },
+    (rCtx) => {
+      rCtx.i18n.onDidChange((loc) => remoteLocales.push(loc));
+      remotePage = rCtx.ui.registerSettingsPage({
+        id: 'main',
+        title: 'Statusbar Settings',
+        getTitle: () => (rCtx.i18n.getLocale().startsWith('ko') ? '상태바 설정' : 'Statusbar Settings'),
+        schema: { type: 'text', id: 'r-txt', text: 'remote' },
+      });
+    }
+  );
+  const modalHandle = remotePage.open();
+  assert.ok(modalHandle);
+  const modalSr = modalHandle.element.childNodes[0].shadowRoot;
+  const rKoBtn = modalSr.querySelector('[data-addon-host-lang="ko"]');
+  assert.ok(rKoBtn, 'Modal/Remote Web Settings Page header must render host locale switch by default');
+  rKoBtn.click({ isTrusted: true });
+  assert.deepEqual(remoteLocales, ['ko']);
+  const titleDiv = modalSr.querySelectorAll('div').find((d) => d.className === 'ag-ui-title');
+  assert.ok(titleDiv);
+  assert.equal(titleDiv.textContent, '상태바 설정');
+  modalHandle.close();
+
+  remoteHost.disposePlugin('statusbar-remote');
+  kernel.disposePlugin('statusbar-test', token);
+});

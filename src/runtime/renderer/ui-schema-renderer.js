@@ -58,6 +58,49 @@ const SCHEMA_UI_CSS = `
   flex: 0 0 auto;
 }
 .ag-ui-header-meta { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ag-ui-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.ag-ui-lang-switch {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--ag-border-strong, rgba(255, 255, 255, 0.14));
+  background: var(--ag-surface-elevated, rgba(255, 255, 255, 0.04));
+  gap: 2px;
+  flex-shrink: 0;
+}
+.ag-ui-lang-btn {
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ag-text-muted, #94a3b8);
+  font-size: 11.5px;
+  font-weight: 500;
+  font-family: inherit;
+  padding: 4px 8px;
+  cursor: pointer;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.ag-ui-lang-btn:hover {
+  color: var(--ag-text, #f1f5f9);
+}
+.ag-ui-lang-btn[aria-pressed="true"] {
+  background: var(--ag-primary, #2563eb);
+  color: var(--ag-primary-fg, #ffffff);
+  font-weight: 600;
+}
+.ag-ui-lang-btn:focus-visible {
+  outline: 2px solid var(--ag-focus-ring, rgba(59, 130, 246, 0.32));
+  outline-offset: 1px;
+}
 .ag-ui-title {
   font-weight: 600;
   font-size: 14.5px;
@@ -1099,12 +1142,89 @@ function createSchemaUiController(doc, containerEl, {
   });
 }
 
+function normalizeHeaderLang(locale) {
+  return String(locale || '').trim().toLowerCase().startsWith('ko') ? 'ko' : 'en';
+}
+
+function createHeaderLocaleSwitch(doc, themeAndI18n) {
+  const group = doc.createElement('div');
+  group.className = 'ag-ui-lang-switch';
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', 'Language');
+  group.setAttribute('data-addon-host-control', 'locale-switch');
+
+  const defs = [
+    { code: 'ko', label: '한국어' },
+    { code: 'en', label: 'EN' },
+  ];
+  const buttons = [];
+  const sync = (nextLocale) => {
+    const active = normalizeHeaderLang(
+      nextLocale !== undefined
+        ? nextLocale
+        : themeAndI18n && typeof themeAndI18n.getLocale === 'function'
+          ? themeAndI18n.getLocale()
+          : 'en'
+    );
+    for (let i = 0; i < buttons.length; i += 1) {
+      const entry = buttons[i];
+      entry.btn.setAttribute('aria-pressed', active === entry.code ? 'true' : 'false');
+    }
+  };
+
+  for (let i = 0; i < defs.length; i += 1) {
+    const def = defs[i];
+    const btn = doc.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ag-ui-lang-btn';
+    btn.setAttribute('data-addon-host-lang', def.code);
+    btn.textContent = def.label;
+    btn.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
+      if (themeAndI18n && typeof themeAndI18n.setLocale === 'function') {
+        themeAndI18n.setLocale(def.code);
+      }
+      sync(def.code);
+    });
+    buttons.push({ code: def.code, btn });
+    group.appendChild(btn);
+  }
+
+  sync();
+
+  let unsub = null;
+  if (themeAndI18n && typeof themeAndI18n.onLocaleDidChange === 'function') {
+    try {
+      unsub = themeAndI18n.onLocaleDidChange((nextLocale) => {
+        sync(nextLocale);
+      });
+    } catch (_e) {
+      unsub = null;
+    }
+  }
+
+  return Object.freeze({
+    element: group,
+    sync,
+    dispose() {
+      if (typeof unsub === 'function') {
+        try {
+          unsub();
+        } catch (_e) {}
+        unsub = null;
+      }
+    },
+  });
+}
+
 function buildOverlayChrome(doc, shadowRoot, {
   title,
   displayName,
   tokenCss,
   closable = true,
   onClose,
+  showLocaleSwitch = false,
+  themeAndI18n = null,
 }) {
   const styleEl = doc.createElement('style');
   styleEl.textContent = `${tokenCss || ''}\n${SCHEMA_UI_CSS}`;
@@ -1119,8 +1239,9 @@ function buildOverlayChrome(doc, shadowRoot, {
   const meta = doc.createElement('div');
   meta.className = 'ag-ui-header-meta';
 
+  let titleEl = null;
   if (title) {
-    const titleEl = doc.createElement('div');
+    titleEl = doc.createElement('div');
     titleEl.className = 'ag-ui-title';
     titleEl.textContent = String(title);
     meta.appendChild(titleEl);
@@ -1134,6 +1255,14 @@ function buildOverlayChrome(doc, shadowRoot, {
   meta.appendChild(badge);
   header.appendChild(meta);
 
+  let localeSwitch = null;
+  const actionsWrap = doc.createElement('div');
+  actionsWrap.className = 'ag-ui-header-actions';
+  if (showLocaleSwitch && themeAndI18n && typeof themeAndI18n.setLocale === 'function') {
+    localeSwitch = createHeaderLocaleSwitch(doc, themeAndI18n);
+    actionsWrap.appendChild(localeSwitch.element);
+  }
+
   if (closable) {
     const closeBtn = doc.createElement('button');
     closeBtn.type = 'button';
@@ -1144,7 +1273,11 @@ function buildOverlayChrome(doc, shadowRoot, {
       if (ev && ev.isTrusted === false) return;
       if (typeof onClose === 'function') onClose();
     });
-    header.appendChild(closeBtn);
+    actionsWrap.appendChild(closeBtn);
+  }
+
+  if (actionsWrap.childNodes && actionsWrap.childNodes.length > 0) {
+    header.appendChild(actionsWrap);
   }
 
   const body = doc.createElement('div');
@@ -1154,11 +1287,35 @@ function buildOverlayChrome(doc, shadowRoot, {
   shell.appendChild(body);
   shadowRoot.appendChild(shell);
 
-  return { shell, header, body, badge };
+  const setTitle = (nextTitle) => {
+    const text = String(nextTitle || '');
+    if (!titleEl && text) {
+      titleEl = doc.createElement('div');
+      titleEl.className = 'ag-ui-title';
+      if (typeof meta.insertBefore === 'function') {
+        meta.insertBefore(titleEl, badge);
+      } else {
+        meta.appendChild(titleEl);
+      }
+    }
+    if (titleEl) {
+      titleEl.textContent = text;
+    }
+  };
+
+  const disposeChrome = () => {
+    if (localeSwitch && typeof localeSwitch.dispose === 'function') {
+      localeSwitch.dispose();
+      localeSwitch = null;
+    }
+  };
+
+  return { shell, header, body, badge, titleEl, setTitle, disposeChrome };
 }
 
 module.exports = {
   SCHEMA_UI_CSS,
   createSchemaUiController,
+  createHeaderLocaleSwitch,
   buildOverlayChrome,
 };
