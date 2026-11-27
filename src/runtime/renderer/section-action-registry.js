@@ -16,6 +16,7 @@ const _ObjectKeys = Object.keys;
 const _ArrayIsArray = Array.isArray;
 const _ArrayFrom = Array.from;
 const _Map = Map;
+const _Set = Set;
 const _MapGet = Function.prototype.call.bind(Map.prototype.get);
 const _MapSet = Function.prototype.call.bind(Map.prototype.set);
 const _MapDelete = Function.prototype.call.bind(Map.prototype.delete);
@@ -369,6 +370,59 @@ function resolveTargetMountPoint(doc, targetConfig) {
   return null;
 }
 
+function syncOptionalSpan(doc, btn, currentEl, value, className, insertBeforeEl) {
+  if (value) {
+    if (!currentEl) {
+      const span = doc.createElement('span');
+      span.className = className;
+      if (insertBeforeEl) {
+        span.setAttribute('aria-hidden', 'true');
+        btn.insertBefore(span, insertBeforeEl);
+      } else {
+        btn.appendChild(span);
+      }
+      span.textContent = value;
+      return span;
+    }
+    if (currentEl.textContent !== value) currentEl.textContent = value;
+    return currentEl;
+  }
+  if (currentEl && currentEl.parentNode === btn) {
+    btn.removeChild(currentEl);
+  }
+  return null;
+}
+
+function isExactChildList(parent, expected) {
+  const current = _ArrayFrom(parent.childNodes || []);
+  if (current.length !== expected.length) return false;
+  for (let i = 0; i < expected.length; i += 1) {
+    if (current[i] !== expected[i]) return false;
+  }
+  return true;
+}
+
+function reconcileGroupChildren(grp, desiredButtons) {
+  if (isExactChildList(grp, desiredButtons)) return;
+  const desiredSet = new _Set(desiredButtons);
+  const existing = _ArrayFrom(grp.childNodes || []);
+  for (let i = 0; i < existing.length; i += 1) {
+    if (!desiredSet.has(existing[i])) {
+      grp.removeChild(existing[i]);
+    }
+  }
+  for (let i = 0; i < desiredButtons.length; i += 1) {
+    const expected = desiredButtons[i];
+    const currentAt = grp.childNodes[i];
+    if (currentAt === expected) continue;
+    if (currentAt && typeof grp.insertBefore === 'function') {
+      grp.insertBefore(expected, currentAt);
+    } else {
+      grp.appendChild(expected);
+    }
+  }
+}
+
 function createSectionActionRegistry(
   doc,
   win,
@@ -388,13 +442,13 @@ function createSectionActionRegistry(
     const mode = themeAndI18n && typeof themeAndI18n.getSnapshot === 'function' ? themeAndI18n.getSnapshot().mode : 'dark';
     const css = buildSectionActionCss(mode);
     if (styleEl && styleEl.isConnected !== false) {
-      styleEl.textContent = css;
+      if (styleEl.textContent !== css) styleEl.textContent = css;
       return;
     }
     const existing = typeof doc.querySelector === 'function' ? doc.querySelector(`style[${SECTION_STYLE_ATTR}="1"]`) : null;
     if (existing) {
       styleEl = existing;
-      styleEl.textContent = css;
+      if (styleEl.textContent !== css) styleEl.textContent = css;
       return;
     }
     const parent = doc.head || doc.documentElement || doc.body;
@@ -405,6 +459,34 @@ function createSectionActionRegistry(
     el.textContent = css;
     parent.appendChild(el);
     styleEl = el;
+  }
+
+  function isOwnedNode(node) {
+    if (!node) return false;
+    if (node === styleEl) return true;
+    for (const grp of _MapValues(mountedGroups)) {
+      if (node === grp || (typeof grp.contains === 'function' && grp.contains(node))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function isSelfOnlyMutations(mutations) {
+    if (!_ArrayIsArray(mutations) || mutations.length === 0) return false;
+    for (let i = 0; i < mutations.length; i += 1) {
+      const m = mutations[i];
+      if (!m || !isOwnedNode(m.target)) return false;
+    }
+    return true;
+  }
+
+  function drainObserverRecords() {
+    if (observer && typeof observer.takeRecords === 'function') {
+      try {
+        observer.takeRecords();
+      } catch (_e) {}
+    }
   }
 
   function disconnectObserver() {
@@ -425,8 +507,8 @@ function createSectionActionRegistry(
     const MO = (win && win.MutationObserver) || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
     const observeTarget = doc && (doc.body || doc.documentElement);
     if (!MO || !observeTarget) return;
-    observer = new MO(() => {
-      if (disposed || syncTimer) return;
+    observer = new MO((mutations) => {
+      if (disposed || syncTimer || isSelfOnlyMutations(mutations)) return;
       syncTimer = setTimeout(() => {
         syncTimer = null;
         if (!disposed) syncDomNow();
@@ -449,33 +531,35 @@ function createSectionActionRegistry(
     _MapDelete(mountedGroups, target);
   }
 
+  function syncButtonElement(rec) {
+    if (!rec.buttonEl) return buildButtonElement(rec);
+    const btn = rec.buttonEl;
+    const prevTitle = btn.getAttribute('title');
+    if (rec.tooltip) {
+      if (prevTitle !== rec.tooltip) btn.setAttribute('title', rec.tooltip);
+    } else if (prevTitle !== null) {
+      btn.removeAttribute('title');
+    }
+    rec.iconEl = syncOptionalSpan(doc, btn, rec.iconEl, rec.icon, 'ag-sec-act-icon', rec.labelEl);
+    if (rec.labelEl.textContent !== rec.label) {
+      rec.labelEl.textContent = rec.label;
+    }
+    rec.badgeEl = syncOptionalSpan(doc, btn, rec.badgeEl, rec.badge, 'ag-sec-act-badge', null);
+    return btn;
+  }
+
   function buildButtonElement(rec) {
     const btn = doc.createElement('button');
     btn.type = 'button';
     btn.setAttribute(SECTION_BTN_ATTR, `${rec.pluginId}:${rec.id}`);
     btn.setAttribute('data-addon-host-owner', rec.pluginId);
     btn.setAttribute('data-addon-host-section-target', rec.target);
-    if (rec.tooltip) btn.setAttribute('title', rec.tooltip);
     applyShieldAttrs(btn, extraNoTranslateAttributes);
 
-    if (rec.icon) {
-      const iconSpan = doc.createElement('span');
-      iconSpan.className = 'ag-sec-act-icon';
-      iconSpan.setAttribute('aria-hidden', 'true');
-      iconSpan.textContent = rec.icon;
-      btn.appendChild(iconSpan);
-    }
     const labelSpan = doc.createElement('span');
     labelSpan.className = 'ag-sec-act-label';
     labelSpan.textContent = rec.label;
     btn.appendChild(labelSpan);
-
-    if (rec.badge) {
-      const badgeSpan = doc.createElement('span');
-      badgeSpan.className = 'ag-sec-act-badge';
-      badgeSpan.textContent = rec.badge;
-      btn.appendChild(badgeSpan);
-    }
 
     btn.addEventListener('click', (ev) => {
       if (ev && ev.isTrusted === false) return;
@@ -489,7 +573,10 @@ function createSectionActionRegistry(
     });
 
     rec.buttonEl = btn;
-    return btn;
+    rec.labelEl = labelSpan;
+    rec.iconEl = null;
+    rec.badgeEl = null;
+    return syncButtonElement(rec);
   }
 
   function invokeRecord(rec, clickEv = {}) {
@@ -517,80 +604,83 @@ function createSectionActionRegistry(
   function syncDomNow() {
     if (disposed || !doc || typeof doc.createElement !== 'function') return;
 
-    // Group active items by target
-    const byTarget = new _Map();
-    for (const rec of _MapValues(items)) {
-      let arr = _MapGet(byTarget, rec.target);
-      if (!arr) {
-        arr = [];
-        _MapSet(byTarget, rec.target, arr);
-      }
-      arr.push(rec);
-    }
-
-    // Remove mounted groups whose targets no longer have items
-    for (const existingTarget of _ArrayFrom(mountedGroups.keys())) {
-      if (!byTarget.has(existingTarget)) {
-        removeGroupForTarget(existingTarget);
-      }
-    }
-
-    if (byTarget.size === 0) {
-      disconnectObserver();
-      return;
-    }
-
-    ensureStyle();
-
-    for (const [target, targetItems] of byTarget.entries()) {
-      const targetCfg = Object.prototype.hasOwnProperty.call(targetsConfig, target) ? targetsConfig[target] : null;
-      const mount = resolveTargetMountPoint(doc, targetCfg);
-      if (!mount || !mount.container) {
-        removeGroupForTarget(target);
-        continue;
-      }
-
-      targetItems.sort((a, b) => {
-        if (a.order !== b.order) return a.order - b.order;
-        return a.seq - b.seq;
-      });
-
-      let grp = _MapGet(mountedGroups, target);
-      if (!grp || grp.parentNode !== mount.container) {
-        if (grp && grp.parentNode && typeof grp.parentNode.removeChild === 'function') {
-          try {
-            grp.parentNode.removeChild(grp);
-          } catch (_e) {}
+    try {
+      // Group active items by target
+      const byTarget = new _Map();
+      for (const rec of _MapValues(items)) {
+        let arr = _MapGet(byTarget, rec.target);
+        if (!arr) {
+          arr = [];
+          _MapSet(byTarget, rec.target, arr);
         }
-        grp = doc.createElement('span');
-        grp.setAttribute(SECTION_GROUP_ATTR, target);
-        applyShieldAttrs(grp, extraNoTranslateAttributes);
+        arr.push(rec);
+      }
 
-        if (
-          mount.insertPosition === 'before-node' &&
-          mount.referenceNode &&
-          mount.referenceNode.parentNode === mount.container &&
-          typeof mount.container.insertBefore === 'function'
-        ) {
-          mount.container.insertBefore(grp, mount.referenceNode);
-        } else if (
-          (mount.insertPosition === 'before-first-child' || mount.insertPosition === 'prepend') &&
-          mount.container.firstChild &&
-          typeof mount.container.insertBefore === 'function'
-        ) {
-          mount.container.insertBefore(grp, mount.container.firstChild);
-        } else if (typeof mount.container.appendChild === 'function') {
-          mount.container.appendChild(grp);
+      // Remove mounted groups whose targets no longer have items
+      for (const existingTarget of _ArrayFrom(mountedGroups.keys())) {
+        if (!byTarget.has(existingTarget)) {
+          removeGroupForTarget(existingTarget);
         }
-        _MapSet(mountedGroups, target, grp);
       }
 
-      while (grp.firstChild) {
-        grp.removeChild(grp.firstChild);
+      if (byTarget.size === 0) {
+        disconnectObserver();
+        return;
       }
-      for (let i = 0; i < targetItems.length; i += 1) {
-        grp.appendChild(buildButtonElement(targetItems[i]));
+
+      ensureStyle();
+
+      for (const [target, targetItems] of byTarget.entries()) {
+        const targetCfg = Object.prototype.hasOwnProperty.call(targetsConfig, target) ? targetsConfig[target] : null;
+        const mount = resolveTargetMountPoint(doc, targetCfg);
+        if (!mount || !mount.container) {
+          removeGroupForTarget(target);
+          continue;
+        }
+
+        targetItems.sort((a, b) => {
+          if (a.order !== b.order) return a.order - b.order;
+          return a.seq - b.seq;
+        });
+
+        let grp = _MapGet(mountedGroups, target);
+        if (!grp || grp.parentNode !== mount.container) {
+          if (grp && grp.parentNode && typeof grp.parentNode.removeChild === 'function') {
+            try {
+              grp.parentNode.removeChild(grp);
+            } catch (_e) {}
+          }
+          grp = doc.createElement('span');
+          grp.setAttribute(SECTION_GROUP_ATTR, target);
+          applyShieldAttrs(grp, extraNoTranslateAttributes);
+
+          if (
+            mount.insertPosition === 'before-node' &&
+            mount.referenceNode &&
+            mount.referenceNode.parentNode === mount.container &&
+            typeof mount.container.insertBefore === 'function'
+          ) {
+            mount.container.insertBefore(grp, mount.referenceNode);
+          } else if (
+            (mount.insertPosition === 'before-first-child' || mount.insertPosition === 'prepend') &&
+            mount.container.firstChild &&
+            typeof mount.container.insertBefore === 'function'
+          ) {
+            mount.container.insertBefore(grp, mount.container.firstChild);
+          } else if (typeof mount.container.appendChild === 'function') {
+            mount.container.appendChild(grp);
+          }
+          _MapSet(mountedGroups, target, grp);
+        }
+
+        const desiredButtons = [];
+        for (let i = 0; i < targetItems.length; i += 1) {
+          desiredButtons.push(syncButtonElement(targetItems[i]));
+        }
+        reconcileGroupChildren(grp, desiredButtons);
       }
+    } finally {
+      drainObserverRecords();
     }
   }
 
@@ -639,6 +729,9 @@ function createSectionActionRegistry(
       onClick: typeof spec.onClick === 'function' ? spec.onClick : null,
       seq: seqCounter,
       buttonEl: null,
+      labelEl: null,
+      iconEl: null,
+      badgeEl: null,
     };
     _MapSet(items, key, record);
     syncDomNow();
@@ -681,7 +774,7 @@ function createSectionActionRegistry(
           tooltip: rec.tooltip,
           badge: rec.badge,
           order: rec.order,
-          mounted: Boolean(rec.buttonEl && rec.buttonEl.parentNode),
+          mounted: Boolean(rec.buttonEl && rec.buttonEl.parentNode && rec.buttonEl.parentNode.parentNode),
         })
       );
     }
