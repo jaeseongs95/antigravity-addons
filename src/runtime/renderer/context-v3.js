@@ -311,6 +311,8 @@ function createAddonContextV3({
     let tracker = null;
     let outsideCleanup = null;
     let escCleanup = null;
+    let chromeCleanup = null;
+    let titleLocaleCleanup = null;
     v3OverlaySeq += 1;
     const claimId = `v3:${pluginId}:${kind}:${v3OverlaySeq}`;
     const notifyPortalClaim = (active) => {
@@ -327,6 +329,18 @@ function createAddonContextV3({
       _SetDelete(activeOverlays, close);
       removeFromEscapeStack(close);
       notifyPortalClaim(false);
+      if (titleLocaleCleanup) {
+        try {
+          titleLocaleCleanup();
+        } catch (_e) {}
+        titleLocaleCleanup = null;
+      }
+      if (chromeCleanup) {
+        try {
+          chromeCleanup();
+        } catch (_e) {}
+        chromeCleanup = null;
+      }
       if (tracker) {
         tracker.dispose();
         tracker = null;
@@ -360,13 +374,30 @@ function createAddonContextV3({
     };
 
     const tokenCss = themeAndI18n ? themeAndI18n.buildTokenCss(themeAndI18n.getSnapshot().mode) : '';
-    const { body, badge } = buildOverlayChrome(doc, sr, {
-      title: opts.title || '',
+    const resolvedTitle =
+      typeof opts.getTitle === 'function' ? String(opts.getTitle() || opts.title || '') : opts.title || '';
+    const { body, badge, setTitle, disposeChrome } = buildOverlayChrome(doc, sr, {
+      title: resolvedTitle,
       displayName,
       tokenCss,
       closable: opts.closable !== false,
       onClose: close,
+      showLocaleSwitch: opts.showLocaleSwitch === true,
+      themeAndI18n,
     });
+    chromeCleanup = disposeChrome;
+    if (typeof opts.getTitle === 'function' && themeAndI18n && typeof themeAndI18n.onLocaleDidChange === 'function') {
+      try {
+        titleLocaleCleanup = themeAndI18n.onLocaleDidChange(() => {
+          if (closed) return;
+          try {
+            setTitle(String(opts.getTitle() || opts.title || ''));
+          } catch (_e) {}
+        });
+      } catch (_e) {
+        titleLocaleCleanup = null;
+      }
+    }
 
     let schemaController = null;
     if (opts.tree && typeof opts.tree === 'object') {
@@ -453,6 +484,9 @@ function createAddonContextV3({
         }
         schemaController.update(nextTree, nextState);
         if (tracker) tracker.reposition();
+      },
+      setTitle(nextTitle) {
+        if (!closed && typeof setTitle === 'function') setTitle(nextTitle);
       },
       getState: () => (schemaController ? schemaController.getState() : null),
       getElementById: (nodeId) => (schemaController ? schemaController.getElementById(nodeId) : null),

@@ -83,6 +83,7 @@ export interface OverlayOptions {
   tree?: UiNode;
   state?: Record<string, unknown>;
   closable?: boolean;
+  showLocaleSwitch?: boolean;
   closeOnOutsideClick?: boolean;
   onChange?: (ev: { field?: string; value: unknown; state: Record<string, unknown> }) => void;
   onAction?: (ev: { actionId: string; payload?: unknown; state: Record<string, unknown> }) => void;
@@ -97,6 +98,7 @@ export interface OverlayHandle {
   getPlacement(): Record<string, unknown> | null;
   reposition(): Record<string, unknown> | null;
   update(nextTree?: UiNode, nextState?: Record<string, unknown>): void;
+  setTitle?(title: string): void;
   getState(): Record<string, unknown> | null;
   getElementById(nodeId: string): Element | null;
   close(): boolean;
@@ -161,6 +163,9 @@ export interface SectionActionHandle {
 export interface SettingsPageSpec {
   id: string;
   title: string;
+  getTitle?: () => string;
+  /** Show host-owned [한국어|EN] global locale switch in the Settings Page header (default: true). */
+  showLocaleSwitch?: boolean;
   order?: number;
   width?: number;
   schema?: UiNode;
