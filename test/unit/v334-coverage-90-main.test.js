@@ -22,9 +22,31 @@ const {
   writeRemoteBridgeConfigFileAtomic,
   createRemoteBridgeServer,
 } = require('../../src/runtime/main/remote-bridge-server');
-const { createHostAdminService } = require('../../src/runtime/main/host-admin-service');
+const {
+  createHostAdminService,
+  isCommandOnPath,
+  readHostCliMetaFile,
+  readRemotePreferencesFile,
+  isAddonEnabledInRemotePreferences,
+  writeRemotePreferencesFileAtomic,
+  readRemoteBundleStatus,
+} = require('../../src/runtime/main/host-admin-service');
 const { createSecretsVault } = require('../../src/runtime/main/secrets-vault');
-const { createSettingsBridge } = require('../../src/runtime/main/settings-bridge');
+const {
+  createSettingsBridge,
+  writeSettingsFileSnapshot,
+} = require('../../src/runtime/main/settings-bridge');
+const { createElectronHostLifecyclePort } = require('../../src/adapters/electron/electron-host-lifecycle-port');
+const { createElectronTrustPolicyPort } = require('../../src/adapters/electron/trust-policy-store');
+const { createPortalArbiter } = require('../../src/runtime/main/portal-arbiter');
+const { createPreloadRegistrar } = require('../../src/runtime/main/preload-registrar');
+const { isAllowedRendererUrl, createHostOriginResolver } = require('../../src/runtime/main/host-origin-resolver');
+const {
+  validateElectronHostProfile,
+  assertValidElectronHostProfile,
+  validateResolvedElectronPaths,
+  assertValidResolvedElectronPaths,
+} = require('../../src/adapters/electron/electron-host-profile-port');
 const { createUpdateSurvivalHook } = require('../../src/runtime/main/update-survival-hook');
 const {
   loadTrustPolicyFile,
@@ -1196,6 +1218,338 @@ test('TC-COV90-M05: asar-patcher missing/blocked rollback, renderer-injector mis
     });
     assert.equal(r500.status, 500);
     await rb500.dispose();
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-COV90-M06: host-admin-service helpers, settings-bridge writeSettingsFileSnapshot guards, and electron-host-lifecycle-port compensation', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extenra-cov90-m06-'));
+  try {
+    // 1. host-admin-service exported file/PATH helpers
+    assert.equal(isCommandOnPath('', { pathEnv: '' }), false);
+    assert.equal(isCommandOnPath('definitely-not-a-real-cmd-xyz', { pathEnv: tmpDir }), false);
+    assert.equal(readHostCliMetaFile('').exists, false);
+    assert.equal(readHostCliMetaFile(path.join(tmpDir, 'nope.json')).exists, false);
+    const badMeta = path.join(tmpDir, 'bad-meta.json');
+    fs.writeFileSync(badMeta, '{bad', 'utf8');
+    assert.equal(readHostCliMetaFile(badMeta).ok, false);
+
+    assert.equal(readRemotePreferencesFile('').exists, false);
+    assert.equal(readRemotePreferencesFile(path.join(tmpDir, 'no-prefs.json')).exists, false);
+    const badPrefs = path.join(tmpDir, 'bad-prefs.json');
+    fs.writeFileSync(badPrefs, '{bad', 'utf8');
+    assert.equal(readRemotePreferencesFile(badPrefs).ok, false);
+    const dirPrefs = path.join(tmpDir, 'dir-prefs');
+    fs.mkdirSync(dirPrefs, { recursive: true });
+    assert.equal(writeRemotePreferencesFileAtomic('', {}).reason, 'ERR_REMOTE_PREFS_PATH_MISSING');
+    assert.equal(writeRemotePreferencesFileAtomic(dirPrefs, {}).reason, 'ERR_REMOTE_PREFS_NON_REGULAR_OR_SYMLINK');
+    assert.equal(writeRemotePreferencesFileAtomic(path.join(tmpDir, 'huge-prefs.json'), { big: 'x'.repeat(300000) }).reason, 'ERR_REMOTE_PREFS_TOO_LARGE');
+    const goodPrefs = path.join(tmpDir, 'prefs.json');
+    assert.equal(writeRemotePreferencesFileAtomic(goodPrefs, { schemaVersion: 1, updatedAt: new Date().toISOString(), addons: { p1: { enabled: false }, p2: { enabled: true } } }).ok, true);
+    const parsedPrefs = readRemotePreferencesFile(goodPrefs);
+    assert.equal(parsedPrefs.ok, true);
+    assert.equal(isAddonEnabledInRemotePreferences(parsedPrefs, 'p1'), false);
+    assert.equal(isAddonEnabledInRemotePreferences(parsedPrefs, 'p2'), true);
+    assert.equal(isAddonEnabledInRemotePreferences(parsedPrefs, 'p-other'), true);
+
+    assert.equal(readRemoteBundleStatus(path.join(tmpDir, 'no-dist')).built, false);
+    const badDist = path.join(tmpDir, 'bad-dist');
+    fs.mkdirSync(badDist, { recursive: true });
+    fs.writeFileSync(path.join(badDist, 'build-manifest.json'), '{bad', 'utf8');
+    assert.equal(readRemoteBundleStatus(badDist).built, false);
+
+    // 2. settings-bridge writeSettingsFileSnapshot error branches
+    const sbDir = path.join(tmpDir, 'sb-write');
+    fs.mkdirSync(sbDir, { recursive: true });
+    const dirTarget = path.join(sbDir, 'sub.json');
+    fs.mkdirSync(dirTarget, { recursive: true });
+    const resTarget = path.join(sbDir, 'reserved.json');
+    assert.equal(writeSettingsFileSnapshot('', { fileName: 'a.json', maxBytes: 4096 }, '{}').ok, false);
+    assert.equal(writeSettingsFileSnapshot(sbDir, { fileName: '../escape.json', maxBytes: 4096 }, '{}').ok, false);
+    assert.equal(writeSettingsFileSnapshot(sbDir, { fileName: 'reserved.json', maxBytes: 4096 }, '{}', { reservedFilePaths: [resTarget] }).reason, 'ERR_SETTINGS_RESERVED_PATH');
+    assert.equal(writeSettingsFileSnapshot(sbDir, { fileName: 'sub.json', maxBytes: 4096 }, '{}').reason, 'ERR_SETTINGS_NOT_REGULAR_FILE');
+    assert.equal(writeSettingsFileSnapshot(sbDir, { fileName: 'ok.json', maxBytes: 4096 }, '[1,2]').ok, false);
+    assert.equal(writeSettingsFileSnapshot(sbDir, { fileName: 'ok.json', maxBytes: 4096 }, '{"__proto__":{"a":1}}').ok, false);
+    assert.equal(writeSettingsFileSnapshot(sbDir, { fileName: 'ok.json', maxBytes: 1024 }, '{"a":"' + 'z'.repeat(2048) + '"}').ok, false);
+    assert.equal(
+      writeSettingsFileSnapshot(sbDir, { fileName: 'ok.json', maxBytes: 4096 }, '{}', {
+        fsImpl: { ...fs, mkdirSync: () => { throw new Error('EACCES'); } },
+      }).reason,
+      'ERR_SETTINGS_WRITE_FAILED'
+    );
+    assert.equal(
+      writeSettingsFileSnapshot(sbDir, { fileName: 'ok.json', maxBytes: 4096 }, '{}', {
+        fsImpl: { ...fs, realpathSync: () => { throw new Error('RP'); } },
+      }).reason,
+      'ERR_SETTINGS_REALPATH_FAILED'
+    );
+
+    // 3. electron-host-lifecycle-port ASAR_PATCH_THREW & ASAR_PATCH_FAILED compensation paths
+    const fakeHome = path.join(tmpDir, 'home');
+    fs.mkdirSync(fakeHome, { recursive: true });
+    const envFake = { ...process.env, USERPROFILE: fakeHome, HOME: fakeHome };
+    const throwPort = createElectronHostLifecyclePort({
+      transport: {
+        isInstalled: () => false,
+        install: () => { throw new Error('ASAR_THROW_SIM'); },
+        upgrade: () => ({ status: 'ERR_ORIG_MISSING' }),
+        rollback: () => ({ status: 'SKIPPED_NO_ASAR' }),
+        diagnose: () => ({ asarExists: false, status: 'NO_ASAR' }),
+      },
+    });
+    const ctx = throwPort.resolveContext(ANTIGRAVITY_HOST_PROFILE, envFake);
+    const rThrow = throwPort.installHost(ctx, { mode: 'install', hostVersion: '3.3.4' });
+    assert.equal(rThrow.ok, false);
+    assert.equal(rThrow.phase, 'ASAR_PATCH_THREW');
+    const rFail = throwPort.upgradeHost
+      ? throwPort.upgradeHost(ctx, { hostVersion: '3.3.4' })
+      : throwPort.installHost(ctx, { hostVersion: '3.3.4' });
+    assert.equal(rFail.ok, false);
+    assert.ok(rFail.phase === 'ASAR_PATCH_FAILED' || rFail.phase === 'ASAR_PATCH_THREW');
+    assert.ok(throwPort.diagnoseHost(ctx));
+    assert.ok(throwPort.getHostStatus(ctx));
+    assert.ok(throwPort.rollbackHost(ctx));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-COV90-M07: trust-policy-store, portal-arbiter, host-origin-resolver, and electron-host-profile-port full branch coverage', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extenra-cov90-m07-'));
+  try {
+    // 1. trust-policy-store full error & happy paths
+    const addonsDir = path.join(tmpDir, 'addons.d');
+    const pluginsRoot = path.join(tmpDir, 'plugins');
+    const trustPolicyPath = path.join(tmpDir, 'trust-policy.json');
+    const lockPath = path.join(tmpDir, 'addons.lock');
+    fs.mkdirSync(addonsDir, { recursive: true });
+    fs.mkdirSync(pluginsRoot, { recursive: true });
+    const tpCtx = {
+      paths: { HOST_DATA_DIR: tmpDir, TRUST_POLICY_PATH: trustPolicyPath, ADDONS_LOCK_PATH: lockPath, PLUGINS_ROOT_DIR: pluginsRoot, ADDONS_DIR: addonsDir },
+    };
+    const tp = createElectronTrustPolicyPort();
+    assert.equal(tp.approvePlugin(tpCtx, 'BAD ID!').ok, false);
+    assert.equal(tp.approvePlugin(tpCtx, 'no-reg').reason, 'ERR_MANIFEST_NOT_REGISTERED');
+    fs.writeFileSync(path.join(addonsDir, 'bad-json.json'), '{bad', 'utf8');
+    assert.equal(tp.approvePlugin(tpCtx, 'bad-json').reason, 'ERR_MANIFEST_INVALID_JSON');
+    fs.writeFileSync(path.join(addonsDir, 'mismatch.json'), JSON.stringify({ pluginId: 'other' }), 'utf8');
+    assert.equal(tp.approvePlugin(tpCtx, 'mismatch').reason, 'ERR_MANIFEST_PLUGIN_ID_MISMATCH');
+    assert.equal(tp.approvePlugin(tpCtx, 'no-dir', { pluginId: 'no-dir', version: '1.0.0' }).reason, 'ERR_PLUGIN_DIR_NOT_FOUND');
+
+    const pDir = path.join(pluginsRoot, 'tp-plug');
+    fs.mkdirSync(path.join(pDir, 'sub-dir'), { recursive: true });
+    assert.equal(tp.approvePlugin(tpCtx, 'tp-plug', { pluginId: 'tp-plug', version: '1.0.0', entry: { rendererScript: 'missing.js' } }).reason, 'ERR_RENDERER_SCRIPT_NOT_FOUND');
+    assert.equal(tp.approvePlugin(tpCtx, 'tp-plug', { pluginId: 'tp-plug', version: '1.0.0', entry: { rendererScript: 'sub-dir' } }).reason, 'ERR_RENDERER_SCRIPT_NOT_FILE');
+    fs.writeFileSync(path.join(pDir, 'r.js'), 'module.exports = function(){};\n', 'utf8');
+    fs.writeFileSync(path.join(pDir, 'mh.js'), 'module.exports = {};\n', 'utf8');
+    const appRes = tp.approvePlugin(tpCtx, 'tp-plug', { pluginId: 'tp-plug', version: '1.0.0', entry: { rendererScript: 'r.js', mainHookScript: 'mh.js' } });
+    assert.equal(appRes.ok, true);
+    assert.equal(tp.listApproved(tpCtx).approved.length, 1);
+    assert.equal(tp.verifyPluginTrust(tpCtx, { pluginId: 'tp-plug', version: '1.0.0', trustLevel: 'trusted' }, { rendererSha256: appRes.record.rendererSha256 }).ok, true);
+    assert.equal(tp.revokePlugin(tpCtx, 'BAD ID!').ok, false);
+    assert.equal(tp.revokePlugin(tpCtx, 'tp-plug').revoked, true);
+    assert.equal(tp.revokePlugin(tpCtx, 'tp-plug').revoked, false);
+    // Corrupted policy file refuses overwrite on approve/revoke/verify
+    fs.writeFileSync(trustPolicyPath, '[1,2]', 'utf8');
+    assert.equal(tp.verifyPluginTrust(tpCtx, { pluginId: 'tp-plug', version: '1.0.0' }, {}).ok, false);
+    assert.equal(tp.approvePlugin(tpCtx, 'tp-plug', { pluginId: 'tp-plug', version: '1.0.0', entry: { rendererScript: 'r.js' } }).ok, false);
+    assert.equal(tp.revokePlugin(tpCtx, 'tp-plug').ok, false);
+
+    // 2. portal-arbiter full modes & error isolation
+    const paDisabled = createPortalArbiter({});
+    assert.equal(paDisabled.install().mode, 'DISABLED');
+    const paNoIpc = createPortalArbiter({ portalBridge: { channel: 'portal:set' } });
+    assert.equal(paNoIpc.install().mode, 'PORTAL_ARBITER_DEGRADED_LOCAL');
+    const paArmed = createPortalArbiter({ ipcMain: { handle() {}, removeHandler() {} }, portalBridge: { channel: 'portal:set' } });
+    paArmed.install();
+    assert.equal(paArmed.install().mode, 'ARMED');
+    assert.equal(paArmed.setPluginClaim(null, 'c1', true).ok, false);
+    assert.equal(paArmed.setPluginClaim({ id: 1, mainFrame: {} }, 'c1', true).mode, 'PORTAL_ARBITER_DEGRADED_LOCAL');
+
+    let throwOnHandle = false;
+    const ipcMock = {
+      map: new Map(),
+      handle(ch, fn) { if (throwOnHandle) throw new Error('ALREADY_REG'); this.map.set(ch, fn); },
+      removeHandler(ch) { this.map.delete(ch); },
+    };
+    const paActive = createPortalArbiter({ ipcMain: ipcMock, portalBridge: { channel: 'portal:ch' } });
+    paActive.install();
+    ipcMock.handle('other:ch', () => 'ok');
+    let nativeThrow = false;
+    let nativeAsyncReject = false;
+    ipcMock.handle('portal:ch', (_ev, open) => {
+      if (nativeThrow) throw new Error('NATIVE_SYNC');
+      if (nativeAsyncReject) return Promise.reject(new Error('NATIVE_ASYNC'));
+      return open;
+    });
+    const wcEvs = new Map();
+    const fakeWc = {
+      id: 77,
+      mainFrame: {},
+      isDestroyed: () => false,
+      on(e, fn) { wcEvs.set(e, fn); },
+      once(e, fn) { wcEvs.set(e, fn); },
+    };
+    paActive.attachWebContentsLifecycle(fakeWc);
+    ipcMock.map.get('portal:ch')({ sender: fakeWc }, true);
+    paActive.setPluginClaim(fakeWc, 'c1', true);
+    nativeThrow = true;
+    paActive.setPluginClaim(fakeWc, 'c2', true);
+    nativeThrow = false;
+    nativeAsyncReject = true;
+    paActive.setPluginClaim(fakeWc, 'c2', false);
+    nativeAsyncReject = false;
+    wcEvs.get('did-navigate')();
+    wcEvs.get('render-process-gone')();
+    wcEvs.get('destroyed')();
+    assert.equal(paActive.revokeAllPluginClaims('not-num').ok, false);
+    assert.ok(paActive.getStatus().channel === 'portal:ch');
+    ipcMock.removeHandler('portal:ch');
+    assert.equal(paActive.getStatus().mode, 'PORTAL_ARBITER_DEGRADED_LOCAL');
+    throwOnHandle = true;
+    assert.throws(() => ipcMock.handle('portal:ch', () => {}));
+    paActive.dispose();
+
+    // 3. host-origin-resolver all edge/security guards
+    assert.equal(isAllowedRendererUrl('', {}), false);
+    assert.equal(isAllowedRendererUrl('not a url', {}), false);
+    assert.equal(isAllowedRendererUrl('https://127.0.0.1:443/', { strictWindowOrigin: true, windowOrigin: 'https://127.0.0.1' }), true);
+    assert.equal(isAllowedRendererUrl('https://localhost:3000/', { strictWindowOrigin: true, windowOrigin: 'https://127.0.0.1', devUrlOrigin: 'https://localhost:3000' }), true);
+    assert.equal(isAllowedRendererUrl('https://localhost:4000/', { strictWindowOrigin: true, windowOrigin: 'https://127.0.0.1' }), false);
+
+    const defSess = { name: 'default' };
+    const hor = createHostOriginResolver({
+      profile: { allowedUrlProtocols: ['https:'], allowedUrlHosts: ['127.0.0.1'], defaultSessionOnly: true },
+      getDefaultSession: () => defSess,
+      devUrl: 'https://localhost:5173',
+    });
+    assert.equal(hor.isSessionAllowed(null), false);
+    assert.equal(hor.verifyFrameEvent({}).reason, 'ERR_MISSING_SENDER_OR_FRAME');
+    assert.equal(hor.verifyFrameEvent({ sender: { isDestroyed: () => true }, senderFrame: {} }).reason, 'ERR_SENDER_DESTROYED');
+    assert.equal(hor.verifyFrameEvent({ sender: { id: 1, session: {} }, senderFrame: {} }).reason, 'ERR_DISALLOWED_SESSION');
+    const mf = { url: 'https://127.0.0.1:8080/', origin: 'https://127.0.0.1:8080' };
+    const wcOk = { id: 10, session: defSess, mainFrame: mf, isDestroyed: () => false };
+    assert.equal(hor.verifyFrameEvent({ sender: wcOk, senderFrame: { url: 'https://127.0.0.1:8080/' } }).reason, 'ERR_NOT_MAIN_FRAME');
+    const subMf = { url: 'https://127.0.0.1:8080/', parent: {} };
+    assert.equal(hor.verifyFrameEvent({ sender: { id: 11, session: defSess, mainFrame: subMf }, senderFrame: subMf }).reason, 'ERR_SUBFRAME_OR_DETACHED');
+    const badUrlMf = { url: 'https://evil.example.com/' };
+    assert.equal(hor.verifyFrameEvent({ sender: { id: 12, session: defSess, mainFrame: badUrlMf }, senderFrame: badUrlMf }).reason, 'ERR_DISALLOWED_FRAME_URL');
+    const opqMf = { url: 'https://127.0.0.1:8080/', origin: 'null' };
+    assert.equal(hor.verifyFrameEvent({ sender: { id: 13, session: defSess, mainFrame: opqMf }, senderFrame: opqMf }).reason, 'ERR_OPAQUE_FRAME_ORIGIN');
+    const misMf = { url: 'https://127.0.0.1:8080/', origin: 'https://127.0.0.1:9999' };
+    assert.equal(hor.verifyFrameEvent({ sender: { id: 14, session: defSess, mainFrame: misMf }, senderFrame: misMf }).reason, 'ERR_FRAME_ORIGIN_MISMATCH');
+
+    const v1 = hor.verifyFrameEvent({ sender: wcOk, senderFrame: mf });
+    assert.equal(v1.ok, true);
+    assert.equal(hor.verifyClaimedEvent({ sender: wcOk, senderFrame: mf }, v1.docGenId).reason, 'ERR_BRIDGE_NOT_CLAIMED_FOR_GENERATION');
+    assert.equal(hor.consumeClaimNonce({ sender: wcOk, senderFrame: mf }, 123).reason, 'ERR_INVALID_NONCE');
+    assert.equal(hor.consumeClaimNonce({ sender: wcOk, senderFrame: mf }, 'short').reason, 'ERR_INVALID_NONCE');
+    const nonce = hor.getState(10).activeNonce;
+    assert.equal(hor.consumeClaimNonce({ sender: wcOk, senderFrame: mf }, '0'.repeat(nonce.length)).reason, 'ERR_NONCE_MISMATCH');
+    assert.equal(hor.consumeClaimNonce({ sender: wcOk, senderFrame: mf }, nonce).ok, true);
+    assert.equal(hor.consumeClaimNonce({ sender: wcOk, senderFrame: mf }, nonce).reason, 'ERR_NONCE_ALREADY_CONSUMED_OR_MISSING');
+    assert.equal(hor.verifyClaimedEvent({ sender: wcOk, senderFrame: mf }, 9999).reason, 'ERR_STALE_DOCUMENT_GENERATION');
+    // Origin rotation on new port
+    const mf2 = { url: 'https://127.0.0.1:8081/', origin: 'https://127.0.0.1:8081' };
+    wcOk.mainFrame = mf2;
+    const v2 = hor.verifyFrameEvent({ sender: wcOk, senderFrame: mf2 });
+    assert.equal(v2.docGenId, v1.docGenId + 1);
+    hor.clearWebContents(10);
+
+    // 4. electron-host-profile-port all validation guards
+    const base = { ...ANTIGRAVITY_HOST_PROFILE };
+    assert.equal(validateElectronHostProfile({ ...base, patchMarker: '' }).reason, 'MISSING_ELECTRON_PROFILE_FIELD:patchMarker');
+    assert.equal(validateElectronHostProfile({ ...base, loaderEnvVar: '  ' }).reason, 'INVALID_LOADER_ENV_VAR');
+    assert.equal(validateElectronHostProfile({ ...base, patchMarker: 'A\nB' }).reason, 'INVALID_PATCH_MARKER_NEWLINE');
+    assert.equal(validateElectronHostProfile({ ...base, mainAnchorReplacement: 'no-marker' }).reason, 'INVALID_MAIN_ANCHOR_REPLACEMENT_MISSING_MARKER');
+    assert.equal(validateElectronHostProfile({ ...base, mainAnchorReplacement: base.patchMarker + ' process.env.X' }).reason, 'ERR_ANCHOR_ENV_OVERRIDE_FORBIDDEN');
+    assert.equal(validateElectronHostProfile({ ...base, isolatedWorldId: 0 }).reason, 'INVALID_ISOLATED_WORLD_ID');
+    assert.equal(validateElectronHostProfile({ ...base, isolatedWorldId: 999 }).reason, 'ERR_RESERVED_PRELOAD_WORLD_999');
+    assert.equal(validateElectronHostProfile({ ...base, priorHostMarkers: ['bad\nmarker'] }).reason, 'INVALID_PRIOR_HOST_MARKERS');
+    assert.equal(validateElectronHostProfile({ ...base, legacyPatchMarkers: 'not-arr' }).reason, 'INVALID_LEGACY_PATCH_MARKERS');
+    assert.equal(validateElectronHostProfile({ ...base, windowOrigin: 'ftp://bad' }).reason, 'INVALID_WINDOW_ORIGIN');
+    assert.equal(validateElectronHostProfile({ ...base, defaultSessionOnly: 'yes' }).reason, 'INVALID_DEFAULT_SESSION_ONLY');
+    assert.equal(validateElectronHostProfile({ ...base, portalBridge: { channel: '' } }).reason, 'INVALID_PORTAL_BRIDGE');
+    assert.equal(validateElectronHostProfile({ ...base, extraNoTranslateAttributes: ['bad attr!'] }).reason, 'INVALID_EXTRA_NO_TRANSLATE_ATTRIBUTES');
+    assert.equal(validateElectronHostProfile({ ...base, allowedUrlHosts: [''] }).reason, 'INVALID_ALLOWED_URL_HOSTS');
+    assert.equal(validateElectronHostProfile({ ...base, allowedUrlProtocols: ['invalid'] }).reason, 'INVALID_ALLOWED_URL_PROTOCOLS');
+    assert.equal(validateElectronHostProfile({ ...base, uiAnchors: [] }).reason, 'INVALID_UI_ANCHORS');
+    assert.equal(validateElectronHostProfile({ ...base, uiAnchors: { 'BAD KEY': ['div'] } }).ok, false);
+    assert.throws(() => assertValidElectronHostProfile({ ...base, isolatedWorldId: 999 }));
+    assert.equal(validateResolvedElectronPaths(null).reason, 'INVALID_RESOLVED_PATHS_OBJECT');
+    assert.equal(validateResolvedElectronPaths({}).ok, false);
+    assert.throws(() => assertValidResolvedElectronPaths({}));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-COV90-M08: preload-registrar full lifecycle/error paths and manifest-validator edge branches', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extenra-cov90-m08-'));
+  try {
+    const preloadFile = path.join(tmpDir, 'preload.cjs');
+    fs.writeFileSync(preloadFile, '// preload\n', 'utf8');
+
+    // Missing preload / app not ready / unavailable API / already registered / throw / unregister
+    const prNoApp = createPreloadRegistrar({ app: null, sessionModule: null, preloadPath: preloadFile });
+    assert.equal((await prNoApp.ensureRegistered()).reason, 'ERR_NO_APP');
+    assert.equal(prNoApp.registerNow().reason, 'ERR_APP_NOT_READY');
+
+    let ready = false;
+    const readyListeners = [];
+    const fakeApp = {
+      isReady: () => ready,
+      whenReady: async () => { ready = true; },
+      prependOnceListener: (_ev, fn) => readyListeners.push(fn),
+    };
+    const prMiss = createPreloadRegistrar({ app: fakeApp, sessionModule: {}, preloadPath: path.join(tmpDir, 'nope.cjs') });
+    assert.equal(prMiss.registerNow().reason, 'ERR_PRELOAD_SCRIPT_MISSING');
+
+    const prNoApi = createPreloadRegistrar({ app: { isReady: () => true }, sessionModule: { defaultSession: {} }, preloadPath: preloadFile });
+    assert.equal(prNoApi.registerNow().reason, 'ERR_REGISTER_PRELOAD_API_UNAVAILABLE');
+
+    const prAlready = createPreloadRegistrar({
+      app: { isReady: () => true },
+      sessionModule: {
+        defaultSession: {
+          getPreloadScripts: () => [{ id: 'existing-id', filePath: preloadFile }],
+          registerPreloadScript: () => 'new-id',
+          unregisterPreloadScript: () => { throw new Error('UNREG_ERR'); },
+        },
+      },
+      preloadPath: preloadFile,
+    });
+    assert.equal(prAlready.registerNow().alreadyRegistered, true);
+    assert.equal(prAlready.unregister(), false);
+
+    const prThrow = createPreloadRegistrar({
+      app: { isReady: () => true },
+      sessionModule: { defaultSession: { registerPreloadScript: () => { throw new Error('REG_FAIL'); } } },
+      preloadPath: preloadFile,
+    });
+    assert.equal(prThrow.registerNow().reason, 'ERR_PRELOAD_REGISTER_FAILED');
+
+    let unregCalled = false;
+    const prAsync = createPreloadRegistrar({
+      app: fakeApp,
+      sessionModule: {
+        defaultSession: {
+          getPreloadScripts: () => [],
+          registerPreloadScript: () => 'reg-1',
+          unregisterPreloadScript: () => { unregCalled = true; },
+        },
+      },
+      preloadPath: preloadFile,
+    });
+    const p1 = prAsync.ensureRegistered();
+    const p2 = prAsync.ensureRegistered();
+    for (const fn of readyListeners) fn();
+    assert.equal((await p1).ok, true);
+    assert.equal((await p2).ok, true);
+    assert.equal(prAsync.getStatus().registered, true);
+    assert.equal(prAsync.unregister(), true);
+    assert.equal(unregCalled, true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

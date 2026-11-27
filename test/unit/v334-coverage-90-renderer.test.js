@@ -18,6 +18,15 @@ const { createModalPortal } = require('../../src/runtime/renderer/modal-portal')
 const { createHostSettingsUi } = require('../../src/runtime/renderer/host-settings-ui');
 const { createServiceBus } = require('../../src/runtime/renderer/service-bus');
 const { createStorageV3 } = require('../../src/runtime/renderer/storage-v3');
+const { createStyleManager } = require('../../src/runtime/renderer/style-manager');
+const { isNodeIgnored, isElementInsideIgnored } = require('../../src/runtime/renderer/ignore-guard');
+const { createEventBus } = require('../../src/runtime/renderer/event-bus');
+const { createSettingsTabCoordinator } = require('../../src/runtime/renderer/settings-tab-coordinator');
+const { createSlotManager } = require('../../src/runtime/renderer/slot-manager');
+const { createToastAndDialogManager } = require('../../src/runtime/renderer/toast-manager');
+const { createSettingsPageCoordinator } = require('../../src/runtime/renderer/settings-page-coordinator');
+const { createThemeAndI18n } = require('../../src/runtime/renderer/theme-i18n');
+const { wrapHostBridgePort, isValidHostBridgePort } = require('../../src/runtime/renderer/host-bridge-port');
 const { createTestHost } = require('../../packages/sdk/src/test-host');
 
 function createRichMockDom() {
@@ -964,4 +973,239 @@ test('TC-COV90-R06: section-action-registry validation/MO/invoke, service-bus er
   assert.ok(events.length >= 3);
   unsub();
   s3.disposePlugin('p-st');
+});
+
+test('TC-COV90-R07: kernel host APIs, style-manager shadow/error paths, ignore-guard, event-bus, settings-tab, slot-manager, and toast-manager', async () => {
+  // 1. kernel host APIs (selectSettingsTab, invokeHostAction, emitHostEvent, openSettingsPage, syncSectionActions, staged handle errors, pushPluginSettings errors)
+  const { doc, win, body } = createRichMockDom();
+  win.crypto = globalThis.crypto;
+  const k = createRendererKernel(doc, win);
+  // Pre-boot guards
+  assert.throws(() => k.consumeStagedHandle('bad-nonce'), /ERR_INVALID_OR_CONSUMED_RUN_NONCE/);
+  const boot = k.boot({
+    docGenId: 1,
+    hostToken: 'ht-r07',
+    surface: 'desktop',
+    hostBridge: {
+      docGenId: 1,
+      setPortalClaim: () => ({ ok: true }),
+      saveSettings: async () => ({ ok: true }),
+      reportError: () => {},
+      ping: async () => ({ ok: true }),
+    },
+  });
+  assert.equal(boot.ok, true);
+  assert.equal(k.clearStagedHandle(123, 'ht-r07'), false);
+  const h = k.createPluginHandle(
+    { pluginId: 'p-r07', apiVersion: 2, trustLevel: 'trusted', hasSettingsBridge: true },
+    'ht-r07',
+    { status: 'ok', data: { v: 1 } }
+  );
+  h.registerSettingsTab('tab-err', { label: 'ErrTab', onSelect: () => { throw new Error('TAB_BOOM'); } });
+  h.registerSettingsTab('tab-async', { label: 'AsyncTab', onSelect: async () => { throw new Error('TAB_ASYNC_BOOM'); } });
+  h.registerAction('act-throw', { label: 'Throw', run: () => { throw new Error('ACT_BOOM'); } });
+  h.registerAction('act-async', { label: 'Async', run: async () => { throw new Error('ACT_ASYNC_BOOM'); } });
+  h.registerAction('act-ok', { label: 'Ok', run: (x) => `ok:${x}` });
+  h.onSettingsChange(() => { throw new Error('SYNC_SET_ERR'); });
+  h.onSettingsChange(async () => { throw new Error('ASYNC_SET_ERR'); });
+
+  assert.equal(k.selectSettingsTab('p-r07', 'tab-err', 'ht-r07').reason, 'ERR_SETTINGS_TAB_SELECT_FAILED');
+  assert.equal(k.selectSettingsTab('p-r07', 'tab-async', 'ht-r07').ok, true);
+  assert.ok(k.listHostActions('ht-r07').length >= 3);
+  assert.equal(k.invokeHostAction('', '', [], 'ht-r07').reason, 'ERR_ACTION_NOT_FOUND');
+  assert.equal(k.invokeHostAction('p-r07', 'nope', [], 'ht-r07').ok, false);
+  assert.equal(k.invokeHostAction('p-r07', 'act-throw', [], 'ht-r07').reason, 'ERR_ACTION_EXEC_FAILED');
+  assert.equal(k.invokeHostAction('p-r07', 'act-async', [], 'ht-r07').ok, true);
+  assert.equal(k.invokeHostAction('p-r07', 'act-ok', ['hi'], 'ht-r07').result, 'ok:hi');
+  assert.equal(k.pushPluginSettings('p-r07', { status: 'ok', data: { v: 2 } }, 'ht-r07').delivered, 2);
+  assert.equal(typeof k.emitHostEvent('host:test', { a: 1 }, 'ht-r07'), 'number');
+  assert.equal(k.syncSectionActions('ht-r07'), true);
+  assert.equal(k.openSettingsPage('p-r07', 'nope', 'ht-r07').ok, false);
+  assert.equal(k.invokeStatusItem('p-r07', 'nope', {}, 'ht-r07').ok, false);
+  assert.equal(k.invokeSectionAction('p-r07', 'nope', {}, 'ht-r07').ok, false);
+  k.setHostLocale('ko', 'ht-r07');
+  assert.equal(k.getHostLocale(), 'ko');
+  assert.ok(k.getSurfaceBounds());
+  assert.ok(k.getActiveSurface());
+  assert.ok(Array.isArray(k.listSurfaces()));
+  assert.ok(k.getErrors().length >= 2);
+  k.disposePlugin('p-r07', 'ht-r07');
+
+  // 2. style-manager shadow injection, update, remove, error paths
+  const sm = createStyleManager(doc);
+  const sr1 = doc.createElement('div');
+  sm.registerShadowRoot('p-sm', 'slot1', sr1);
+  assert.throws(() => sm.injectStyle({ pluginId: 'p-sm', trustLevel: 'restricted' }, '', '.a{}'), /ERR_INVALID_STYLE_ID/);
+  assert.throws(() => sm.injectStyle({ pluginId: 'p-sm', trustLevel: 'restricted' }, 's1', '.a{}', { scope: 'bad' }), /ERR_INVALID_STYLE_SCOPE/);
+  assert.throws(() => sm.injectStyle({ pluginId: 'p-sm', trustLevel: 'restricted' }, 's1', '.a{}', { scope: 'global' }), /ERR_RESTRICTED_GLOBAL_CSS_FORBIDDEN/);
+  assert.throws(() => sm.injectStyle({ pluginId: 'p-sm', trustLevel: 'trusted' }, 's1', '@import "x";'));
+  sm.injectStyle({ pluginId: 'p-sm', trustLevel: 'trusted' }, 's-slot', '.a { color: red; }', { slotId: 'slot1' });
+  sm.injectStyle({ pluginId: 'p-sm', trustLevel: 'trusted' }, 's-owner', '.b { color: blue; }');
+  sm.injectStyle({ pluginId: 'p-sm', trustLevel: 'trusted' }, 's-owner', '.b { color: green; }');
+  assert.equal(sm.removeStyle('p-sm', 'missing'), false);
+  assert.equal(sm.removeStyle('p-sm', 's-owner'), true);
+  sm.disposePluginStyles('p-sm');
+  sm.unregisterShadowRoot('p-sm', 'slot1', sr1);
+
+  // 3. ignore-guard ShadowRoot .host, extraAttrs, ignoreElements, Event vs DOM node
+  assert.equal(isElementInsideIgnored(null), false);
+  const hostBox = doc.createElement('div');
+  hostBox.setAttribute('data-custom-no-tr', '1');
+  const shadowLike = { host: hostBox };
+  const leaf = { parentNode: shadowLike };
+  assert.equal(isNodeIgnored(leaf, ['data-custom-no-tr']), true);
+  assert.equal(isNodeIgnored({ nodeType: 1 }, [], []), false);
+  const ignoredBtn = doc.createElement('button');
+  assert.equal(isElementInsideIgnored({ composedPath: () => [ignoredBtn] }, { ignoreElements: [ignoredBtn] }), true);
+  assert.equal(isElementInsideIgnored({ target: leaf }, { extraNoTranslateAttributes: ['data-custom-no-tr'] }), true);
+  assert.equal(isElementInsideIgnored({ target: null }), false);
+
+  // 4. event-bus, settings-tab-coordinator, slot-manager, toast-manager edge branches
+  const ebErrs = [];
+  const eb = createEventBus({ reportPluginError: (p, m) => ebErrs.push(`${p}:${m}`) });
+  assert.throws(() => eb.on('p1', '', () => {}), /ERR_INVALID_EVENT_TOPIC/);
+  assert.throws(() => eb.on('p1', 't', null), /ERR_INVALID_EVENT_HANDLER/);
+  assert.throws(() => eb.emit('p1', ''), /ERR_INVALID_EVENT_TOPIC/);
+  eb.on('p1', 'boom', () => { throw new Error('EB_SYNC'); });
+  eb.once('p1', 'boom', async () => { throw new Error('EB_ASYNC'); });
+  assert.equal(eb.emit('p2', 'boom', { x: 1 }), 2);
+  assert.equal(eb.emit('p2', 'empty'), 0);
+  eb.disposePlugin('p1');
+
+  const stc = createSettingsTabCoordinator();
+  assert.throws(() => stc.registerSettingsTab('p1', ''), /ERR_INVALID_TAB_ID/);
+  const tabReg = stc.registerSettingsTab('p1', 't-ro', { label: 'RO' });
+  assert.equal(stc.selectTab('', 't-ro').reason, 'ERR_SETTINGS_TAB_NOT_FOUND');
+  assert.equal(stc.selectTab('p1', 'nope').reason, 'ERR_SETTINGS_TAB_NOT_FOUND');
+  assert.equal(stc.selectTab('p1', 't-ro').reason, 'ERR_SETTINGS_TAB_NOT_SELECTABLE');
+  stc.registerSettingsTab('p1', 't-err', { onSelect: () => { throw new Error('STC_ERR'); } });
+  assert.equal(stc.selectTab('p1', 't-err').reason, 'ERR_SETTINGS_TAB_SELECT_FAILED');
+  tabReg.unregister();
+  stc.disposePluginTabs('p1');
+
+  const slotMgr = createSlotManager(doc, { uiAnchors: { miss: ['[data-not-here]'] }, extraNoTranslateAttributes: ['data-x'], styleManager: sm });
+  const smMeta = { pluginId: 'p-sl', trustLevel: 'trusted', uiSlots: [{ slotId: 's1', slot: 'overlay', anchor: 'miss' }, { slotId: 's2', slot: 'overlay' }] };
+  assert.throws(() => slotMgr.mountSlot(smMeta, 'undeclared'), /ERR_UNDECLARED_SLOT/);
+  assert.equal(slotMgr.mountSlot(smMeta, 's1'), null);
+  const mounted = slotMgr.mountSlot(smMeta, 's2', { container: body, shadow: false });
+  assert.ok(mounted);
+  assert.throws(() => slotMgr.unmountSlot('other-plugin', 's2'), /ERR_FORBIDDEN_CROSS_PLUGIN_UNMOUNT/);
+  assert.equal(slotMgr.unmountSlot('p-sl', 'nope'), false);
+  assert.equal(slotMgr.unmountSlot('p-sl', 's2'), true);
+
+  const tm = createToastAndDialogManager(doc, win, { extraNoTranslateAttributes: ['data-nt'] });
+  const t1 = tm.showToast({ pluginId: 'p-tm', displayName: 'TM' }, 'Simple toast');
+  t1.dismiss();
+  const t2 = tm.showToast({ pluginId: 'p-tm', displayName: 'TM' }, { message: 'Err', variant: 'error', durationMs: 10 });
+  await new Promise((r) => setTimeout(r, 20));
+  t2.dismiss();
+  tm.disposePlugin('p-tm');
+});
+
+test('TC-COV90-R08: settings-page-coordinator and theme-i18n edge & error isolation paths', () => {
+  const { doc, win } = createRichMockDom();
+  const opened = [];
+  const spc = createSettingsPageCoordinator({
+    openTier2Modal: (meta, opts) => {
+      opened.push(['tier2', meta.pluginId, opts.title]);
+      return { close() { opts.onClose && opts.onClose(); } };
+    },
+    openTier3Modal: (meta, opts) => {
+      opened.push(['tier3', meta.pluginId, opts.title]);
+      return { close() { opts.onClose && opts.onClose(); } };
+    },
+  });
+  const unsubInvalid = spc.setInlineHost(null);
+  unsubInvalid();
+  const unsubChg = spc.onChange(() => { throw new Error('CHG_BOOM'); });
+  assert.throws(() => spc.registerSettingsPage({ pluginId: 'p1' }, {}), /ERR_INVALID_SETTINGS_PAGE_ID/);
+  assert.throws(() => spc.registerSettingsPage({ pluginId: 'p1' }, { id: 'pg1' }), /ERR_SETTINGS_PAGE_REQUIRES_SCHEMA_OR_RENDER/);
+  const pg2 = spc.registerSettingsPage(
+    { pluginId: 'p1' },
+    {
+      id: 'pg-schema',
+      title: 'Fallback Title',
+      getTitle: () => { throw new Error('TITLE_BOOM'); },
+      schema: { type: 'stack', children: [] },
+      onClose: () => {},
+    }
+  );
+  spc.openSettingsPage('p1', 'pg-schema');
+  const pg3 = spc.registerSettingsPage(
+    { pluginId: 'p1' },
+    { id: 'pg-canvas', title: 'Canvas Page', render: () => {} }
+  );
+  spc.openSettingsPage('p1', 'pg-canvas');
+  let inlineOpened = 0;
+  const unsubInline = spc.setInlineHost({
+    canMountInline: () => true,
+    mountInlinePage: () => { inlineOpened += 1; return { close() {} }; },
+  });
+  spc.openSettingsPage('p1', 'pg-schema');
+  assert.equal(inlineOpened, 1);
+  unsubInline();
+  pg2.dispose();
+  pg3.dispose();
+  unsubChg();
+  spc.disposePlugin('p1');
+
+  const ti = createThemeAndI18n(doc, win);
+  const unsubLoc = ti.onLocaleDidChange(() => { throw new Error('LOC_BOOM'); });
+  ti.setLocale('ko');
+  assert.equal(ti.getLocale(), 'ko');
+  ti.setLocale('en');
+  assert.equal(ti.getLocale(), 'en');
+  assert.equal(ti.t('Hello', { ko: '안녕', en: 'Hello' }), 'Hello');
+  assert.equal(ti.t('Fallback'), 'Fallback');
+  const th = ti.createThemeHandle();
+  assert.ok(th && typeof th.onDidChange === 'function');
+  unsubLoc();
+
+  // host-bridge-port validation & all optional method wrappers (present & absent)
+  assert.equal(isValidHostBridgePort(null), false);
+  assert.equal(isValidHostBridgePort({}), false);
+  assert.throws(() => wrapHostBridgePort(null), /ERR_INVALID_HOST_BRIDGE_PORT/);
+  assert.throws(() => wrapHostBridgePort({ setPortalClaim() {} }), /ERR_HOST_BRIDGE_PORT_MISSING_METHOD/);
+  const basePort = {
+    docGenId: 2,
+    profileId: 'test-prof',
+    setPortalClaim: () => ({ ok: true }),
+    saveSettings: async () => ({ ok: true }),
+    reportError: () => {},
+    ping: async () => ({ ok: true }),
+  };
+  assert.equal(isValidHostBridgePort(basePort), true);
+  const wMin = wrapHostBridgePort(basePort);
+  assert.equal(wMin.readConfigScope, undefined);
+  const wFull = wrapHostBridgePort({
+    ...basePort,
+    readConfigScope: async () => ({ ok: true }),
+    writeConfigScope: async () => ({ ok: true }),
+    getHostAdminState: async () => ({ ok: true }),
+    setRemoteAddonPreference: async () => ({ ok: true }),
+    configureRemoteBridge: async () => ({ ok: true }),
+    rotateRemoteBridgeToken: async () => ({ ok: true }),
+    rebuildRemoteBundle: async () => ({ ok: true }),
+    getRemoteBridgeStatus: () => ({ connected: false }),
+    netFetch: async () => ({ ok: true }),
+    secretsSet: async () => ({ ok: true }),
+    secretsGet: async () => ({ ok: true }),
+    secretsHas: async () => ({ ok: true }),
+    secretsDelete: async () => ({ ok: true }),
+    secretsList: async () => ({ ok: true }),
+  });
+  assert.equal(wFull.getRemoteBridgeStatus().connected, false);
+  wFull.readConfigScope('p', 's');
+  wFull.writeConfigScope('p', 's', '{}');
+  wFull.getHostAdminState();
+  wFull.setRemoteAddonPreference('p', true);
+  wFull.configureRemoteBridge({});
+  wFull.rotateRemoteBridgeToken();
+  wFull.rebuildRemoteBundle();
+  wFull.netFetch('p', 'https://a.com');
+  wFull.secretsSet('p', 'k', 'v');
+  wFull.secretsGet('p', 'k');
+  wFull.secretsHas('p', 'k');
+  wFull.secretsDelete('p', 'k');
+  wFull.secretsList('p');
 });

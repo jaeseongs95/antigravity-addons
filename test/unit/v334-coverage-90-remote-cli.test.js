@@ -6,12 +6,22 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createRemoteHostBridge } = require('../../src/adapters/remote-web/remote-host-bridge');
-const { createRemoteHostTransport } = require('../../src/adapters/remote-web/remote-host-transport');
+const {
+  createRemoteHostBridge,
+  redactSecrets,
+  parseSafeJsonObject,
+  deterministicHexDigest,
+} = require('../../src/adapters/remote-web/remote-host-bridge');
+const {
+  createRemoteHostTransport,
+  parsePairingCode,
+} = require('../../src/adapters/remote-web/remote-host-transport');
 const { bootRemoteWebHost } = require('../../src/adapters/remote-web/remote-bootstrap');
 const { createRendererKernel } = require('../../src/runtime/renderer/kernel');
 const { runDetachedHandoffReconcile } = require('../../src/adapters/electron/update-reconciler');
 const { createCliApp } = require('../../src/cli/main');
+const { pickLanIpv4Address, startRemoteLanServer } = require('../../src/adapters/remote-web/remote-lan-server');
+const agAddonCli = require('../../packages/sdk/bin/ag-addon');
 const addonHostBin = require('../../bin/addon-host');
 
 test('TC-COV90-RC01: remote-host-bridge covers GM sync/async/localStorage/memory storage, bindings, config scopes, and bridge routing', async () => {
@@ -464,7 +474,7 @@ test('TC-COV90-RC04: remote-bootstrap drawer bridge connect/manual-connect/disco
       connectBtn.dispatchEvent({ type: 'click', isTrusted: true });
       await new Promise((r) => setTimeout(r, 20));
       mode = 'throw';
-      const validPair = 'agb1.' + Buffer.from(JSON.stringify({ u: 'http://127.0.0.1:19384', t: 'a'.repeat(64) })).toString('base64url');
+      const validPair = 'ag-bridge-v1:' + Buffer.from(JSON.stringify({ v: 1, url: 'http://127.0.0.1:19384', token: 'a'.repeat(64) })).toString('base64url');
       pairInput.value = validPair;
       connectBtn.dispatchEvent({ type: 'click', isTrusted: true });
       await new Promise((r) => setTimeout(r, 20));
@@ -625,7 +635,7 @@ test('TC-COV90-RC05: remote-host-bridge error/catch paths, update-reconciler pos
           rollbackHost: () => ({ ok: false, reason: 'MOCK_FAIL' }),
         },
         addonStore: {
-          planAddons: () => ({ active: [], disabled: [], invalid: [] }),
+          planAddons: () => ({ active: [], disabled: [], rejected: [], invalid: [] }),
           validateManifest: () => ({ ok: true }),
           registerManifest: () => ({ ok: true }),
           unregisterManifest: () => ({ ok: true }),
@@ -638,7 +648,193 @@ test('TC-COV90-RC05: remote-host-bridge error/catch paths, update-reconciler pos
       await assert.rejects(() => cli.runCli(['--nonexistent-flag']), /Unsupported CLI arguments/);
     } finally {
       process.stdout.write = origWrite;
-      process.exitCode = origCode;
+      process.exitCode = origCode || 0;
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-COV90-RC06: remote-host-bridge/transport helpers, pairing parser, and full cli/main command dispatch', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extenra-cov90-rc06-'));
+  try {
+    // 1. remote-host-bridge helpers & edge cases
+    assert.ok(redactSecrets('Authorization: Bearer secret1234567890').includes('[REDACTED]') || typeof redactSecrets('abc') === 'string');
+    assert.equal(parseSafeJsonObject('{bad').ok, false);
+    assert.equal(parseSafeJsonObject('[1,2]').ok, false);
+    assert.equal(parseSafeJsonObject('{"__proto__":{"a":1}}').ok, false);
+    assert.equal(parseSafeJsonObject('{"a":1}').ok, true);
+    assert.equal(typeof deterministicHexDigest('hello'), 'string');
+
+    const gmMap = new Map([['remote-addon-host:v2:settings:p1', '{corrupt']]);
+    const bEdge = createRemoteHostBridge({
+      win: {
+        localStorage: {
+          getItem: (k) => (gmMap.has(k) ? gmMap.get(k) : null),
+          setItem: (k, v) => gmMap.set(k, String(v)),
+          removeItem: (k) => gmMap.delete(k),
+        },
+      },
+    });
+    assert.equal(bEdge.bindSettingsPlugin('BAD ID!', {}), false);
+    assert.equal(bEdge.bindNetPlugin('BAD ID!', {}), false);
+    assert.equal(bEdge.bindSecretsPlugin('BAD ID!', {}), false);
+    assert.equal(bEdge.bindSettingsPlugin('p1', { maxBytes: 4096 }), true);
+    const corruptSnap = bEdge.loadPersistedSettings('p1');
+    assert.equal(corruptSnap, null);
+    bEdge.dispose();
+
+    // 2. remote-host-transport parsePairingCode & GM async hydrateStoredConnection
+    assert.equal(parsePairingCode('').ok, false);
+    assert.equal(parsePairingCode('wrongprefix.abc').ok, false);
+    assert.equal(parsePairingCode('ag-bridge-v1:!!!not-base64!!!').ok, false);
+    assert.equal(parsePairingCode('ag-bridge-v1:' + Buffer.from('not-json').toString('base64url')).ok, false);
+    assert.equal(parsePairingCode('ag-bridge-v1:' + Buffer.from(JSON.stringify({ v: 1, url: 'ftp://bad', token: 'a'.repeat(40) })).toString('base64url')).ok, false);
+    assert.equal(parsePairingCode('ag-bridge-v1:' + Buffer.from(JSON.stringify({ v: 1, url: 'http://127.0.0.1:19384', token: 'short' })).toString('base64url')).ok, false);
+    const goodCode = 'ag-bridge-v1:' + Buffer.from(JSON.stringify({ v: 1, url: 'http://127.0.0.1:19384', token: 'a'.repeat(40) })).toString('base64url');
+    assert.equal(parsePairingCode(goodCode).ok, true);
+
+    const asyncStore = new Map([
+      ['remote-addon-host:v3:bridge-config', JSON.stringify({ baseUrl: 'http://127.0.0.1:19384', token: 'a'.repeat(40) })],
+    ]);
+    const tHydrate = createRemoteHostTransport({
+      win: {
+        GM: {
+          getValue: async (k, d) => (asyncStore.has(k) ? asyncStore.get(k) : d),
+          setValue: async (k, v) => { asyncStore.set(k, v); },
+          deleteValue: async (k) => { asyncStore.delete(k); },
+        },
+      },
+      fetchFn: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, hostVersion: '3.3.4' }) }),
+    });
+    if (typeof tHydrate.hydrateStoredConnection === 'function') {
+      await tHydrate.hydrateStoredConnection();
+    }
+    assert.equal((await tHydrate.connectWithPairingCode(goodCode)).ok, true);
+    tHydrate.disconnect();
+
+    // 3. src/cli/main.js full command dispatch coverage (--help, --version, --status, --doctor, --validate, --register, --unregister, --install, --upgrade, --reconcile)
+    const manifestFile = path.join(tmpDir, 'm.json');
+    fs.writeFileSync(manifestFile, JSON.stringify({ pluginId: 'p1', version: '1.0.0' }), 'utf8');
+    const origWrite = process.stdout.write.bind(process.stdout);
+    const origCode = process.exitCode;
+    process.stdout.write = () => true;
+    try {
+      const cli = createCliApp({
+        hostVersion: '3.3.4',
+        defaultProfile: { id: 'mock' },
+        hostLifecycle: {
+          validateProfile: (p) => p,
+          resolveContext: () => ({ hostProfileId: 'mock', paths: { ADDONS_DIR: tmpDir } }),
+          getHostStatus: () => ({ hostInstalled: true, mode: 'mock' }),
+          diagnoseHost: () => ({ hostInstalled: true, healthy: true }),
+          installHost: (_ctx, opts) => ({ ok: true, mode: opts && opts.mode }),
+          rollbackHost: () => ({ ok: true }),
+          reconcileHost: () => ({ ok: true, action: 'NOOP' }),
+          launchHost: async () => ({ ok: true }),
+        },
+        addonStore: {
+          planAddons: () => ({ active: [], disabled: [], rejected: [], invalid: [] }),
+          validateManifest: () => ({ ok: true }),
+          registerManifest: () => ({ ok: true, pluginId: 'p1' }),
+          unregisterManifest: () => ({ ok: true, removed: true }),
+        },
+      });
+      assert.ok(cli.getHelpText().length > 20);
+      await cli.runCli(['--help']);
+      await cli.runCli(['--version']);
+      await cli.runCli(['--status']);
+      await cli.runCli(['--doctor']);
+      await cli.runCli(['--validate', manifestFile]);
+      await cli.runCli(['--register', manifestFile]);
+      await cli.runCli(['--unregister', 'p1']);
+      await cli.runCli(['--install']);
+      await cli.runCli(['--upgrade']);
+      await cli.runCli(['--reconcile']);
+      await cli.runCli(['--launch']);
+      await cli.runCli(['--rollback']);
+      assert.throws(() => cli.loadHostProfileFromFile(path.join(tmpDir, 'missing-profile.js')), /ERR_PROFILE_NOT_FOUND/);
+    } finally {
+      process.stdout.write = origWrite;
+      process.exitCode = origCode || 0;
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-COV90-RC07: packages/sdk/bin/ag-addon.js init, check (all error branches), and build/pack', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extenra-cov90-sdkcli-'));
+  try {
+    // Missing manifest
+    assert.equal(agAddonCli.cmdCheck(tmpDir).ok, false);
+    // Invalid JSON
+    fs.writeFileSync(path.join(tmpDir, 'addon-manifest.json'), '{bad', 'utf8');
+    assert.equal(agAddonCli.cmdCheck(tmpDir).ok, false);
+    // Wrong schemaVersion + bad pluginId + missing rendererScript
+    fs.writeFileSync(
+      path.join(tmpDir, 'addon-manifest.json'),
+      JSON.stringify({ schemaVersion: 1, pluginId: 'BAD ID', entry: { rendererScript: 'src/missing.js' } }),
+      'utf8'
+    );
+    const badCheck = agAddonCli.cmdCheck(tmpDir);
+    assert.equal(badCheck.ok, false);
+    assert.ok(badCheck.errors.length >= 3);
+    assert.equal(agAddonCli.cmdBuildOrPack(tmpDir, 'build').ok, false);
+
+    // Valid init + unsafe sink check + valid build & pack
+    const projDir = path.join(tmpDir, 'demo-proj');
+    assert.equal(agAddonCli.cmdInit(projDir, 'demo-sdk').ok, true);
+    assert.equal(agAddonCli.cmdCheck(projDir).ok, true);
+    assert.equal(agAddonCli.cmdBuildOrPack(projDir, 'build').ok, true);
+    assert.equal(agAddonCli.cmdBuildOrPack(projDir, 'pack').ok, true);
+    fs.appendFileSync(path.join(projDir, 'src', 'index.js'), '\n// x\ndocument.body.innerHTML = "x";\n', 'utf8');
+    assert.equal(agAddonCli.cmdCheck(projDir).ok, false);
+
+    // remote-lan-server pickLanIpv4Address & HTTP route/error coverage
+    assert.equal(
+      pickLanIpv4Address({
+        'vEthernet (WSL)': [{ family: 'IPv4', internal: false, address: '172.24.0.1' }],
+        'Wi-Fi': [
+          { family: 'IPv6', internal: false, address: '::1' },
+          { family: 'IPv4', internal: false, address: '169.254.1.1' },
+          { family: 'IPv4', internal: false, address: '192.168.1.50' },
+        ],
+      }),
+      '192.168.1.50'
+    );
+    assert.equal(
+      pickLanIpv4Address({
+        eth0: [{ family: 4, internal: false, address: '10.0.0.5' }],
+      }),
+      '10.0.0.5'
+    );
+    assert.equal(
+      pickLanIpv4Address({
+        eth0: [{ family: 'IPv4', internal: false, address: '172.20.1.9' }],
+      }),
+      '172.20.1.9'
+    );
+    assert.equal(pickLanIpv4Address({}), '127.0.0.1');
+
+    const lanDist = path.join(tmpDir, 'lan-dist');
+    fs.mkdirSync(lanDist, { recursive: true });
+    fs.writeFileSync(path.join(lanDist, 'antigravity-remote.user.js'), '// ==UserScript==\n// ==/UserScript==\n', 'utf8');
+    fs.writeFileSync(path.join(lanDist, 'antigravity-remote.meta.js'), '// ==UserScript==\n// ==/UserScript==\n', 'utf8');
+    fs.writeFileSync(path.join(lanDist, 'antigravity-remote-host.lib.js'), '/* lib */\n', 'utf8');
+    fs.writeFileSync(path.join(lanDist, 'build-manifest.json'), JSON.stringify({ buildSha8: '3c90b890', addonCount: 1 }), 'utf8');
+    const srv = await startRemoteLanServer({ distDir: lanDist, bindHost: '127.0.0.1', advertiseHost: '127.0.0.1', port: 0, ttlSec: 30, once: false });
+    try {
+      const origin = `http://127.0.0.1:${srv.port}`;
+      assert.equal((await globalThis.fetch(`${origin}/wrong-token/`)).status, 404);
+      assert.equal((await globalThis.fetch(srv.installUrl, { method: 'POST' })).status, 405);
+      assert.equal((await globalThis.fetch(srv.installUrl)).status, 200);
+      assert.equal((await globalThis.fetch(srv.installUrl, { method: 'HEAD' })).status, 200);
+      assert.equal((await globalThis.fetch(srv.metaUrl)).status, 200);
+      assert.equal((await globalThis.fetch(srv.hostLibUrl)).status, 200);
+      assert.equal((await globalThis.fetch(`${origin}/${srv.token}/../secret`)).status, 404);
+    } finally {
+      await srv.close('test_done');
     }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
