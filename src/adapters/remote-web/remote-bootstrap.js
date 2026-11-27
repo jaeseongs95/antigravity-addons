@@ -208,7 +208,7 @@ function readMountedPlugins(docEl) {
 
 function writeMountedPlugins(docEl, pluginSet) {
   if (!docEl) return;
-  const list = Array.from(pluginSet).filter(Boolean).sort();
+  const list = Array.from(pluginSet).filter(Boolean).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   if (list.length === 0) {
     if (typeof docEl.removeAttribute === 'function') {
       docEl.removeAttribute(MOUNTED_PLUGINS_ATTR);
@@ -580,21 +580,17 @@ const DRAWER_CSS = `
 `;
 
 function generateHostToken(win) {
-  try {
-    const cryptoObj = (win && win.crypto) || (typeof globalThis !== 'undefined' ? globalThis.crypto : null);
-    if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
-      const bytes = new Uint8Array(24);
-      cryptoObj.getRandomValues(bytes);
-      let hex = '';
-      for (let i = 0; i < bytes.length; i += 1) {
-        hex += bytes[i].toString(16).padStart(2, '0');
-      }
-      return `rht-${hex}`;
-    }
-  } catch (_err) {
-    // Fallback token below when WebCrypto is absent in minimal test doubles.
+  const cryptoObj = (win && win.crypto) || (typeof globalThis !== 'undefined' ? globalThis.crypto : null);
+  if (!cryptoObj || typeof cryptoObj.getRandomValues !== 'function') {
+    throw new Error('ERR_WEBCRYPTO_UNAVAILABLE');
   }
-  return `rht-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+  const bytes = new Uint8Array(24);
+  cryptoObj.getRandomValues(bytes);
+  let hex = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return `rht-${hex}`;
 }
 
 function mountFallbackSlotDock(doc, noTranslateAttrs) {
@@ -1098,10 +1094,13 @@ function renderHostBridgePane(doc, container, bridgeStatus, controls, onUpdated)
         testBtn.addEventListener('click', (ev) => {
           if (ev && ev.isTrusted === false) return;
           testBtn.disabled = true;
-          Promise.resolve(controls.ping()).finally(() => {
-            testBtn.disabled = false;
-            if (typeof onUpdated === 'function') onUpdated();
-          });
+          void Promise.resolve()
+            .then(() => controls.ping())
+            .catch(() => null)
+            .then(() => {
+              testBtn.disabled = false;
+              if (typeof onUpdated === 'function') onUpdated();
+            });
         });
         actionRow.appendChild(testBtn);
       }

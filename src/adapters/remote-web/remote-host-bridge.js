@@ -444,7 +444,7 @@ function createRemoteHostBridge({
           }
         }
         if (clean.length > 0) {
-          out[pid] = clean.sort();
+          out[pid] = clean.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         }
       }
     } catch (_err) {}
@@ -491,7 +491,7 @@ function createRemoteHostBridge({
         return { ok: false, reason: 'ERR_NET_USER_HTTPS_HOST_LIMIT_EXCEEDED', hosts: current };
       }
       current.push(check.host);
-      current.sort();
+      current.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     }
     mapObj[pluginId] = current;
     if (!persistAllUserAllowedHttpsHostsMap(mapObj)) {
@@ -956,7 +956,7 @@ function createRemoteHostBridge({
     }
 
     const bucket = getSessionSecretsBucket(pluginId, false);
-    const keys = bucket ? Array.from(bucket.keys()).sort() : [];
+    const keys = bucket ? Array.from(bucket.keys()).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) : [];
     return Promise.resolve({ ok: true, keys, persistence: 'session-memory', reason: null });
   }
 

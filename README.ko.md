@@ -6,7 +6,18 @@
 > **언어**: [English (README.md)](./README.md) | 한국어  
 > *(구 `antigravity-addons` / `antigravity-native-addon-host` — 기존 `addon-host` / `antigravity-addons` CLI 별칭, `ag-addon` SDK 별칭, `ADDON_HOST_LOADER_V2` 패치 마커, `~/.gemini/antigravity` 경로, `ag-bridge-v1:` 페어링 접두어, 원격 번들 파일명 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**Extenra (`v3.2.0`)는 호스트 중앙 관리형 통합 원격 브리지(`ag-bridge-v1:` 한 줄 페어링 코드 + Chrome PNA 프리플라이트 + 앱 내 1클릭 원격 번들 재빌드), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 신뢰 `localLoopback`), 별도 `@extenra/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크입니다.**
+**Extenra (`v3.3.3`)는 호스트 중앙 관리형 통합 원격 브리지(`ag-bridge-v1:` 한 줄 페어링 코드 + Chrome PNA 프리플라이트 + 앱 내 1클릭 원격 번들 재빌드), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 신뢰 `localLoopback`), 별도 `@extenra/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크입니다.**
+
+## v3.3.3 주요 업데이트 (보안·ReDoS·Promise 안전성 강화 및 무의존성 커버리지 연동)
+
+- **보안 및 암호화 난수 강화**:
+  - `src/runtime/renderer/kernel.js`와 `src/adapters/remote-web/remote-bootstrap.js`의 약한 `Math.random()` 토큰·논스 폴백을 제거하고, WebCrypto 미지원 시 `ERR_WEBCRYPTO_UNAVAILABLE`로 fail-closed 처리합니다.
+  - `src/runtime/main/trust-verifier.js`의 문자열 래핑 `vm.runInThisContext` 호출을 Node 표준 `vm.compileFunction`으로 교체했습니다.
+- **신뢰성·결정성 및 선형 시간 파싱 보강**:
+  - 런타임·매니페스트·스타일·전송·빌드 스크립트의 초선형 역추적(ReDoS 취약) 정규식 12건을 선형 시간 `O(n)` 루프와 비중첩 패턴으로 교체했습니다.
+  - 21개 `.sort()` 호출에 로케일 독립 UTF-16 코드 유닛 비교자를 명시해 결정적 정렬을 보장하고, `init-main.js`·`remote-bootstrap.js`·`remote-lan-server.js`·`host-settings-ui.js`의 부유 Promise 20건을 정비했습니다.
+- **무의존성 LCOV 커버리지 연동 및 회귀·실패 경로 시험 확장**:
+  - 신규 패키지 추가 없이 Node.js 내장 `--experimental-test-coverage` 기반 `npm run test:coverage` LCOV 파이프라인을 연동하고, 핵심 정책·분기·SDK `createTestHost`·`preload-bridge` 실패 경로 테스트를 확장(`171`건 통과, `0`건 실패)해 SonarQube MQR 품질 게이트 `OK`(보안·신뢰성·유지보수성·핫스팟 미해결 이슈 `0`건)를 달성했습니다.
 
 ## v3.2.0 주요 업데이트 (프로젝트명 Extenra 변경 · 100% 하위 호환 유지)
 

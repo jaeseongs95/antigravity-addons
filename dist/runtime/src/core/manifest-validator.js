@@ -133,6 +133,15 @@ function normalizePortableSegments(rawPath) {
   return { isAbs, normalized: (isAbs ? '/' : '') + stack.join('/') };
 }
 
+function stripTrailingPathSeparators(rawPath) {
+  const s = String(rawPath || '');
+  let end = s.length;
+  while (end > 0 && (s[end - 1] === '/' || s[end - 1] === '\\')) {
+    end -= 1;
+  }
+  return end === s.length ? s : s.slice(0, end);
+}
+
 function resolveConfinedScriptPath(
   relScript,
   pluginDir,
@@ -153,7 +162,7 @@ function resolveConfinedScriptPath(
     if (isAbs || !normalized || normalized === '..' || normalized.startsWith('../') || normalized.includes('/../')) {
       return { ok: false, reason: 'ERR_ENTRY_ESCAPES_PLUGIN_DIR' };
     }
-    const baseClean = String(pluginDir || '').replace(/[\\/]+$/, '');
+    const baseClean = stripTrailingPathSeparators(pluginDir);
     return { ok: true, resolvedPath: baseClean ? `${baseClean}/${normalized}` : normalized };
   }
 
@@ -542,7 +551,7 @@ function createManifestValidator({ validators = null, fsPort = null } = {}) {
         ? activeFsPort.join(pluginsRootDir, manifest.pluginId)
         : activeFsPort.join('plugins', manifest.pluginId)
       : pluginsRootDir
-        ? `${String(pluginsRootDir).replace(/[\\/]+$/, '')}/${manifest.pluginId}`
+        ? `${stripTrailingPathSeparators(pluginsRootDir)}/${manifest.pluginId}`
         : `plugins/${manifest.pluginId}`;
 
     if (entry.rendererScript && !skippedCapabilities.includes('renderer')) {

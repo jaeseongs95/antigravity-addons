@@ -37,7 +37,7 @@ function loadRawManifestsFromDir(addonsDir) {
   if (!addonsDir || !fs.existsSync(addonsDir)) return entries;
   let names = [];
   try {
-    names = fs.readdirSync(addonsDir).sort();
+    names = fs.readdirSync(addonsDir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   } catch (_err) {
     return entries;
   }
@@ -695,7 +695,9 @@ function createHostRuntimeController(cfg, deps = {}) {
         try {
           const plan = planCurrentAddons();
           const policy = readCurrentPolicy();
-          mainHookRunner.reconcile(plan.active, policy);
+          Promise.resolve(mainHookRunner.reconcile(plan.active, policy)).catch((err) => {
+            recordDiag('error', 'MAIN_READY_RECONCILE_ERR', err && err.message ? err.message : String(err));
+          });
         } catch (err) {
           recordDiag('error', 'MAIN_READY_RECONCILE_ERR', err && err.message ? err.message : String(err));
         }
@@ -704,11 +706,15 @@ function createHostRuntimeController(cfg, deps = {}) {
         });
       });
       app.on('will-quit', () => {
-        remoteBridgeServer.dispose();
+        Promise.resolve(remoteBridgeServer.dispose()).catch((err) => {
+          recordDiag('warn', 'REMOTE_BRIDGE_DISPOSE_ERR', err && err.message ? err.message : String(err));
+        });
         updateSurvivalHook.dispose();
         settingsBridge.dispose();
         portalArbiter.dispose();
-        mainHookRunner.disposeAll();
+        Promise.resolve(mainHookRunner.disposeAll()).catch((err) => {
+          recordDiag('warn', 'MAIN_HOOK_DISPOSE_ERR', err && err.message ? err.message : String(err));
+        });
       });
     }
 
@@ -736,11 +742,14 @@ function createHostRuntimeController(cfg, deps = {}) {
     setRemoteAddonPreference: (pluginId, enabled) => hostAdminService.setRemoteAddonPreference(pluginId, enabled),
     refreshSettingsBridge: () => settingsBridge.refreshNow(),
     dispose: () => {
-      remoteBridgeServer.dispose();
+      const bridgeDone = Promise.resolve(remoteBridgeServer.dispose()).catch((err) => {
+        recordDiag('warn', 'REMOTE_BRIDGE_DISPOSE_ERR', err && err.message ? err.message : String(err));
+      });
       updateSurvivalHook.dispose();
       settingsBridge.dispose();
       portalArbiter.dispose();
-      return mainHookRunner.disposeAll();
+      const hooksDone = Promise.resolve(mainHookRunner.disposeAll());
+      return Promise.all([bridgeDone, hooksDone]).then(([, hookResult]) => hookResult);
     },
   });
 

@@ -783,7 +783,7 @@ function createHostAdminService({
     const remoteEnabledIds = addons
       .filter((a) => a.remoteEnabled)
       .map((a) => a.pluginId)
-      .sort();
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     const remoteBundle = readRemoteBundleStatus(effectiveRemoteDistDir);
     const stalePluginIds = [];
     if (remoteBundle.built) {

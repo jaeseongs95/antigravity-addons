@@ -1,6 +1,6 @@
 {
   "name": "extenra",
-  "version": "3.3.2",
+  "version": "3.3.3",
   "description": "Extenra — Vendor-independent API-First native desktop & remote web addon host framework (AddonManifest v1/v2/v3, 3-Tier AddonContextV3, dual-key net.fetch, zero-dependency staged runtime, Shadow DOM isolation, SHA-256 trust pinning).",
   "license": "MIT",
   "main": "src/index.js",
@@ -18,11 +18,13 @@
     "check:hub": "node scripts/build-hub.js --check",
     "check:solid": "node scripts/check-solid-zero.js",
     "test": "node --test \"test/unit/**/*.test.js\" \"test/e2e/electron-real-runtime.test.js\"",
+    "test:coverage": "node -e \"require('fs').mkdirSync('coverage',{recursive:true})\" && node --test --test-concurrency=2 --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include=\"bin/**\" --test-coverage-include=\"packages/sdk/src/**\" --test-coverage-include=\"packages/sdk/bin/**\" --test-coverage-include=\"scripts/**\" --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \"test/unit/**/*.test.js\" \"test/e2e/electron-real-runtime.test.js\"",
     "test:e2e:remote": "node --test \"test/e2e/v23-remote-web-chromium.test.js\" \"test/e2e/v30-api-first-chromium.test.js\"",
     "test:e2e:isolated": "node scripts/e2e-isolated-runtime.cjs",
     "test:all": "npm run check:solid && npm run check:runtime && npm run check:remote && npm run check:hub && npm test && npm run test:e2e:remote && npm run test:e2e:isolated",
     "status": "node ./bin/addon-host.js --status",
-    "doctor": "node ./bin/addon-host.js --doctor"
+    "doctor": "node ./bin/addon-host.js --doctor",
+    "sonar": "sonar-scanner-npm"
   },
   "engines": {
     "node": ">=20.0.0"

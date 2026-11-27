@@ -361,7 +361,7 @@ function buildHubToDir(targetDir = DEFAULT_HUB_DIR, opts = {}) {
   for (const [rel, content] of Object.entries(files)) {
     fs.writeFileSync(path.join(targetDir, rel), content, 'utf8');
   }
-  return { ok: true, targetDir, files: Object.keys(files).sort() };
+  return { ok: true, targetDir, files: Object.keys(files).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) };
 }
 
 function main() {

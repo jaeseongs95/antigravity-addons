@@ -1798,7 +1798,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     refreshBtn.setAttribute('type', 'button');
     refreshBtn.disabled = isLoading;
     refreshBtn.addEventListener('click', () => {
-      refresh();
+      void refresh();
     });
     actions.appendChild(refreshBtn);
     header.appendChild(actions);
@@ -1980,7 +1980,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
         if (addon.remoteToggleable) {
           switchBtn.addEventListener('click', () => {
-            handleToggleRemote(addon, !addon.remoteEnabled, t);
+            void handleToggleRemote(addon, !addon.remoteEnabled, t);
           });
         }
         toggleRow.appendChild(switchBtn);
@@ -2048,7 +2048,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
       bridgeSwitch.appendChild(createEl('span', 'ah-switch-thumb'));
       bridgeSwitch.addEventListener('click', () => {
         const nextPort = Number(bridgeDraft.port);
-        handleConfigureBridge(
+        void handleConfigureBridge(
           {
             enabled: !rb.enabled,
             bindHost: bridgeDraft.bindHost,
@@ -2123,7 +2123,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
       saveBridgeBtn.disabled = bridgeBusy || typeof hostBridge.configureRemoteBridge !== 'function';
       saveBridgeBtn.addEventListener('click', () => {
         const nextPort = Number(bridgeDraft.port);
-        handleConfigureBridge(
+        void handleConfigureBridge(
           {
             enabled: rb.enabled,
             bindHost: bridgeDraft.bindHost,
@@ -2140,7 +2140,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyPairBtn.setAttribute('type', 'button');
         copyPairBtn.setAttribute('data-ah-bridge-copy-pairing', '1');
         copyPairBtn.addEventListener('click', () => {
-          copyText(rb.pairingCode, copyPairBtn, t);
+          void copyText(rb.pairingCode, copyPairBtn, t);
         });
         bridgeActions.appendChild(copyPairBtn);
       }
@@ -2151,7 +2151,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         rotateBtn.setAttribute('data-ah-bridge-rotate-token', '1');
         rotateBtn.disabled = bridgeBusy;
         rotateBtn.addEventListener('click', () => {
-          handleRotateBridgeToken(t);
+          void handleRotateBridgeToken(t);
         });
         bridgeActions.appendChild(rotateBtn);
       }
@@ -2199,7 +2199,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
       rebuildBtn.setAttribute('data-ah-action', 'rebuild-bundle');
       rebuildBtn.disabled = rebuildBusy;
       rebuildBtn.addEventListener('click', () => {
-        handleRebuildBundle(t);
+        void handleRebuildBundle(t);
       });
       cmdRow.appendChild(rebuildBtn);
     }
@@ -2208,7 +2208,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     copyCmdBtn.setAttribute('type', 'button');
     copyCmdBtn.setAttribute('data-ah-action', 'copy-command');
     copyCmdBtn.addEventListener('click', () => {
-      copyText(buildCmd, copyCmdBtn, t);
+      void copyText(buildCmd, copyCmdBtn, t);
     });
     cmdRow.appendChild(copyCmdBtn);
     syncCard.appendChild(cmdRow);
@@ -2242,7 +2242,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyUserBtn.setAttribute('type', 'button');
         copyUserBtn.setAttribute('data-ah-action', 'copy-userscript-path');
         copyUserBtn.addEventListener('click', () => {
-          copyText(bundle.userscriptPath, copyUserBtn, t);
+          void copyText(bundle.userscriptPath, copyUserBtn, t);
         });
         deliveryRow.appendChild(copyUserBtn);
       }
@@ -2251,7 +2251,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyServeBtn.setAttribute('type', 'button');
         copyServeBtn.setAttribute('data-ah-action', 'copy-serve-command');
         copyServeBtn.addEventListener('click', () => {
-          copyText(bundle.serveCommand, copyServeBtn, t);
+          void copyText(bundle.serveCommand, copyServeBtn, t);
         });
         deliveryRow.appendChild(copyServeBtn);
       }
@@ -2264,7 +2264,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyExtBtn.setAttribute('type', 'button');
         copyExtBtn.setAttribute('data-ah-action', 'copy-extension-path');
         copyExtBtn.addEventListener('click', () => {
-          copyText(bundle.extensionDir, copyExtBtn, t);
+          void copyText(bundle.extensionDir, copyExtBtn, t);
         });
         deliveryRow.appendChild(copyExtBtn);
       }
@@ -2273,7 +2273,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyBmBtn.setAttribute('type', 'button');
         copyBmBtn.setAttribute('data-ah-action', 'copy-bookmarklet');
         copyBmBtn.addEventListener('click', () => {
-          copyText(bundle.bookmarkletText, copyBmBtn, t);
+          void copyText(bundle.bookmarkletText, copyBmBtn, t);
         });
         deliveryRow.appendChild(copyBmBtn);
       }
@@ -2525,7 +2525,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     updateNavVisualState(true, activeTheme);
     updatePluginNavVisualState(null);
     renderPanel();
-    refresh();
+    void refresh();
     return true;
   }
 

@@ -276,7 +276,8 @@ function placeDataBits(grid, finalCodewords) {
   let bitIdx = 0;
   let upward = true;
 
-  for (let right = size - 1; right >= 1; right -= 2) {
+  let right = size - 1;
+  while (right >= 1) {
     if (right === 6) right = 5;
     for (let step = 0; step < size; step += 1) {
       const r = upward ? size - 1 - step : step;
@@ -292,6 +293,7 @@ function placeDataBits(grid, finalCodewords) {
       }
     }
     upward = !upward;
+    right -= 2;
   }
 }
 

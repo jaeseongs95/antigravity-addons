@@ -259,9 +259,11 @@ test('TC-V2-008a (S-1): CSP-safe two-phase staged-handle isolates hostToken from
     );
 
     const { doc, win } = createMockDocAndWin();
+    win.crypto = globalThis.crypto;
     const sandbox = {
       document: doc,
       window: win,
+      crypto: globalThis.crypto,
       console,
       setTimeout,
       clearTimeout,

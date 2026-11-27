@@ -147,7 +147,7 @@ function expandIpv6Groups(rawIp) {
   const nums = [];
   for (let i = 0; i < 8; i += 1) {
     if (!/^[0-9a-f]{1,4}$/.test(groups[i])) return null;
-    nums.push(parseInt(groups[i], 16));
+    nums.push(Number.parseInt(groups[i], 16));
   }
   return nums;
 }

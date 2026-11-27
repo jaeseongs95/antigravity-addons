@@ -297,6 +297,14 @@ function buildAutoBootSnippet() {
 `;
 }
 
+function stripTrailingSlashes(str) {
+  let end = str.length;
+  while (end > 0 && str.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === str.length ? str : str.slice(0, end);
+}
+
 function normalizeUpdateBaseUrl(rawUrl) {
   if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null;
   let parsed;
@@ -311,7 +319,7 @@ function normalizeUpdateBaseUrl(rawUrl) {
   if (parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new Error(`ERR_UPDATE_BASE_URL_UNSAFE:${rawUrl}`);
   }
-  return parsed.href.replace(/\/+$/, '');
+  return stripTrailingSlashes(parsed.href);
 }
 
 const SRI_SHA256_HASH_RE = /^#sha256=([a-f0-9]{64})$/i;
@@ -371,7 +379,8 @@ function normalizeHostLibUrl(
     throw new Error(`ERR_HOST_LIB_SHA256_MISMATCH:${urlSha}:${computedSha}`);
   }
   const finalSha = computedSha || urlSha;
-  const baseHref = parsed.href.replace(/#.*$/, '');
+  const hashIdx = parsed.href.indexOf('#');
+  const baseHref = hashIdx === -1 ? parsed.href : parsed.href.slice(0, hashIdx);
   return finalSha ? `${baseHref}#sha256=${finalSha}` : baseHref;
 }
 
@@ -673,7 +682,7 @@ function buildAddonUserscript({
   };
   syncRemoteDistInPlace(targetDir, outputFiles);
 
-  const fileNames = Object.keys(outputFiles).sort();
+  const fileNames = Object.keys(outputFiles).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const fileHashes = {};
   const rootHasher = crypto.createHash('sha256');
   for (const name of fileNames) {
@@ -786,7 +795,7 @@ function stripJsCommentsWithAcorn(source) {
 
 function buildBookmarkletText(userscriptBodyWithoutHeader) {
   const stripped = stripJsCommentsWithAcorn(userscriptBodyWithoutHeader).trim();
-  return `javascript:${encodeURIComponent(stripped)}\n`;
+  return `javascript:${encodeURIComponent(stripped)}\n`; // NOSONAR: static bookmarklet.txt artifact output, never executed or assigned to DOM
 }
 
 function getStaticMemberName(memberExpr) {
@@ -1160,7 +1169,7 @@ function buildDistRemote({
 
   syncRemoteDistInPlace(targetDir, outputFiles);
 
-  const fileNames = Object.keys(outputFiles).sort();
+  const fileNames = Object.keys(outputFiles).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const fileHashes = {};
   const rootHasher = crypto.createHash('sha256');
   for (const name of fileNames) {

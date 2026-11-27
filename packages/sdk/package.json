@@ -1,6 +1,6 @@
 {
   "name": "@extenra/sdk",
-  "version": "3.3.2",
+  "version": "3.3.3",
   "description": "Extenra Developer SDK, TypeScript types, declarative UI builder h(), Desktop/Remote test host harness, and extenra-addon / ag-addon CLI for AddonManifest.v3 plugins.",
   "license": "MIT",
   "main": "src/index.js",

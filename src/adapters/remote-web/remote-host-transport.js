@@ -110,7 +110,11 @@ function normalizeBridgeBaseUrl(rawUrl) {
   } else if (parsed.protocol !== 'https:') {
     return { ok: false, reason: 'ERR_REMOTE_BRIDGE_HTTPS_REQUIRED' };
   }
-  return { ok: true, baseUrl: parsed.href.replace(/\/+$/, '') };
+  let baseUrl = parsed.href;
+  while (baseUrl.endsWith('/')) {
+    baseUrl = baseUrl.slice(0, -1);
+  }
+  return { ok: true, baseUrl };
 }
 
 function parsePairingCode(rawCode) {

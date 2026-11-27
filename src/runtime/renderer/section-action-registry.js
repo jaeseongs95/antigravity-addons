@@ -118,8 +118,32 @@ function applyShieldAttrs(el, extraNoTranslateAttributes) {
 
 const DEFAULT_LABEL_SELECTORS = 'h1, h2, h3, h4, h5, h6, [role="heading"], button, span, summary';
 const DEFAULT_EXCLUDE_ANCESTORS = ['aside', 'nav', 'pre', 'code', '[contenteditable="true"]'];
-const COUNT_SUFFIX_RE = /\s*(?:\(\s*\d+\s*\)|\d+)$/;
 const MAX_LABEL_TEXT_LEN = 64;
+
+function stripCountSuffix(txt) {
+  let end = txt.length;
+  while (end > 0 && /\s/.test(txt[end - 1])) end -= 1;
+  if (end === 0) return '';
+  if (txt[end - 1] === ')') {
+    let idx = end - 1;
+    while (idx > 0 && /\s/.test(txt[idx - 1])) idx -= 1;
+    const digitsEnd = idx;
+    while (idx > 0 && txt[idx - 1] >= '0' && txt[idx - 1] <= '9') idx -= 1;
+    if (idx < digitsEnd) {
+      while (idx > 0 && /\s/.test(txt[idx - 1])) idx -= 1;
+      if (idx > 0 && txt[idx - 1] === '(') {
+        return txt.slice(0, idx - 1).trim();
+      }
+    }
+    return txt.slice(0, end);
+  }
+  const digitsEnd = end;
+  while (end > 0 && txt[end - 1] >= '0' && txt[end - 1] <= '9') end -= 1;
+  if (end < digitsEnd) {
+    return txt.slice(0, end).trim();
+  }
+  return txt.slice(0, digitsEnd);
+}
 
 function matchesSimpleSelector(el, sel) {
   if (!el || el.nodeType !== 1 || typeof sel !== 'string') return false;
@@ -163,7 +187,7 @@ function matchesHeadingText(rawText, headingTexts, allowCountSuffix) {
   if (!txt || txt.length > MAX_LABEL_TEXT_LEN) return false;
   if (headingTexts.includes(txt)) return true;
   if (allowCountSuffix !== false) {
-    const stripped = txt.replace(COUNT_SUFFIX_RE, '').trim();
+    const stripped = stripCountSuffix(txt);
     if (stripped && headingTexts.includes(stripped)) return true;
   }
   return false;

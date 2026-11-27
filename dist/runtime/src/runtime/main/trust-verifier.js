@@ -129,7 +129,7 @@ function snapshotPluginBundleInMemory(pluginRootDir) {
 
   walk(realRoot);
 
-  const sortedKeys = Array.from(files.keys()).sort();
+  const sortedKeys = Array.from(files.keys()).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const hasher = crypto.createHash('sha256');
   for (const k of sortedKeys) {
     hasher.update(k, 'utf8');
@@ -208,11 +208,13 @@ function executeInMemoryMainHookBundle(snapshot, entryRelPosix) {
     // Trust boundary (SEC-01): executes explicitly SHA-256-approved trusted Node code in Main
     // strictly from the verified in-memory bundle (eliminating post-hash TOCTOU & casual external requires,
     // shadowing `process` as defense-in-depth; full OS process isolation belongs to SidecarBridge in v2.1.0).
-    const wrapper = `(function(exports, require, module, __filename, __dirname, process) {\n${source}\n})`;
-    const fn = vm.runInThisContext(wrapper, {
-      filename: `addon-main-hook://${posixKey}`,
-      displayErrors: true,
-    });
+    const fn = vm.compileFunction(
+      source,
+      ['exports', 'require', 'module', '__filename', '__dirname', 'process'],
+      {
+        filename: `addon-main-hook://${posixKey}`,
+      }
+    );
     const dirname = path.dirname(rec.realPath);
     fn.call(mod.exports, mod.exports, localRequire, mod, rec.realPath, dirname, undefined);
     mod.loaded = true;

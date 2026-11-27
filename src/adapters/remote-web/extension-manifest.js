@@ -126,7 +126,7 @@ function buildExtensionMatchPatterns(allowedOrigins) {
       'MV3 extension requires at least one valid HTTPS match pattern.'
     );
   }
-  return Object.freeze(Array.from(patterns).sort());
+  return Object.freeze(Array.from(patterns).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 function buildMv3ExtensionManifest({

@@ -522,7 +522,7 @@ function readPluginFilesScopeSnapshot(scopeId, hostScope, effectiveMaxBytes, { r
 
   let names;
   try {
-    names = fsImpl.readdirSync(realRoot).sort();
+    names = fsImpl.readdirSync(realRoot).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   } catch (_err) {
     return {
       ok: false,
@@ -831,7 +831,7 @@ function writePrivateBackup(
     const allBaks = fsImpl
       .readdirSync(realBackupDir)
       .filter((n) => n.startsWith(prefix) && n.endsWith('.bak'))
-      .sort()
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
       .reverse();
     for (let i = keepCount; i < allBaks.length; i += 1) {
       const stalePath = path.join(realBackupDir, allBaks[i]);

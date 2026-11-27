@@ -80,7 +80,15 @@ function normalizePublicUrl(rawUrl) {
   } else if (parsed.protocol !== 'https:') {
     return { ok: false, reason: 'ERR_REMOTE_BRIDGE_PUBLIC_URL_MUST_BE_HTTPS' };
   }
-  return { ok: true, value: parsed.href.replace(/\/+$/, '') };
+  return { ok: true, value: stripTrailingSlashes(parsed.href) };
+}
+
+function stripTrailingSlashes(str) {
+  let end = str.length;
+  while (end > 0 && str.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === str.length ? str : str.slice(0, end);
 }
 
 function normalizePort(rawPort, { allowZero = false } = {}) {
@@ -115,7 +123,7 @@ function encodePairingCode({ url, token }) {
   if (typeof url !== 'string' || !url || typeof token !== 'string' || token.length < 32) {
     return null;
   }
-  const payload = JSON.stringify({ v: 1, url: url.replace(/\/+$/, ''), token });
+  const payload = JSON.stringify({ v: 1, url: stripTrailingSlashes(url), token });
   return `${PAIRING_CODE_PREFIX}${Buffer.from(payload, 'utf8').toString('base64url')}`;
 }
 

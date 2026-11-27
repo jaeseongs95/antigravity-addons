@@ -36,7 +36,7 @@ function serializeSafeInlineJson(value) {
 function loadRawManifestsFromDir(addonsDir) {
   const entries = [];
   if (!addonsDir || !fs.existsSync(addonsDir)) return entries;
-  const files = fs.readdirSync(addonsDir).filter((f) => f.endsWith('.json')).sort();
+  const files = fs.readdirSync(addonsDir).filter((f) => f.endsWith('.json')).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   for (const name of files) {
     const full = path.join(addonsDir, name);
     try {

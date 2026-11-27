@@ -607,7 +607,7 @@ function expandIpv6Groups(rawIp) {
   const nums = [];
   for (let i = 0; i < 8; i += 1) {
     if (!/^[0-9a-f]{1,4}$/.test(groups[i])) return null;
-    nums.push(parseInt(groups[i], 16));
+    nums.push(Number.parseInt(groups[i], 16));
   }
   return nums;
 }
@@ -1337,7 +1337,7 @@ function preprocessCssInput(css) {
   return String(css || '')
     .replace(/\r\n/g, '\n')
     .replace(/[\r\f]/g, '\n')
-    .replace(/\u0000/g, '\uFFFD');
+    .replaceAll('\0', '\uFFFD');
 }
 
 function stripCssComments(css, replacement = ' ') {
@@ -1384,7 +1384,7 @@ function decodeCssEscapesRaw(s) {
   return preprocessCssInput(s)
     .replace(/\\\n/g, '')
     .replace(/\\([0-9a-fA-F]{1,6})[ \t\n]?/g, (_m, hex) => {
-      const cp = parseInt(hex, 16);
+      const cp = Number.parseInt(hex, 16);
       if (!Number.isFinite(cp) || cp <= 0 || cp > 0x10ffff) return '';
       try {
         return String.fromCodePoint(cp);
@@ -1441,7 +1441,7 @@ function decodeIdentEscapesForUrlCheck(css) {
     if (ch === '\\') {
       const hexMatch = s.slice(i + 1).match(/^([0-9a-fA-F]{1,6})[ \t\n]?/);
       if (hexMatch) {
-        const cp = parseInt(hexMatch[1], 16);
+        const cp = Number.parseInt(hexMatch[1], 16);
         const decodedCh = Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
         if (/^[a-zA-Z0-9_-]$/.test(decodedCh)) {
           out += decodedCh;
@@ -1578,7 +1578,7 @@ function hasDangerousUnquotedEscape(cssText) {
     if (ch === '\\') {
       const hexMatch = s.slice(i + 1).match(/^([0-9a-fA-F]{1,6})[ \t\n]?/);
       if (hexMatch) {
-        const cp = parseInt(hexMatch[1], 16);
+        const cp = Number.parseInt(hexMatch[1], 16);
         if (!Number.isFinite(cp) || cp <= 0x20 || cp === 0x7f || cp > 0x10ffff) return true;
         const decodedCh = String.fromCodePoint(cp);
         if (DANGEROUS_UNQUOTED_ESCAPED_CHARS.has(decodedCh)) return true;
@@ -1598,35 +1598,40 @@ function hasInvalidUnquotedUrlToken(str) {
   const s = preprocessCssInput(str);
   let quote = null;
   let inComment = false;
-  for (let i = 0; i < s.length; i++) {
+  let i = 0;
+  while (i < s.length) {
     const ch = s[i];
     const next = s[i + 1];
     if (inComment) {
       if (ch === '*' && next === '/') {
         inComment = false;
-        i++;
+        i += 2;
+      } else {
+        i += 1;
       }
       continue;
     }
     if (quote) {
       if (ch === '\\') {
-        i++;
+        i += 2;
         continue;
       }
       if (ch === quote) quote = null;
+      i += 1;
       continue;
     }
     if (ch === '\\') {
-      i++;
+      i += 2;
       continue;
     }
     if (ch === '/' && next === '*') {
       inComment = true;
-      i++;
+      i += 2;
       continue;
     }
     if (ch === '"' || ch === "'") {
       quote = ch;
+      i += 1;
       continue;
     }
     if (
@@ -1638,7 +1643,7 @@ function hasInvalidUnquotedUrlToken(str) {
       while (k < s.length && /\s/.test(s[k])) k++;
       if (k >= s.length) return true;
       if (s[k] === '"' || s[k] === "'") {
-        i += 3;
+        i += 4;
         continue;
       }
       // F4: W3C CSS Syntax L3 §4.3.6 unquoted <url-token> — reject any <bad-url-token> / quote / brace desync chars
@@ -1674,8 +1679,10 @@ function hasInvalidUnquotedUrlToken(str) {
         }
       }
       if (!closed) return true;
-      i = k;
+      i = k + 1;
+      continue;
     }
+    i += 1;
   }
   return false;
 }
@@ -1890,7 +1897,7 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
   if (scope === 'owner') {
     // S-2: Reject backslash escapes inside @-rule identifiers (prevents @\media / @\6d edia scoping bypass)
     const strippedCollapsed = stripCssComments(normalized, '');
-    if (/@[^;{}\s"'()]*\\/.test(strippedSpace) || /@[^;{}\s"'()]*\\/.test(strippedCollapsed)) {
+    if (/@[^@;{}\s"'()]*\\/.test(strippedSpace) || /@[^@;{}\s"'()]*\\/.test(strippedCollapsed)) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_AT_RULE' };
     }
     // Enforce strict lowercased @-rule allowlist (rejects @scope, @property, @starting-style, @font-face, @container, etc.)
@@ -1905,7 +1912,7 @@ function validateSafeCssText(cssText, { scope = 'owner' } = {}) {
       return { ok: false, reason: 'ERR_FORBIDDEN_CSS_SELECTOR' };
     }
     if (
-      /(?:&[^;{}]*[+~]|:\s*has\s*\()/i.test(decoded) ||
+      /(?:&[^&;{}]*[+~]|:\s*has\s*\()/i.test(decoded) ||
       hasForbiddenOwnerNesting(strippedSpace) ||
       hasForbiddenOwnerNesting(decoded)
     ) {
@@ -4140,7 +4147,7 @@ const _SetDelete = Function.prototype.call.bind(Set.prototype.delete);
 const _SetClear = Function.prototype.call.bind(Set.prototype.clear);
 const _SetForEach = Function.prototype.call.bind(Set.prototype.forEach);
 
-const _RGB_COLOR_RE = /^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)$/i;
+const _RGB_COLOR_RE = /^rgba?\(\s*([0-9.]+)(?:\s*,\s*|\s+)([0-9.]+)(?:\s*,\s*|\s+)([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)$/i;
 const HOST_LOCALE_STORAGE_KEY = 'addon-host:settings-ui-lang';
 const _SAFE_LOCALE_RE = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i;
 
@@ -7646,8 +7653,32 @@ function applyShieldAttrs(el, extraNoTranslateAttributes) {
 
 const DEFAULT_LABEL_SELECTORS = 'h1, h2, h3, h4, h5, h6, [role="heading"], button, span, summary';
 const DEFAULT_EXCLUDE_ANCESTORS = ['aside', 'nav', 'pre', 'code', '[contenteditable="true"]'];
-const COUNT_SUFFIX_RE = /\s*(?:\(\s*\d+\s*\)|\d+)$/;
 const MAX_LABEL_TEXT_LEN = 64;
+
+function stripCountSuffix(txt) {
+  let end = txt.length;
+  while (end > 0 && /\s/.test(txt[end - 1])) end -= 1;
+  if (end === 0) return '';
+  if (txt[end - 1] === ')') {
+    let idx = end - 1;
+    while (idx > 0 && /\s/.test(txt[idx - 1])) idx -= 1;
+    const digitsEnd = idx;
+    while (idx > 0 && txt[idx - 1] >= '0' && txt[idx - 1] <= '9') idx -= 1;
+    if (idx < digitsEnd) {
+      while (idx > 0 && /\s/.test(txt[idx - 1])) idx -= 1;
+      if (idx > 0 && txt[idx - 1] === '(') {
+        return txt.slice(0, idx - 1).trim();
+      }
+    }
+    return txt.slice(0, end);
+  }
+  const digitsEnd = end;
+  while (end > 0 && txt[end - 1] >= '0' && txt[end - 1] <= '9') end -= 1;
+  if (end < digitsEnd) {
+    return txt.slice(0, end).trim();
+  }
+  return txt.slice(0, digitsEnd);
+}
 
 function matchesSimpleSelector(el, sel) {
   if (!el || el.nodeType !== 1 || typeof sel !== 'string') return false;
@@ -7691,7 +7722,7 @@ function matchesHeadingText(rawText, headingTexts, allowCountSuffix) {
   if (!txt || txt.length > MAX_LABEL_TEXT_LEN) return false;
   if (headingTexts.includes(txt)) return true;
   if (allowCountSuffix !== false) {
-    const stripped = txt.replace(COUNT_SUFFIX_RE, '').trim();
+    const stripped = stripCountSuffix(txt);
     if (stripped && headingTexts.includes(stripped)) return true;
   }
   return false;
@@ -11493,7 +11524,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     refreshBtn.setAttribute('type', 'button');
     refreshBtn.disabled = isLoading;
     refreshBtn.addEventListener('click', () => {
-      refresh();
+      void refresh();
     });
     actions.appendChild(refreshBtn);
     header.appendChild(actions);
@@ -11675,7 +11706,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
 
         if (addon.remoteToggleable) {
           switchBtn.addEventListener('click', () => {
-            handleToggleRemote(addon, !addon.remoteEnabled, t);
+            void handleToggleRemote(addon, !addon.remoteEnabled, t);
           });
         }
         toggleRow.appendChild(switchBtn);
@@ -11743,7 +11774,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
       bridgeSwitch.appendChild(createEl('span', 'ah-switch-thumb'));
       bridgeSwitch.addEventListener('click', () => {
         const nextPort = Number(bridgeDraft.port);
-        handleConfigureBridge(
+        void handleConfigureBridge(
           {
             enabled: !rb.enabled,
             bindHost: bridgeDraft.bindHost,
@@ -11818,7 +11849,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
       saveBridgeBtn.disabled = bridgeBusy || typeof hostBridge.configureRemoteBridge !== 'function';
       saveBridgeBtn.addEventListener('click', () => {
         const nextPort = Number(bridgeDraft.port);
-        handleConfigureBridge(
+        void handleConfigureBridge(
           {
             enabled: rb.enabled,
             bindHost: bridgeDraft.bindHost,
@@ -11835,7 +11866,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyPairBtn.setAttribute('type', 'button');
         copyPairBtn.setAttribute('data-ah-bridge-copy-pairing', '1');
         copyPairBtn.addEventListener('click', () => {
-          copyText(rb.pairingCode, copyPairBtn, t);
+          void copyText(rb.pairingCode, copyPairBtn, t);
         });
         bridgeActions.appendChild(copyPairBtn);
       }
@@ -11846,7 +11877,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         rotateBtn.setAttribute('data-ah-bridge-rotate-token', '1');
         rotateBtn.disabled = bridgeBusy;
         rotateBtn.addEventListener('click', () => {
-          handleRotateBridgeToken(t);
+          void handleRotateBridgeToken(t);
         });
         bridgeActions.appendChild(rotateBtn);
       }
@@ -11894,7 +11925,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
       rebuildBtn.setAttribute('data-ah-action', 'rebuild-bundle');
       rebuildBtn.disabled = rebuildBusy;
       rebuildBtn.addEventListener('click', () => {
-        handleRebuildBundle(t);
+        void handleRebuildBundle(t);
       });
       cmdRow.appendChild(rebuildBtn);
     }
@@ -11903,7 +11934,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     copyCmdBtn.setAttribute('type', 'button');
     copyCmdBtn.setAttribute('data-ah-action', 'copy-command');
     copyCmdBtn.addEventListener('click', () => {
-      copyText(buildCmd, copyCmdBtn, t);
+      void copyText(buildCmd, copyCmdBtn, t);
     });
     cmdRow.appendChild(copyCmdBtn);
     syncCard.appendChild(cmdRow);
@@ -11937,7 +11968,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyUserBtn.setAttribute('type', 'button');
         copyUserBtn.setAttribute('data-ah-action', 'copy-userscript-path');
         copyUserBtn.addEventListener('click', () => {
-          copyText(bundle.userscriptPath, copyUserBtn, t);
+          void copyText(bundle.userscriptPath, copyUserBtn, t);
         });
         deliveryRow.appendChild(copyUserBtn);
       }
@@ -11946,7 +11977,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyServeBtn.setAttribute('type', 'button');
         copyServeBtn.setAttribute('data-ah-action', 'copy-serve-command');
         copyServeBtn.addEventListener('click', () => {
-          copyText(bundle.serveCommand, copyServeBtn, t);
+          void copyText(bundle.serveCommand, copyServeBtn, t);
         });
         deliveryRow.appendChild(copyServeBtn);
       }
@@ -11959,7 +11990,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyExtBtn.setAttribute('type', 'button');
         copyExtBtn.setAttribute('data-ah-action', 'copy-extension-path');
         copyExtBtn.addEventListener('click', () => {
-          copyText(bundle.extensionDir, copyExtBtn, t);
+          void copyText(bundle.extensionDir, copyExtBtn, t);
         });
         deliveryRow.appendChild(copyExtBtn);
       }
@@ -11968,7 +11999,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
         copyBmBtn.setAttribute('type', 'button');
         copyBmBtn.setAttribute('data-ah-action', 'copy-bookmarklet');
         copyBmBtn.addEventListener('click', () => {
-          copyText(bundle.bookmarkletText, copyBmBtn, t);
+          void copyText(bundle.bookmarkletText, copyBmBtn, t);
         });
         deliveryRow.appendChild(copyBmBtn);
       }
@@ -12220,7 +12251,7 @@ function createHostSettingsUi(doc, win, opts = {}) {
     updateNavVisualState(true, activeTheme);
     updatePluginNavVisualState(null);
     renderPanel();
-    refresh();
+    void refresh();
     return true;
   }
 
@@ -12753,7 +12784,6 @@ const _StringTrim = Function.prototype.call.bind(String.prototype.trim);
 const _ArrayJoin = Function.prototype.call.bind(Array.prototype.join);
 const _MathRound = Math.round;
 const _DateNow = Date.now;
-const _MathRandom = Math.random;
 const _JSONStringify = JSON.stringify;
 const _PromiseResolve = Promise.resolve.bind(Promise);
 const _PromiseReject = Promise.reject.bind(Promise);
@@ -12943,23 +12973,21 @@ function createRendererKernel(doc = globalThis.document, win = globalThis.window
 
   function generateRunNonce() {
     nonceSeq += 1;
-    try {
-      const getRandom =
-        _CryptoGetRandomValues ||
-        (win && win.crypto && typeof win.crypto.getRandomValues === 'function'
-          ? (arr) => win.crypto.getRandomValues(arr)
-          : null);
-      if (getRandom) {
-        const bytes = new _Uint8Array(16);
-        getRandom(bytes);
-        let hex = '';
-        for (let i = 0; i < 16; i++) {
-          hex += _StringPadStart(_NumberToString(bytes[i], 16), 2, '0');
-        }
-        return `rn-${nonceSeq}-${hex}`;
-      }
-    } catch (_e) {}
-    return `rn-${nonceSeq}-${_NumberToString(_DateNow(), 36)}-${_StringSlice(_NumberToString(_MathRandom(), 36), 2)}-${_StringSlice(_NumberToString(_MathRandom(), 36), 2)}`;
+    const getRandom =
+      _CryptoGetRandomValues ||
+      (win && win.crypto && typeof win.crypto.getRandomValues === 'function'
+        ? (arr) => win.crypto.getRandomValues(arr)
+        : null);
+    if (!getRandom) {
+      throw new _Error('ERR_WEBCRYPTO_UNAVAILABLE');
+    }
+    const bytes = new _Uint8Array(16);
+    getRandom(bytes);
+    let hex = '';
+    for (let i = 0; i < 16; i++) {
+      hex += _StringPadStart(_NumberToString(bytes[i], 16), 2, '0');
+    }
+    return `rn-${nonceSeq}-${hex}`;
   }
 
   function assertHostToken(providedToken) {
