@@ -907,6 +907,7 @@ const INLINE_PLUGIN_PANE_CSS = `
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  padding-right: 36px;
   flex-wrap: wrap;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--ag-border, rgba(255, 255, 255, 0.1));

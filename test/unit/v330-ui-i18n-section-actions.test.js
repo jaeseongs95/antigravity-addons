@@ -551,6 +551,15 @@ test('TC-V332-HEADER-LOCALE-06: Settings Page header renders host [한국어|EN]
   assert.equal(inlineOpen.kind, 'inline-settings');
   const sr = inlineOpen.element.shadowRoot;
   assert.ok(sr);
+  // v3.3.4 regression guard: .ag-inline-header must reserve 36px on the right (matching .ah-header)
+  // so the right-aligned [한국어|EN] switcher never overlaps Antigravity's native Settings close (×) button.
+  const inlineStyleEl = sr.querySelector('style');
+  assert.ok(inlineStyleEl, 'Inline Settings ShadowRoot must inject stylesheet');
+  const inlineHeaderRuleMatch = /\.ag-inline-header\s*\{[^}]*\}/.exec(inlineStyleEl.textContent || '');
+  assert.ok(
+    inlineHeaderRuleMatch && /padding-right\s*:\s*36px\b/.test(inlineHeaderRuleMatch[0]),
+    'Inline Settings .ag-inline-header must include padding-right: 36px clearance for native close button'
+  );
   const langGroup = sr.querySelector('[data-addon-host-control="locale-switch"]');
   assert.ok(langGroup, 'Inline Settings header must render host locale switch by default');
   const koBtn = sr.querySelector('[data-addon-host-lang="ko"]');

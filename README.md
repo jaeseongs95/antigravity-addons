@@ -6,7 +6,13 @@
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
 > *(Formerly `antigravity-addons` / `antigravity-native-addon-host` — existing `addon-host` / `antigravity-addons` CLI aliases, `ag-addon` SDK alias, `ADDON_HOST_LOADER_V2` marker, `~/.gemini/antigravity` paths, `ag-bridge-v1:` pairing prefix, remote bundle filenames, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Extenra (`v3.3.3`) is a vendor-independent, API-First native desktop & universal remote web addon host framework with Host-Managed Unified Remote Bridge (`ag-bridge-v1:` 1-line Pairing Code + Chrome PNA preflight + 1-click in-app Remote Bundle rebuild), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + trusted `localLoopback`), separate `@extenra/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+**Extenra (`v3.3.4`) is a vendor-independent, API-First native desktop & universal remote web addon host framework with Host-Managed Unified Remote Bridge (`ag-bridge-v1:` 1-line Pairing Code + Chrome PNA preflight + 1-click in-app Remote Bundle rebuild), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + trusted `localLoopback`), separate `@extenra/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+
+## Key Updates in v3.3.4 (Inline Settings Header Close-Button Clearance Fix)
+
+- **Fix: Inline Plugin Settings Header Clearance (`.ag-inline-header`)**:
+  - Added `padding-right: 36px;` to `.ag-inline-header` in `src/runtime/renderer/host-settings-ui.js` (matching Addon Manager's `.ah-header`) so the host-owned `[ 한국어 | EN ]` header locale switch no longer overlaps Antigravity's native Settings modal close (`×`) button in both standard and compact/canvas inline Settings pages.
+  - Added a regression guard in `test/unit/v330-ui-i18n-section-actions.test.js` (`TC-V332-HEADER-LOCALE-06`).
 
 ## Key Updates in v3.3.3 (Security Hardening, ReDoS/Promise Safety & Zero-Dep Coverage)
 

@@ -6,7 +6,13 @@
 > **언어**: [English (README.md)](./README.md) | 한국어  
 > *(구 `antigravity-addons` / `antigravity-native-addon-host` — 기존 `addon-host` / `antigravity-addons` CLI 별칭, `ag-addon` SDK 별칭, `ADDON_HOST_LOADER_V2` 패치 마커, `~/.gemini/antigravity` 경로, `ag-bridge-v1:` 페어링 접두어, 원격 번들 파일명 및 `antigravity-desktop` / `antigravity-remote-web` 프로필은 100% 하위 호환됩니다.)*
 
-**Extenra (`v3.3.3`)는 호스트 중앙 관리형 통합 원격 브리지(`ag-bridge-v1:` 한 줄 페어링 코드 + Chrome PNA 프리플라이트 + 앱 내 1클릭 원격 번들 재빌드), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 신뢰 `localLoopback`), 별도 `@extenra/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크입니다.**
+**Extenra (`v3.3.4`)는 호스트 중앙 관리형 통합 원격 브리지(`ag-bridge-v1:` 한 줄 페어링 코드 + Chrome PNA 프리플라이트 + 앱 내 1클릭 원격 번들 재빌드), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-메이저 `v2` 하위 호환 어댑터), 이중 키 `net.fetch`(DNS Rebinding 차단 + 신뢰 `localLoopback`), 별도 `@extenra/sdk`, GitHub Pages 1-Click Hub, 데스크톱 자동 업데이트 생존(`--reconcile --handoff`), 무의존성 스테이징 런타임, Shadow DOM 격리 및 SHA-256 신뢰 핀닝을 제공하는 벤더 중립 API-First 데스크톱·원격 웹 애드온 호스트 프레임워크입니다.**
+
+## v3.3.4 주요 업데이트 (인라인 설정 헤더 닫기 버튼 겹침 수정)
+
+- **결함 수정: 인라인 플러그인 설정 헤더 우측 여백 보정 (`.ag-inline-header`)**:
+  - `src/runtime/renderer/host-settings-ui.js`의 `.ag-inline-header`에 Addon Manager(`.ah-header`)와 동일한 `padding-right: 36px;`를 추가해, 일반 및 캔버스(`--compact`) 인라인 플러그인 설정 헤더 우측의 `[ 한국어 | EN ]` 토글이 Antigravity 네이티브 설정 창의 우상단 닫기(`×`) 버튼과 겹치지 않도록 수정했습니다.
+  - `test/unit/v330-ui-i18n-section-actions.test.js` (`TC-V332-HEADER-LOCALE-06`)에 `.ag-inline-header`의 `padding-right: 36px` 회귀 검증을 추가했습니다.
 
 ## v3.3.3 주요 업데이트 (보안·ReDoS·Promise 안전성 강화 및 무의존성 커버리지 연동)
 
