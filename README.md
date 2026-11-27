@@ -6,7 +6,18 @@
 > **Language**: English | [한국어 (README.ko.md)](./README.ko.md)  
 > *(Formerly `antigravity-addons` / `antigravity-native-addon-host` — existing `addon-host` / `antigravity-addons` CLI aliases, `ag-addon` SDK alias, `ADDON_HOST_LOADER_V2` marker, `~/.gemini/antigravity` paths, `ag-bridge-v1:` pairing prefix, remote bundle filenames, and `antigravity-desktop` / `antigravity-remote-web` profiles remain 100% backward-compatible.)*
 
-**Extenra (`v3.2.0`) is a vendor-independent, API-First native desktop & universal remote web addon host framework with Host-Managed Unified Remote Bridge (`ag-bridge-v1:` 1-line Pairing Code + Chrome PNA preflight + 1-click in-app Remote Bundle rebuild), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + trusted `localLoopback`), separate `@extenra/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+**Extenra (`v3.3.3`) is a vendor-independent, API-First native desktop & universal remote web addon host framework with Host-Managed Unified Remote Bridge (`ag-bridge-v1:` 1-line Pairing Code + Chrome PNA preflight + 1-click in-app Remote Bundle rebuild), 3-Tier `AddonContextV3` (`AddonManifest.v3` + 1-major `v2` compatibility adapter), dual-key `net.fetch` (DNS-rebinding protection + trusted `localLoopback`), separate `@extenra/sdk`, GitHub Pages 1-Click Hub, Desktop auto-update survival (`--reconcile --handoff`), zero-dependency staged runtime, Electron 45 sandboxed preload isolation, Shadow DOM UI isolation, and SHA-256 trust pinning.**
+
+## Key Updates in v3.3.3 (Security Hardening, ReDoS/Promise Safety & Zero-Dep Coverage)
+
+- **Security & Cryptographic Hardening**:
+  - Removed weak `Math.random()` token/nonce fallbacks in `src/runtime/renderer/kernel.js` and `src/adapters/remote-web/remote-bootstrap.js`; both now fail closed with `ERR_WEBCRYPTO_UNAVAILABLE` if WebCrypto is unavailable.
+  - Replaced string-wrapped `vm.runInThisContext` in `src/runtime/main/trust-verifier.js` with Node's `vm.compileFunction`.
+- **Reliability, Determinism & Linear-Time Parsing**:
+  - Eliminated 12 super-linear backtracking (ReDoS-prone) regular expressions across runtime, manifest, style, transport, and build scripts in favor of linear-time `O(n)` loops and non-overlapping patterns.
+  - Added explicit locale-independent UTF-16 code-unit comparators across 21 `.sort()` sites for deterministic ordering, and resolved 20 floating Promise paths across `init-main.js`, `remote-bootstrap.js`, `remote-lan-server.js`, and `host-settings-ui.js`.
+- **Zero-Dependency LCOV Coverage & Verification Expansion**:
+  - Wired Node.js built-in `--experimental-test-coverage` LCOV reporting (`npm run test:coverage`) with zero new runtime or dev dependencies, expanded core/branch/SDK/preload regression and failure-path suites (`171` passing tests, `0` failures), and verified SonarQube MQR Quality Gate `OK` (`0` open issues across Security/Reliability/Maintainability/Hotspots).
 
 ## Key Updates in v3.2.0 (Project Rebranding to Extenra — 100% Backward Compatible)
 
