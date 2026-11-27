@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 
 const {
   createRemoteHostBridge,
@@ -252,73 +253,79 @@ test('TC-COV90-RC02: remote-host-transport covers GM_xmlhttpRequest success/HTTP
 test('TC-COV90-RC03: bin/addon-host.js serve-remote (--once & --json/text) and update-reconciler parentPid wait & cancel branches', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extenra-cov90-rc03-'));
   try {
-    // 1. bin/addon-host.js parseServeRemoteArgs & runServeRemoteCommand (--once)
+    // 1. bin/addon-host.js parseServeRemoteArgs & runServeRemoteCommand (--once) via child process (keeps parent TAP stdout clean on Node 22/24)
     const distDir = path.join(tmpDir, 'remote-dist');
     fs.mkdirSync(distDir, { recursive: true });
     fs.writeFileSync(path.join(distDir, 'antigravity-remote.user.js'), '// ==UserScript==\n// ==/UserScript==\n', 'utf8');
     fs.writeFileSync(path.join(distDir, 'build-manifest.json'), JSON.stringify({ buildSha8: '3c90b890', addonCount: 0 }), 'utf8');
+    const binEntry = path.resolve(__dirname, '..', '..', 'bin', 'addon-host.js');
 
-    const origWrite = process.stdout.write.bind(process.stdout);
-    let capturedJson = '';
-    process.stdout.write = (chunk, ...rest) => {
-      capturedJson += String(chunk);
-      return true;
-    };
-    let serveRes;
-    try {
-      const servePromise = addonHostBin.main([
-        '--serve-remote',
-        '--out-dir', distDir,
-        '--bind', '127.0.0.1',
-        '--host', '127.0.0.1',
-        '--port', '0',
-        '--ttl', '15',
-        '--once',
-        '--json',
-      ]);
-      // Wait for JSON output containing userscriptUrl, then fetch it to trigger --once auto-close
-      for (let i = 0; i < 40 && !capturedJson.includes('userscriptUrl'); i += 1) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      const jsonLine = capturedJson.trim().split(/\r?\n/).find((l) => l.includes('userscriptUrl'));
-      assert.ok(jsonLine, 'Expected JSON line containing userscriptUrl');
-      const parsed = JSON.parse(jsonLine);
-      assert.equal(parsed.ok, true);
-      const dl = await globalThis.fetch(parsed.userscriptUrl);
-      assert.equal(dl.status, 200);
-      await dl.text();
-      serveRes = await servePromise;
-    } finally {
-      process.stdout.write = origWrite;
-    }
-    assert.equal(serveRes.ok, true);
+    const runServeOnceChild = (args, readyCheck, extractUrl) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [binEntry, ...args], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        });
+        let out = '';
+        let errOut = '';
+        let fetched = false;
+        const timer = setTimeout(() => {
+          try { child.kill(); } catch (_e) {}
+          reject(new Error(`serve-remote child timeout: out=${out} err=${errOut}`));
+        }, 15000);
+        child.stdout.on('data', (chunk) => {
+          out += chunk.toString('utf8');
+          if (!fetched && readyCheck(out)) {
+            fetched = true;
+            const url = extractUrl(out);
+            Promise.resolve()
+              .then(async () => {
+                const dl = await globalThis.fetch(url);
+                assert.equal(dl.status, 200);
+                await dl.text();
+              })
+              .catch((err) => {
+                clearTimeout(timer);
+                try { child.kill(); } catch (_e) {}
+                reject(err);
+              });
+          }
+        });
+        child.stderr.on('data', (chunk) => {
+          errOut += chunk.toString('utf8');
+        });
+        child.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        child.on('exit', (code) => {
+          clearTimeout(timer);
+          resolve({ code, out, errOut });
+        });
+      });
 
-    // Non-JSON text mode with --once
-    let capturedText = '';
-    process.stdout.write = (chunk) => {
-      capturedText += String(chunk);
-      return true;
-    };
-    try {
-      const p2 = addonHostBin.main([
-        '--serve-remote',
-        '--out-dir', distDir,
-        '--bind', '127.0.0.1',
-        '--port', '0',
-        '--once',
-      ]);
-      for (let i = 0; i < 40 && !capturedText.includes('Direct Userscript URL'); i += 1) {
-        await new Promise((r) => setTimeout(r, 25));
+    const jsonChild = await runServeOnceChild(
+      ['--serve-remote', '--out-dir', distDir, '--bind', '127.0.0.1', '--host', '127.0.0.1', '--port', '0', '--ttl', '15', '--once', '--json'],
+      (s) => s.includes('userscriptUrl'),
+      (s) => {
+        const line = s.trim().split(/\r?\n/).find((l) => l.includes('userscriptUrl'));
+        const parsed = JSON.parse(line);
+        assert.equal(parsed.ok, true);
+        return parsed.userscriptUrl;
       }
-      const m = /Direct Userscript URL\s*:\s*(\S+)/.exec(capturedText);
-      assert.ok(m, 'Serve text output must include Direct Userscript URL');
-      const dl2 = await globalThis.fetch(m[1]);
-      assert.equal(dl2.status, 200);
-      await dl2.text();
-      await p2;
-    } finally {
-      process.stdout.write = origWrite;
-    }
+    );
+    assert.equal(jsonChild.code, 0, jsonChild.errOut);
+
+    const textChild = await runServeOnceChild(
+      ['--serve-remote', '--out-dir', distDir, '--bind', '127.0.0.1', '--port', '0', '--once'],
+      (s) => s.includes('Direct Userscript URL'),
+      (s) => {
+        const m = /Direct Userscript URL\s*:\s*(\S+)/.exec(s);
+        assert.ok(m, 'Serve text output must include Direct Userscript URL');
+        return m[1];
+      }
+    );
+    assert.equal(textChild.code, 0, textChild.errOut);
 
     // 2. update-reconciler parentPid wait + mid-loop cancel + post-ACK cancel
     const ackPath = path.join(tmpDir, 'handoff.ack');
@@ -621,7 +628,11 @@ test('TC-COV90-RC05: remote-host-bridge error/catch paths, update-reconciler pos
     // 3. src/cli/main.js unsupported launch/rollback/unknown flags
     const origWrite = process.stdout.write.bind(process.stdout);
     const origCode = process.exitCode;
-    process.stdout.write = () => true;
+    process.stdout.write = (chunk, ...rest) => {
+      const s = String(chunk);
+      if (/^(?:TAP |# |ok |not ok |  |1\.\.)/.test(s)) return origWrite(chunk, ...rest);
+      return true;
+    };
     try {
       const cli = createCliApp({
         hostVersion: '3.3.4',
@@ -718,7 +729,11 @@ test('TC-COV90-RC06: remote-host-bridge/transport helpers, pairing parser, and f
     fs.writeFileSync(manifestFile, JSON.stringify({ pluginId: 'p1', version: '1.0.0' }), 'utf8');
     const origWrite = process.stdout.write.bind(process.stdout);
     const origCode = process.exitCode;
-    process.stdout.write = () => true;
+    process.stdout.write = (chunk, ...rest) => {
+      const s = String(chunk);
+      if (/^(?:TAP |# |ok |not ok |  |1\.\.)/.test(s)) return origWrite(chunk, ...rest);
+      return true;
+    };
     try {
       const cli = createCliApp({
         hostVersion: '3.3.4',
